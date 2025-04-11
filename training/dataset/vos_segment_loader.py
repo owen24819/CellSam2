@@ -11,7 +11,7 @@ import os
 import numpy as np
 import pandas as pd
 import torch
-
+import tifffile
 from PIL import Image as PILImage
 
 try:
@@ -19,6 +19,25 @@ try:
 except:
     pass
 
+class CTCSegmentLoader:
+    def __init__(self, video_mask_path):
+        self.mask_paths = sorted(list((video_mask_path).glob("*.tif")))
+
+    def load(self, frame_id):
+        """
+        Mimics SAM2 segment loaders by returning a dictionary of binary masks.
+        """
+        mask_path = self.mask_paths[frame_id]
+        mask = tifffile.imread(mask_path)
+
+        instance_ids = np.unique(mask)
+        instance_ids = instance_ids[instance_ids != 0]
+
+        segments = {}
+        for inst_id in instance_ids:
+            segments[int(inst_id)] = torch.from_numpy(mask == inst_id)
+
+        return segments
 
 class JSONSegmentLoader:
     def __init__(self, video_json_path, ann_every=1, frames_fps=24, valid_obj_ids=None):

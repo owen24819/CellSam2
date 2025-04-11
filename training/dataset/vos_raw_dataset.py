@@ -5,14 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import glob
-import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from typing import List, Optional
-
-import pandas as pd
-
+import re
 import torch
 
 from iopath.common.file_io import g_pathmgr
@@ -24,6 +22,7 @@ from training.dataset.vos_segment_loader import (
     MultiplePNGSegmentLoader,
     PalettisedPNGSegmentLoader,
     SA1BSegmentLoader,
+    CTCSegmentLoader
 )
 
 
@@ -52,6 +51,61 @@ class VOSRawDataset:
     def get_video(self, idx):
         raise NotImplementedError()
 
+class CTCRawDataset(VOSRawDataset):
+    def __init__(self,
+                 train_dir, 
+                 file_list_txt=None,
+                 excluded_videos_list_txt=None,
+                 truncate_video=-1,
+                 sample_rate=1):
+        
+        self.train_dir = Path(train_dir)
+
+        self.img_folders = list(self.train_dir.glob("[0-9][0-9]"))
+
+        self.truncate_video = truncate_video
+        self.sample_rate = sample_rate
+
+        # Read the subset defined in file_list_txt
+        if file_list_txt is not None:
+            with g_pathmgr.open(file_list_txt, "r") as f:
+                subset = [os.path.splitext(line.strip())[0] for line in f]
+        else:
+            subset = [img_folder.name for img_folder in self.img_folders]
+
+        # Read and process excluded files if provided
+        if excluded_videos_list_txt is not None:
+            with g_pathmgr.open(excluded_videos_list_txt, "r") as f:
+                excluded_files = [os.path.splitext(line.strip())[0] for line in f]
+        else:
+            excluded_files = []
+
+        # Check if it's not in excluded_files
+        self.video_names = sorted(
+            [video_name for video_name in subset if video_name not in excluded_files]
+        )
+
+    def __len__(self):
+        return len(self.video_names)
+
+    def get_video(self, idx):
+
+        video_name = self.video_names[idx]
+        all_frames = sorted((self.train_dir / video_name).glob("*.tif"))
+
+        if self.truncate_video > 0:
+            all_frames = all_frames[:self.truncate_video]
+
+        frames = []
+        for _, fpath in enumerate(all_frames[:: self.sample_rate]):
+            fid = int(re.findall(r'\d+', fpath.stem)[0])
+            frames.append(VOSFrame(fid, image_path=fpath))
+        video = VOSVideo(video_name, int(video_name), frames)
+
+        video_mask_root = self.train_dir / (video_name + "_GT") / "TRA"
+        segment_loader = CTCSegmentLoader(video_mask_root)
+
+        return video, segment_loader
 
 class PNGRawDataset(VOSRawDataset):
     def __init__(
