@@ -201,9 +201,15 @@ class Trainer:
         set_seeds(seed_value, self.max_epochs, self.distributed_rank)
         log_env_variables()
 
-        assert (
-            is_dist_avail_and_initialized()
-        ), "Torch distributed needs to be initialized before calling the trainer."
+        # assert (
+        #     is_dist_avail_and_initialized()
+        # ), "Torch distributed needs to be initialized before calling the trainer."
+
+        if not is_dist_avail_and_initialized():
+            print("⚠️ Torch distributed not initialized — running in single-process mode.")
+            self.rank = 0
+        else:
+            self.rank = torch.distributed.get_rank()
 
         self._setup_components()  # Except Optimizer everything is setup here.
         self._move_to_device()
@@ -225,7 +231,11 @@ class Trainer:
             barrier()
 
         self.load_checkpoint()
-        self._setup_ddp_distributed_training(distributed, accelerator)
+
+        if accelerator != "cpu":
+            self._setup_ddp_distributed_training(distributed, accelerator)
+        else:
+            print("🧠 Skipping DDP setup — running on CPU without distributed.")
         barrier()
 
     def _setup_timers(self):
@@ -274,9 +284,12 @@ class Trainer:
                 else cuda_conf.allow_tf32
             )
 
-        self.rank = setup_distributed_backend(
-            distributed_conf.backend, distributed_conf.timeout_mins
-        )
+        if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            self.rank = 0  # fallback for CPU-only training
+        else:
+            self.rank = setup_distributed_backend(
+                distributed_conf.backend, distributed_conf.timeout_mins
+            )
 
     def _setup_device(self, accelerator):
         self.local_rank, self.distributed_rank = get_machine_local_and_dist_rank()
@@ -858,7 +871,8 @@ class Trainer:
         # grads will also update a model even if the step doesn't produce
         # gradients
         self.optim.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(
+        with torch.amp.autocast(
+            str(self.device),
             enabled=self.optim_conf.amp.enabled,
             dtype=get_amp_type(self.optim_conf.amp.amp_dtype),
         ):

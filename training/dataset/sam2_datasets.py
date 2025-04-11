@@ -163,8 +163,11 @@ class TorchTrainMixedDataset:
             else:
                 self._set_dataset_epoch(dataset, epoch)
 
-            sampler = DistributedSampler(dataset, shuffle=self.shuffle)
-            sampler.set_epoch(epoch)
+            if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+                sampler = torch.utils.data.RandomSampler(dataset) if self.shuffle else torch.utils.data.SequentialSampler(dataset)
+            else:
+                sampler = DistributedSampler(dataset, shuffle=self.shuffle)
+                sampler.set_epoch(epoch)
 
             batch_sampler = BatchSampler(sampler, batch_size, drop_last=self.drop_last)
             dataloaders.append(
