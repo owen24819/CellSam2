@@ -388,6 +388,8 @@ class SAM2ImagePredictor:
         else:
             concat_points = None
 
+        assert concat_points[0].max() > 1, "point_coords are unnormalized"
+
         # Embed prompts
         if boxes is not None:
             box_coords = boxes.reshape(-1, 2, 2)
