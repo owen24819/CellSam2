@@ -8,8 +8,6 @@
 Transforms and data augmentation for both image + bbox.
 """
 
-import logging
-
 import random
 from typing import Iterable
 
@@ -345,10 +343,6 @@ class RandomAffine:
             if res is not None:
                 return res
 
-        if self.log_warning:
-            logging.warning(
-                f"Skip RandomAffine for zero-area mask in first frame after {self.num_tentatives} tentatives"
-            )
         return datapoint
 
     def transform_datapoint(self, datapoint: VideoDatapoint):
