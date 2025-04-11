@@ -526,3 +526,28 @@ class RandomMosaicVideoAPI:
             )
 
         return datapoint
+
+
+class PadToSquareAPI:
+    def __init__(self, size):
+        self.size = size
+
+    def __call__(self, datapoint, **kwargs):
+        for i in range(len(datapoint.frames)):
+            h, w = datapoint.frames[i].size
+            
+            # Calculate padding
+            pad_h = max(0, self.size - h)
+            pad_w = max(0, self.size - w)
+            
+            # Calculate padding on each side to center the image
+            pad_left = pad_w // 2
+            pad_right = pad_w - pad_left
+            pad_top = pad_h // 2
+            pad_bottom = pad_h - pad_top
+            
+            # Pad on all sides to center the image
+            padding = [pad_left, pad_top, pad_right, pad_bottom]  # left, top, right, bottom
+            datapoint = pad(datapoint, i, padding)
+            
+        return datapoint
