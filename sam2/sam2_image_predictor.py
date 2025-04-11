@@ -14,7 +14,7 @@ from PIL.Image import Image
 
 from sam2.modeling.sam2_base import SAM2Base
 
-from sam2.utils.transforms import SAM2Transforms
+from sam2.utils.transforms import SAM2Transforms, get_resize_longest_side
 
 
 class SAM2ImagePredictor:
@@ -107,6 +107,8 @@ class SAM2ImagePredictor:
         else:
             raise NotImplementedError("Image format not supported")
 
+        # Resize and pad the image to the model's input size
+        self.resized_image_size = get_resize_longest_side(image, self.model.image_size)
         input_image = self._transforms(image)
         input_image = input_image[None, ...].to(self.device)
 
@@ -429,7 +431,7 @@ class SAM2ImagePredictor:
 
         # Upscale the masks to the original image resolution
         masks = self._transforms.postprocess_masks(
-            low_res_masks, self._orig_hw[img_idx]
+            low_res_masks, self._orig_hw[img_idx], self.resized_image_size,
         )
         low_res_masks = torch.clamp(low_res_masks, -32.0, 32.0)
         if not return_logits:

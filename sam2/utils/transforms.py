@@ -5,11 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import warnings
-
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.transforms import Normalize, Resize, ToTensor
+from torchvision.transforms import Normalize, ToTensor
+from PIL import Image
 
 
 class SAM2Transforms(nn.Module):
@@ -27,15 +28,20 @@ class SAM2Transforms(nn.Module):
         self.mean = [0.485, 0.456, 0.406]
         self.std = [0.229, 0.224, 0.225]
         self.to_tensor = ToTensor()
+        
+        # Custom resize and pad function that can't be torchscript-ed
+        self.resize_pad = ResizeLongestSide(resolution)
+        
+        # Only normalize is torchscript-ed now
         self.transforms = torch.jit.script(
             nn.Sequential(
-                Resize((self.resolution, self.resolution)),
                 Normalize(self.mean, self.std),
             )
         )
 
     def __call__(self, x):
         x = self.to_tensor(x)
+        x = self.resize_pad(x)
         return self.transforms(x)
 
     def forward_batch(self, img_list):
@@ -73,7 +79,7 @@ class SAM2Transforms(nn.Module):
         boxes = self.transform_coords(boxes.reshape(-1, 2, 2), normalize, orig_hw)
         return boxes
 
-    def postprocess_masks(self, masks: torch.Tensor, orig_hw) -> torch.Tensor:
+    def postprocess_masks(self, masks: torch.Tensor, orig_hw, resized_image_size) -> torch.Tensor:
         """
         Perform PostProcessing on output masks.
         """
@@ -114,5 +120,55 @@ class SAM2Transforms(nn.Module):
             )
             masks = input_masks
 
+        h, w = masks.shape[-2:]
+        masks = F.interpolate(masks, (h*4, w*4), mode="bilinear", align_corners=False)
+        
+        # Get the dimensions from resized_image_size
+        new_h, new_w = resized_image_size
+        
+        # Calculate padding offsets to crop from the center
+        h_total = h * 4
+        w_total = w * 4
+        h_offset = (h_total - new_h) // 2
+        w_offset = (w_total - new_w) // 2
+        
+        # Remove padding by cropping from the center
+        masks = masks[..., h_offset:h_offset + new_h, w_offset:w_offset + new_w]
+        
+        # Finally resize to original image dimensions
         masks = F.interpolate(masks, orig_hw, mode="bilinear", align_corners=False)
         return masks
+
+def get_resize_longest_side(x, target_length):
+    if isinstance(x, np.ndarray):
+        h, w = x.shape[:2]
+    elif isinstance(x, torch.Tensor):
+        h, w = x.shape[-2:]
+    elif isinstance(x, Image.Image):
+        w, h = x.size  
+    else:
+        raise ValueError(f"Unsupported input type: {type(x)}")
+    scale = target_length / max(h, w)
+    new_h = int(h * scale)
+    new_w = int(w * scale)
+    return new_h, new_w
+
+class ResizeLongestSide(nn.Module):
+    def __init__(self, target_length):
+        super().__init__()
+        self.target_length = target_length
+
+    def forward(self, x):
+        new_h, new_w = get_resize_longest_side(x, self.target_length)
+        # Resize
+        x = F.interpolate(x.unsqueeze(0), size=(new_h, new_w), mode='bilinear', align_corners=False).squeeze(0)
+        
+        # Pad
+        pad_h = self.target_length - new_h
+        pad_w = self.target_length - new_w
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+        
+        return F.pad(x, (pad_left, pad_right, pad_top, pad_bottom))
