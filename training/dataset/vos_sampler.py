@@ -33,10 +33,12 @@ class RandomUniformSampler(VOSSampler):
         self,
         num_frames,
         max_num_objects,
+        max_num_bkgd_objects,
         reverse_time_prob=0.0,
     ):
         self.num_frames = num_frames
         self.max_num_objects = max_num_objects
+        self.max_num_bkgd_objects = max_num_bkgd_objects
         self.reverse_time_prob = reverse_time_prob
 
     def sample(self, video, segment_loader, epoch=None):
@@ -62,20 +64,30 @@ class RandomUniformSampler(VOSSampler):
                 for object_id, segment in segment_loader.load(
                     frames[0].frame_idx
                 ).items():
-                    if segment.sum():
+                    if segment.sum() and object_id != 'bkgd_mask':
                         visible_object_ids.append(object_id)
 
-            # First frame needs to have at least a target to track
+            object_ids = random.sample(
+                visible_object_ids,
+                min(len(visible_object_ids), self.max_num_objects),
+            )
             if len(visible_object_ids) > 0:
-                break
-            if retry >= MAX_RETRIES - 1:
-                raise Exception("No visible objects")
+                max_num_bkgd_points = min(self.max_num_objects - len(object_ids), self.max_num_bkgd_objects)
+                # Randomly select a number between 0 and max_num_fp_points
+                num_bkgd_points = random.randint(0, max_num_bkgd_points)
+            else:
+                object_ids = []
+                num_bkgd_points = self.max_num_bkgd_objects
+                assert self.num_frames == 1, "Will need to rethink this for tracking multiple frames"
 
-        object_ids = random.sample(
-            visible_object_ids,
-            min(len(visible_object_ids), self.max_num_objects),
-        )
-        return SampledFramesAndObjects(frames=frames, object_ids=object_ids)
+            # Generate FP object IDs starting after max visible ID
+            bkgd_object_ids = list(range(-1, -1 - num_bkgd_points, -1))  # e.g. [-1, -2, -3, ...]
+
+            all_object_ids = object_ids + bkgd_object_ids
+
+            return SampledFramesAndObjects(frames=frames, object_ids=all_object_ids)
+
+        raise Exception("Exceeded MAX_RETRIES in RandomUniformSampler")
 
 
 class EvalSampler(VOSSampler):

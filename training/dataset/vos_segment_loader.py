@@ -13,6 +13,7 @@ import pandas as pd
 import torch
 import tifffile
 from PIL import Image as PILImage
+import cv2
 
 try:
     from pycocotools import mask as mask_utils
@@ -36,6 +37,11 @@ class CTCSegmentLoader:
         segments = {}
         for inst_id in instance_ids:
             segments[int(inst_id)] = torch.from_numpy(mask == inst_id)
+
+        # Dilate background mask to avoid points touching objects to ensure there is no confusion between FPs being interpreted as objects
+        kernel = np.ones((3,3), np.uint8)
+        bkgd_mask_dilated = cv2.erode((mask == 0).astype(np.uint8), kernel, iterations=2) # Erode background = dilate objects
+        segments['bkgd_mask'] = torch.from_numpy(bkgd_mask_dilated.astype(bool))
 
         return segments
 

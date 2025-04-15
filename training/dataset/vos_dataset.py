@@ -122,6 +122,15 @@ class VOSDataset(VisionDataset):
                         segment=segment,
                     )
                 )
+
+            images[frame_idx].objects.append(
+                Object(
+                    object_id=-1000,
+                    frame_index=frame.frame_idx,
+                    segment=segments['bkgd_mask'],
+                )
+            )
+            
         return VideoDatapoint(
             frames=images,
             video_id=video.video_id,

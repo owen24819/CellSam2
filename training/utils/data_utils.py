@@ -48,7 +48,7 @@ class BatchedVideoDatapoint:
     obj_to_frame_idx: torch.IntTensor
     masks: torch.BoolTensor
     metadata: BatchedVideoMetaData
-
+    bkgd_masks: torch.BoolTensor
     dict_key: str
 
     def pin_memory(self, device=None):
@@ -125,7 +125,7 @@ def collate_fn(
         img_batch += [torch.stack([frame.data for frame in video.frames], dim=0)]
 
     img_batch = torch.stack(img_batch, dim=0).permute((1, 0, 2, 3, 4))
-    T = img_batch.shape[0]
+    T,B,_,H,W = img_batch.shape
     # Prepare data structures for sequential processing. Per-frame processing but batched across videos.
     step_t_objects_identifier = [[] for _ in range(T)]
     step_t_frame_orig_size = [[] for _ in range(T)]
@@ -135,12 +135,17 @@ def collate_fn(
         [] for _ in range(T)
     ]  # List to store frame indices for each time step
 
+    bkgd_masks = torch.zeros(T,B,H,W,device=img_batch.device)
+
     for video_idx, video in enumerate(batch):
         orig_video_id = video.video_id
         orig_frame_size = video.size
         for t, frame in enumerate(video.frames):
             objects = frame.objects
             for obj in objects:
+                if obj.object_id == -1000:
+                    bkgd_masks[t,video_idx] += obj.segment
+                    continue
                 orig_obj_id = obj.object_id
                 orig_frame_idx = obj.frame_index
                 step_t_obj_to_frame_idx[t].append(
@@ -174,6 +179,7 @@ def collate_fn(
             unique_objects_identifier=objects_identifier,
             frame_orig_size=frame_orig_size,
         ),
+        bkgd_masks=bkgd_masks,
         dict_key=dict_key,
         batch_size=[T],
     )
