@@ -13,7 +13,8 @@ class SAM2AutomaticCellSegmenter:
         model: SAM2Base,
         points_per_side: int = 32,
         points_per_batch: int = 32,
-        pred_iou_thresh: float = 0.8,
+        obj_score_thresh: float = 0.5,
+        pred_iou_thresh: float = 0.7,
         stability_score_thresh: float = 0,# 0.95,
         stability_score_offset: float = 1.0,
         mask_threshold: float = 0.0,
@@ -125,6 +126,7 @@ class SAM2AutomaticCellSegmenter:
                 "predicted_iou": mask_data["iou_preds"][idx].item(),
                 "point_coords": [mask_data["points"][idx].tolist()],
                 "stability_score": mask_data["stability_score"][idx].item(),
+                "obj_score": mask_data["obj_scores"][idx].item(),
             }
             curr_anns.append(ann)
 
@@ -178,7 +180,7 @@ class SAM2AutomaticCellSegmenter:
         normalize=False,
     ) -> MaskData:
 
-        masks, iou_preds, low_res_masks = self.predictor._predict(
+        masks, iou_preds, low_res_masks, obj_scores = self.predictor._predict(
             points,
             labels,
             multimask_output=self.multimask_output,
@@ -191,6 +193,7 @@ class SAM2AutomaticCellSegmenter:
             iou_preds=iou_preds.flatten(0, 1),
             points=points.repeat_interleave(masks.shape[1], dim=0),
             low_res_masks=low_res_masks.flatten(0, 1),
+            obj_scores=obj_scores.flatten(0, 1),
         )
         del masks
 
@@ -214,11 +217,12 @@ class SAM2AutomaticCellSegmenter:
             labels = torch.ones(
                 in_points.shape[0], dtype=torch.int, device=in_points.device
             )
-            masks, ious = self.refine_with_m2m(
+            masks, ious, obj_scores = self.refine_with_m2m(
                 in_points, labels, data["low_res_masks"], self.points_per_batch
             )
             data["masks"] = masks.squeeze(1)
             data["iou_preds"] = ious.squeeze(1)
+            data["obj_scores"] = obj_scores.squeeze(1)
 
             if self.pred_iou_thresh > 0.0:
                 keep_mask = data["iou_preds"] > self.pred_iou_thresh
@@ -240,6 +244,31 @@ class SAM2AutomaticCellSegmenter:
         del data["masks"]
 
         return data
+    
+    def refine_with_m2m(self, points, point_labels, low_res_masks, points_per_batch):
+        new_masks = []
+        new_iou_preds = []
+        new_obj_scores = []
+
+        for cur_points, cur_point_labels, low_res_mask in batch_iterator(
+            points_per_batch, points, point_labels, low_res_masks
+        ):
+            best_masks, best_iou_preds, _, obj_scores = self.predictor._predict(
+                cur_points,
+                cur_point_labels[:, None],
+                mask_input=low_res_mask[:, None, :],
+                multimask_output=False,
+                return_logits=True,
+            )
+            new_masks.append(best_masks)
+            new_iou_preds.append(best_iou_preds)
+            new_obj_scores.append(obj_scores)
+
+        masks = torch.cat(new_masks, dim=0)
+        iou_preds = torch.cat(new_iou_preds, dim=0)
+        obj_scores = torch.cat(new_obj_scores, dim=0)
+
+        return masks, iou_preds, obj_scores
 
     def generate_proportional_point_grid(self):
         """

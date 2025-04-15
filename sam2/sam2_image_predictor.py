@@ -242,7 +242,7 @@ class SAM2ImagePredictor:
         multimask_output: bool = True,
         return_logits: bool = False,
         normalize_coords=True,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Predict masks for the given input prompts, using the currently set image.
 
@@ -275,6 +275,8 @@ class SAM2ImagePredictor:
           (np.ndarray): An array of shape CxHxW, where C is the number
             of masks and H=W=256. These low resolution logits can be passed to
             a subsequent iteration as mask input.
+          (np.ndarray): An array of length C containing the model's
+            predictions for the object score of each mask.
         """
         if not self._is_image_set:
             raise RuntimeError(
@@ -287,7 +289,7 @@ class SAM2ImagePredictor:
             point_coords, point_labels, box, mask_input, normalize_coords
         )
 
-        masks, iou_predictions, low_res_masks = self._predict(
+        masks, iou_predictions, low_res_masks, obj_scores = self._predict(
             unnorm_coords,
             labels,
             unnorm_box,
@@ -299,7 +301,8 @@ class SAM2ImagePredictor:
         masks_np = masks.squeeze(0).float().detach().cpu().numpy()
         iou_predictions_np = iou_predictions.squeeze(0).float().detach().cpu().numpy()
         low_res_masks_np = low_res_masks.squeeze(0).float().detach().cpu().numpy()
-        return masks_np, iou_predictions_np, low_res_masks_np
+        obj_scores_np = obj_scores.squeeze(0).float().detach().cpu().numpy()
+        return masks_np, iou_predictions_np, low_res_masks_np, obj_scores_np
 
     def _prep_prompts(
         self, point_coords, point_labels, box, mask_logits, normalize_coords, img_idx=-1
@@ -342,7 +345,7 @@ class SAM2ImagePredictor:
         multimask_output: bool = True,
         return_logits: bool = False,
         img_idx: int = -1,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Predict masks for the given input prompts, using the currently set image.
         Input prompts are batched torch tensors and are expected to already be
@@ -377,6 +380,8 @@ class SAM2ImagePredictor:
           (torch.Tensor): An array of shape BxCxHxW, where C is the number
             of masks and H=W=256. These low res logits can be passed to
             a subsequent iteration as mask input.
+          (torch.Tensor): An array of length C containing the model's
+            predictions for the object score of each mask.
         """
         if not self._is_image_set:
             raise RuntimeError(
@@ -418,7 +423,7 @@ class SAM2ImagePredictor:
             feat_level[img_idx].unsqueeze(0)
             for feat_level in self._features["high_res_feats"]
         ]
-        low_res_masks, iou_predictions, _, _ = self.model.sam_mask_decoder(
+        low_res_masks, iou_predictions, _, obj_scores= self.model.sam_mask_decoder(
             image_embeddings=self._features["image_embed"][img_idx].unsqueeze(0),
             image_pe=self.model.sam_prompt_encoder.get_dense_pe(),
             sparse_prompt_embeddings=sparse_embeddings,
@@ -436,7 +441,7 @@ class SAM2ImagePredictor:
         if not return_logits:
             masks = masks > self.mask_threshold
 
-        return masks, iou_predictions, low_res_masks
+        return masks, iou_predictions, low_res_masks, obj_scores
 
     def get_image_embedding(self) -> torch.Tensor:
         """

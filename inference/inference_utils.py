@@ -37,7 +37,7 @@ def display_masks(image, masks):
     plt.axis('off')
     plt.show() 
 
-def show_anns(anns, borders=True):
+def show_anns(anns, borders=True, mask_alpha=0.1):
     if len(anns) == 0:
         return
     sorted_anns = sorted(anns, key=(lambda x: x['area']), reverse=True)
@@ -48,13 +48,24 @@ def show_anns(anns, borders=True):
     img[:, :, 3] = 0
     for ann in sorted_anns:
         m = ann['segmentation']
-        color_mask = np.concatenate([np.random.random(3), [0.3]])
+        color_mask = np.concatenate([np.random.random(3), [mask_alpha]])
         img[m] = color_mask 
         if borders:
             import cv2
             contours, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE) 
             # Try to smooth contours
             contours = [cv2.approxPolyDP(contour, epsilon=0.01, closed=True) for contour in contours]
-            cv2.drawContours(img, contours, -1, (0, 0, 1, 0.4), thickness=1) 
+            cv2.drawContours(img, contours, -1, (0, 0, 1, 0.4), thickness=1)
+            
+            # Add IoU prediction text
+            # Get centroid of the largest contour to place text
+            M = cv2.moments(contours[0])
+            if M['m00'] != 0:
+                cx = int(M['m10'] / M['m00'])
+                cy = int(M['m01'] / M['m00'])
+                # Add text with IoU value
+                plt.text(cx, cy, f'IoU: {ann["predicted_iou"]:.2f}\nObj Score: {ann["obj_score"]:.2f}\nStability: {ann["stability_score"]:.2f}', 
+                        color='white', fontsize=8, 
+                        bbox=dict(facecolor='black', alpha=0.5))
 
     ax.imshow(img)
