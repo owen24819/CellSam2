@@ -10,12 +10,7 @@ import numpy as np
 import torch
 import torch.distributed
 from sam2.modeling.sam2_base import SAM2Base
-from sam2.modeling.sam2_utils import (
-    get_1d_sine_pe,
-    get_next_point,
-    sample_box_points,
-    select_closest_cond_frames,
-)
+from sam2.modeling.sam2_utils import get_next_point, sample_box_points
 
 from sam2.utils.misc import concat_points
 
@@ -225,9 +220,12 @@ class SAM2Train(SAM2Base):
             if not use_pt_input:
                 backbone_out["mask_inputs_per_frame"][t] = gt_masks_per_frame[t]
             else:
+                # Check if there are any bkgd points in the initial conditioning frame
+                indices_t = input.obj_to_frame_idx[:,:,0] == t
+                is_bkgd_mask = input.metadata.unique_objects_identifier[indices_t][:,1] < 0
                 # During training # P(box) = prob_to_use_pt_input * prob_to_use_box_input
                 use_box_input = self.rng.random() < prob_to_use_box_input
-                if use_box_input:
+                if use_box_input and is_bkgd_mask.sum() == 0: # Only sample box points if there are no bkgd points
                     points, labels = sample_box_points(
                         gt_masks_per_frame[t],
                     )
@@ -237,10 +235,10 @@ class SAM2Train(SAM2Base):
                     points, labels = get_next_point(
                         gt_masks=gt_masks_per_frame[t],
                         pred_masks=None,
-                        method=(
-                            "uniform" if self.training else self.pt_sampling_for_eval
-                        ),
-                    )
+                        method="uniform" if self.training else self.pt_sampling_for_eval,
+                        is_bkgd_mask=is_bkgd_mask,
+                        bkgd_mask=input.bkgd_masks[t]
+                        )
 
                 point_inputs = {"point_coords": points, "point_labels": labels}
                 backbone_out["point_inputs_per_frame"][t] = point_inputs
@@ -312,6 +310,9 @@ class SAM2Train(SAM2Base):
                     input.flat_img_batch, img_ids
                 )
 
+            indices_t = input.obj_to_frame_idx[:,:,0] == stage_id
+            is_bkgd_mask = input.metadata.unique_objects_identifier[indices_t][:,1] < 0
+
             # Get output masks based on this frame's prompts and previous memory
             current_out = self.track_step(
                 frame_idx=stage_id,
@@ -325,12 +326,14 @@ class SAM2Train(SAM2Base):
                 frames_to_add_correction_pt=frames_to_add_correction_pt,
                 output_dict=output_dict,
                 num_frames=num_frames,
-            )
+                is_bkgd_mask=is_bkgd_mask,
+                )
             # Append the output, depending on whether it's a conditioning frame
             add_output_as_cond_frame = stage_id in init_cond_frames or (
                 self.add_all_frames_to_correct_as_cond
                 and stage_id in frames_to_add_correction_pt
             )
+
             if add_output_as_cond_frame:
                 output_dict["cond_frame_outputs"][stage_id] = current_out
             else:
@@ -347,6 +350,8 @@ class SAM2Train(SAM2Base):
         all_frame_outputs = [
             {k: v for k, v in d.items() if k != "obj_ptr"} for d in all_frame_outputs
         ]
+
+        all_frame_outputs[0]["is_bkgd_mask"] = is_bkgd_mask 
 
         return all_frame_outputs
 
@@ -366,6 +371,7 @@ class SAM2Train(SAM2Base):
         prev_sam_mask_logits=None,  # The previously predicted SAM mask logits.
         frames_to_add_correction_pt=None,
         gt_masks=None,
+        is_bkgd_mask=None,
     ):
         if frames_to_add_correction_pt is None:
             frames_to_add_correction_pt = []
@@ -416,16 +422,21 @@ class SAM2Train(SAM2Base):
                 high_res_masks,
                 object_score_logits,
                 current_out,
-            )
-            (
-                _,
-                _,
-                _,
-                low_res_masks,
-                high_res_masks,
                 obj_ptr,
-                object_score_logits,
-            ) = final_sam_outputs
+                is_bkgd_mask,
+            )
+
+            # If there are only bkgd points, we don't run iterative point sampling
+            if final_sam_outputs is not None:
+                (
+                    _,
+                    _,
+                    _,
+                    low_res_masks,
+                    high_res_masks,
+                    obj_ptr,
+                    object_score_logits,
+                ) = final_sam_outputs
 
         # Use the final prediction (after all correction steps for output and eval)
         current_out["pred_masks"] = low_res_masks
@@ -459,6 +470,8 @@ class SAM2Train(SAM2Base):
         high_res_masks,
         object_score_logits,
         current_out,
+        obj_ptr,
+        is_bkgd_mask,
     ):
 
         assert gt_masks is not None
@@ -469,6 +482,24 @@ class SAM2Train(SAM2Base):
         all_pred_ious = [ious]
         all_point_inputs = [point_inputs]
         all_object_score_logits = [object_score_logits]
+
+        # Store initial background points if they exist
+        is_object_mask = ~is_bkgd_mask
+        # Only perform iterative sampling on real objects
+        if is_object_mask.sum() == 0:
+            return all_point_inputs, None
+
+        foreground_points = {
+            'point_coords': point_inputs['point_coords'][is_object_mask],
+            'point_labels': point_inputs['point_labels'][is_object_mask],
+        }
+
+        foreground_high_res_masks = high_res_masks[is_object_mask]
+        foreground_low_res_masks = low_res_masks[is_object_mask]
+
+        gt_masks_objects = gt_masks[is_object_mask]
+        iter_is_bkgd_mask = is_bkgd_mask[is_object_mask]
+
         for _ in range(self.num_correction_pt_per_frame):
             # sample a new point from the error between prediction and ground-truth
             # (with a small probability, directly sample from GT masks instead of errors)
@@ -479,63 +510,82 @@ class SAM2Train(SAM2Base):
             else:
                 sample_from_gt = False
             # if `pred_for_new_pt` is None, only GT masks will be used for point sampling
-            pred_for_new_pt = None if sample_from_gt else (high_res_masks > 0)
+            pred_for_new_pt = None if sample_from_gt else (foreground_high_res_masks > 0)
             new_points, new_labels = get_next_point(
-                gt_masks=gt_masks,
+                gt_masks=gt_masks_objects,
                 pred_masks=pred_for_new_pt,
                 method="uniform" if self.training else self.pt_sampling_for_eval,
+                is_bkgd_mask=iter_is_bkgd_mask,
             )
-            point_inputs = concat_points(point_inputs, new_points, new_labels)
+
+            foreground_point_inputs = concat_points(foreground_points, new_points, new_labels)
+
             # Feed the mask logits of the previous SAM outputs in the next SAM decoder step.
             # For tracking, this means that when the user adds a correction click, we also feed
             # the tracking output mask logits along with the click as input to the SAM decoder.
-            mask_inputs = low_res_masks
-            multimask_output = self._use_multimask(is_init_cond_frame, point_inputs)
+            mask_inputs = foreground_low_res_masks
+            multimask_output = self._use_multimask(is_init_cond_frame, foreground_point_inputs)
             if self.use_act_ckpt_iterative_pt_sampling and not multimask_output:
                 sam_outputs = torch.utils.checkpoint.checkpoint(
                     self._forward_sam_heads,
-                    backbone_features=pix_feat_with_mem,
-                    point_inputs=point_inputs,
+                    backbone_features=pix_feat_with_mem[is_object_mask],
+                    point_inputs=foreground_point_inputs,
                     mask_inputs=mask_inputs,
-                    high_res_features=high_res_features,
+                    high_res_features=[high_res_feature[is_object_mask] for high_res_feature in high_res_features],
                     multimask_output=multimask_output,
                     use_reentrant=False,
                 )
             else:
                 sam_outputs = self._forward_sam_heads(
-                    backbone_features=pix_feat_with_mem,
-                    point_inputs=point_inputs,
+                    backbone_features=pix_feat_with_mem[is_object_mask],
+                    point_inputs=foreground_point_inputs,
                     mask_inputs=mask_inputs,
-                    high_res_features=high_res_features,
+                    high_res_features=[high_res_feature[is_object_mask] for high_res_feature in high_res_features],
                     multimask_output=multimask_output,
                 )
             (
-                low_res_multimasks,
-                high_res_multimasks,
-                ious,
-                low_res_masks,
-                high_res_masks,
+                foreground_low_res_multimasks,
+                foreground_high_res_multimasks,
+                foreground_ious,
+                foreground_low_res_masks,
+                foreground_high_res_masks,
                 _,
-                object_score_logits,
+                foreground_object_score_logits,
             ) = sam_outputs
-            all_pred_masks.append(low_res_masks)
-            all_pred_high_res_masks.append(high_res_masks)
-            all_pred_multimasks.append(low_res_multimasks)
-            all_pred_high_res_multimasks.append(high_res_multimasks)
-            all_pred_ious.append(ious)
-            all_point_inputs.append(point_inputs)
-            all_object_score_logits.append(object_score_logits)
+            all_pred_multimasks.append(foreground_low_res_multimasks)
+            all_pred_high_res_multimasks.append(foreground_high_res_multimasks)
+            all_pred_ious.append(foreground_ious)
+            all_pred_masks.append(foreground_low_res_masks)
+            all_pred_high_res_masks.append(foreground_high_res_masks)
+            all_point_inputs.append(foreground_point_inputs)
+            all_object_score_logits.append(foreground_object_score_logits)
+
+        if is_bkgd_mask.sum() > 0:
+            # Convert tuple to list to allow modification
+            sam_outputs = list(sam_outputs)
+            if multimask_output:
+                where_top_pred_TN = all_pred_ious[0][is_bkgd_mask].argmax(0)[:1]
+            else:
+                where_top_pred_TN = [0]
+            sam_outputs[0] = torch.cat([sam_outputs[0], all_pred_multimasks[0][is_bkgd_mask,where_top_pred_TN]], dim=0)
+            sam_outputs[1] = torch.cat([sam_outputs[1], all_pred_high_res_multimasks[0][is_bkgd_mask,where_top_pred_TN]], dim=0)
+            sam_outputs[2] = torch.cat([sam_outputs[2], all_pred_ious[0][is_bkgd_mask,where_top_pred_TN]], dim=0)
+            sam_outputs[3] = torch.cat([sam_outputs[3], all_pred_masks[0][is_bkgd_mask]], dim=0)
+            sam_outputs[4] = torch.cat([sam_outputs[4], all_pred_high_res_masks[0][is_bkgd_mask]], dim=0)
+            sam_outputs[5] = torch.cat([sam_outputs[5], obj_ptr[is_bkgd_mask]], dim=0)
+            sam_outputs[6] = torch.cat([sam_outputs[6], all_object_score_logits[0][is_bkgd_mask]], dim=0)
+            # Convert back to tuple 
+            sam_outputs = tuple(sam_outputs)
 
         # Concatenate the masks along channel (to compute losses on all of them,
         # using `MultiStepIteractiveMasks`)
-        current_out["multistep_pred_masks"] = torch.cat(all_pred_masks, dim=1)
-        current_out["multistep_pred_masks_high_res"] = torch.cat(
-            all_pred_high_res_masks, dim=1
-        )
+        current_out["multistep_pred_masks"] = all_pred_masks 
+        current_out["multistep_pred_masks_high_res"] = all_pred_high_res_masks 
+
         current_out["multistep_pred_multimasks"] = all_pred_multimasks
         current_out["multistep_pred_multimasks_high_res"] = all_pred_high_res_multimasks
         current_out["multistep_pred_ious"] = all_pred_ious
         current_out["multistep_point_inputs"] = all_point_inputs
         current_out["multistep_object_score_logits"] = all_object_score_logits
 
-        return point_inputs, sam_outputs
+        return all_point_inputs, sam_outputs

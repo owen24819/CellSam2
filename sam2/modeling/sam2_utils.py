@@ -198,14 +198,17 @@ def sample_box_points(
     box_labels = box_labels.reshape(-1, 2)
     return box_coords, box_labels
 
-
-def sample_random_points_from_errors(gt_masks, pred_masks, num_pt=1):
+def sample_random_points_from_errors(gt_masks, pred_masks, is_bkgd_mask=None, bkgd_mask=None, num_pt=1):
     """
     Sample `num_pt` random points (along with their labels) independently from the error regions.
+    We use is_bkgd_mask to indicate if the point is derived from the background region.
+    These bkgd points are used as FP points. They are positive labels but the model needs to learn to predict as no object.
 
     Inputs:
     - gt_masks: [B, 1, H_im, W_im] masks, dtype=torch.bool
     - pred_masks: [B, 1, H_im, W_im] masks, dtype=torch.bool or None
+    - is_bkgd_mask: [B] bool, indicates if the point is in the background region
+    - bkgd_mask: [B, 1, H_im, W_im] masks, dtype=torch.bool, indicates the background region
     - num_pt: int, number of points to sample independently for each of the B error maps
 
     Outputs:
@@ -222,6 +225,10 @@ def sample_random_points_from_errors(gt_masks, pred_masks, num_pt=1):
     B, _, H_im, W_im = gt_masks.shape
     device = gt_masks.device
 
+    is_object_mask = ~is_bkgd_mask
+    gt_masks = gt_masks[is_object_mask]
+    pred_masks = pred_masks[is_object_mask]   
+
     # false positive region, a new point sampled in this region should have
     # negative label to correct the FP error
     fp_masks = ~gt_masks & pred_masks
@@ -232,17 +239,31 @@ def sample_random_points_from_errors(gt_masks, pred_masks, num_pt=1):
     all_correct = torch.all((gt_masks == pred_masks).flatten(2), dim=2)
     all_correct = all_correct[..., None, None]
 
-    # channel 0 is FP map, while channel 1 is FN map
-    pts_noise = torch.rand(B, num_pt, H_im, W_im, 2, device=device)
+    # channel 0 is FP map, channel 1 is FN map, channel 2 is bkgd map
+    pts_noise = torch.rand(B, num_pt, H_im, W_im, 3, device=device)
+    
     # sample a negative new click from FP region or a positive new click
     # from FN region, depend on where the maximum falls,
     # and in case the predictions are all correct (no FP or FN), we just
     # sample a negative click from the background region
-    pts_noise[..., 0] *= fp_masks | (all_correct & ~gt_masks)
-    pts_noise[..., 1] *= fn_masks
+    pts_noise[is_object_mask, ..., 0] *= fp_masks | (all_correct & ~gt_masks)
+    pts_noise[is_object_mask, ..., 1] *= fn_masks
+
+    # sample a postive click from bkgdp
+    # the model needs to learn to predict bkgd as no object
+    if is_bkgd_mask.sum() > 0:
+        pts_noise[is_bkgd_mask, ..., 2] *= bkgd_mask
+    
+    pts_noise[is_object_mask, ..., 2] = 0
+    pts_noise[is_bkgd_mask, ..., :2] = 0
+
     pts_idx = pts_noise.flatten(2).argmax(dim=2)
-    labels = (pts_idx % 2).to(torch.int32)
-    pts_idx = pts_idx // 2
+    pts_channel = (pts_idx % 3).to(torch.int32)
+    pts_idx = pts_idx // 3
+    
+    # Labels: channel 0 (FP) -> 0, channel 1 (TP) -> 1, channel 2 (bkgd) -> 1
+    labels = ((pts_channel > 0)).to(torch.int32)
+    
     pts_x = pts_idx % W_im
     pts_y = pts_idx // W_im
     points = torch.stack([pts_x, pts_y], dim=2).to(torch.float)
@@ -314,9 +335,9 @@ def sample_one_point_from_error_center(gt_masks, pred_masks, padding=True):
     return points, labels
 
 
-def get_next_point(gt_masks, pred_masks, method):
+def get_next_point(gt_masks, pred_masks, method, is_bkgd_mask=None, bkgd_mask=None):
     if method == "uniform":
-        return sample_random_points_from_errors(gt_masks, pred_masks)
+        return sample_random_points_from_errors(gt_masks, pred_masks, is_bkgd_mask=is_bkgd_mask, bkgd_mask=bkgd_mask)
     elif method == "center":
         return sample_one_point_from_error_center(gt_masks, pred_masks)
     else:
