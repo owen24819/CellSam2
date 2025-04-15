@@ -5,7 +5,8 @@ scratch:
   train_batch_size: 1
   num_train_workers: 0
   num_frames: 1
-  max_num_objects: 8
+  max_num_objects: 12
+  max_num_bkgd_objects: 4
   base_lr: 5.0e-6
   vision_lr: 3.0e-06
   phases_per_epoch: 1
@@ -218,6 +219,7 @@ trainer:
             _target_: training.dataset.vos_sampler.RandomUniformSampler
             num_frames: ${scratch.num_frames}
             max_num_objects: ${scratch.max_num_objects}
+            max_num_bkgd_objects: ${scratch.max_num_bkgd_objects}
           multiplier: ${dataset.multiplier}
       shuffle: True
       num_workers: ${scratch.num_train_workers}
