@@ -200,17 +200,23 @@ class MultiStepMultiMasksAndIous(nn.Module):
         src_masks_list = outputs["multistep_pred_multimasks_high_res"]
         ious_list = outputs["multistep_pred_ious"]
         object_score_logits_list = outputs["multistep_object_score_logits"]
+        is_bkgd_mask = outputs["is_bkgd_mask"]
 
         assert len(src_masks_list) == len(ious_list)
         assert len(object_score_logits_list) == len(ious_list)
 
         # accumulate the loss over prediction steps
         losses = {"loss_mask": 0, "loss_dice": 0, "loss_iou": 0, "loss_class": 0}
-        for src_masks, ious, object_score_logits in zip(
-            src_masks_list, ious_list, object_score_logits_list
-        ):
+        for idx, (src_masks, ious, object_score_logits) in enumerate(zip(src_masks_list, ious_list, object_score_logits_list)):
+            
+            # TODO will need to fix for tracking. this will work for segmentation, but is too simple for tracking
+            if idx > 0:
+                target_masks_no_bkgd = target_masks[~is_bkgd_mask]
+            else:
+                target_masks_no_bkgd = target_masks
+
             self._update_losses(
-                losses, src_masks, target_masks, ious, num_objects, object_score_logits
+                losses, src_masks, target_masks_no_bkgd, ious, num_objects, object_score_logits
             )
         losses[CORE_LOSS_KEY] = self.reduce_loss(losses)
         return losses
