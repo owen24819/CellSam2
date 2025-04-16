@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.distributed
 from sam2.modeling.sam2_base import SAM2Base
-from sam2.modeling.sam2_utils import get_next_point, sample_box_points
+from sam2.modeling.sam2_utils import get_next_point, sample_box_points, get_background_masks
 
 from sam2.utils.misc import concat_points
 
@@ -220,12 +220,12 @@ class SAM2Train(SAM2Base):
             if not use_pt_input:
                 backbone_out["mask_inputs_per_frame"][t] = gt_masks_per_frame[t]
             else:
-                # Check if there are any bkgd points in the initial conditioning frame
-                indices_t = input.obj_to_frame_idx[:,:,0] == t
-                is_bkgd_mask = input.metadata.unique_objects_identifier[indices_t][:,1] < 0
+
+                step_t_is_bkgd_mask, bkgd_masks = get_background_masks(input, t)
+
                 # During training # P(box) = prob_to_use_pt_input * prob_to_use_box_input
                 use_box_input = self.rng.random() < prob_to_use_box_input
-                if use_box_input and is_bkgd_mask.sum() == 0: # Only sample box points if there are no bkgd points
+                if use_box_input and step_t_is_bkgd_mask.sum() == 0: # Only sample box points if there are no bkgd points
                     points, labels = sample_box_points(
                         gt_masks_per_frame[t],
                     )
@@ -236,8 +236,8 @@ class SAM2Train(SAM2Base):
                         gt_masks=gt_masks_per_frame[t],
                         pred_masks=None,
                         method="uniform" if self.training else self.pt_sampling_for_eval,
-                        is_bkgd_mask=is_bkgd_mask,
-                        bkgd_mask=input.bkgd_masks[t]
+                        is_bkgd_mask=step_t_is_bkgd_mask,
+                        bkgd_mask=bkgd_masks,
                         )
 
                 point_inputs = {"point_coords": points, "point_labels": labels}
@@ -310,8 +310,7 @@ class SAM2Train(SAM2Base):
                     input.flat_img_batch, img_ids
                 )
 
-            indices_t = input.obj_to_frame_idx[:,:,0] == stage_id
-            is_bkgd_mask = input.metadata.unique_objects_identifier[indices_t][:,1] < 0
+            stage_id_is_bkgd_mask, _ = get_background_masks(input, stage_id)
 
             # Get output masks based on this frame's prompts and previous memory
             current_out = self.track_step(
@@ -326,8 +325,8 @@ class SAM2Train(SAM2Base):
                 frames_to_add_correction_pt=frames_to_add_correction_pt,
                 output_dict=output_dict,
                 num_frames=num_frames,
-                is_bkgd_mask=is_bkgd_mask,
-                )
+                is_bkgd_mask=stage_id_is_bkgd_mask,
+            )
             # Append the output, depending on whether it's a conditioning frame
             add_output_as_cond_frame = stage_id in init_cond_frames or (
                 self.add_all_frames_to_correct_as_cond
@@ -350,8 +349,6 @@ class SAM2Train(SAM2Base):
         all_frame_outputs = [
             {k: v for k, v in d.items() if k != "obj_ptr"} for d in all_frame_outputs
         ]
-
-        all_frame_outputs[0]["is_bkgd_mask"] = is_bkgd_mask 
 
         return all_frame_outputs
 
@@ -399,49 +396,33 @@ class SAM2Train(SAM2Base):
             object_score_logits,
         ) = sam_outputs
 
-        current_out["multistep_pred_masks"] = low_res_masks
-        current_out["multistep_pred_masks_high_res"] = high_res_masks
+        current_out["multistep_pred_masks"] = [low_res_masks]
+        current_out["multistep_pred_masks_high_res"] = [high_res_masks]
         current_out["multistep_pred_multimasks"] = [low_res_multimasks]
         current_out["multistep_pred_multimasks_high_res"] = [high_res_multimasks]
         current_out["multistep_pred_ious"] = [ious]
         current_out["multistep_point_inputs"] = [point_inputs]
         current_out["multistep_object_score_logits"] = [object_score_logits]
+        current_out["multistep_is_point_used"] = [torch.ones_like(is_bkgd_mask).bool()]
+        current_out["obj_ptr"] = obj_ptr
+
+        # Use the final prediction (after all correction steps for output and eval)
+        current_out["pred_masks"] = low_res_masks
+        current_out["pred_masks_high_res"] = high_res_masks
 
         # Optionally, sample correction points iteratively to correct the mask
         if frame_idx in frames_to_add_correction_pt:
-            point_inputs, final_sam_outputs = self._iter_correct_pt_sampling(
+            current_out = self._iter_correct_pt_sampling(
                 is_init_cond_frame,
                 point_inputs,
                 gt_masks,
                 high_res_features,
                 pix_feat,
-                low_res_multimasks,
-                high_res_multimasks,
-                ious,
-                low_res_masks,
-                high_res_masks,
-                object_score_logits,
                 current_out,
-                obj_ptr,
                 is_bkgd_mask,
             )
 
-            # If there are only bkgd points, we don't run iterative point sampling
-            if final_sam_outputs is not None:
-                (
-                    _,
-                    _,
-                    _,
-                    low_res_masks,
-                    high_res_masks,
-                    obj_ptr,
-                    object_score_logits,
-                ) = final_sam_outputs
-
-        # Use the final prediction (after all correction steps for output and eval)
-        current_out["pred_masks"] = low_res_masks
-        current_out["pred_masks_high_res"] = high_res_masks
-        current_out["obj_ptr"] = obj_ptr
+        point_inputs = current_out["multistep_point_inputs"]
 
         # Finally run the memory encoder on the predicted mask to encode
         # it into a new memory feature (that can be used in future frames)
@@ -463,31 +444,20 @@ class SAM2Train(SAM2Base):
         gt_masks,
         high_res_features,
         pix_feat_with_mem,
-        low_res_multimasks,
-        high_res_multimasks,
-        ious,
-        low_res_masks,
-        high_res_masks,
-        object_score_logits,
         current_out,
-        obj_ptr,
         is_bkgd_mask,
     ):
 
+        low_res_masks = current_out["multistep_pred_masks"][0]
+        high_res_masks = current_out["multistep_pred_masks_high_res"][0]
+
         assert gt_masks is not None
-        all_pred_masks = [low_res_masks]
-        all_pred_high_res_masks = [high_res_masks]
-        all_pred_multimasks = [low_res_multimasks]
-        all_pred_high_res_multimasks = [high_res_multimasks]
-        all_pred_ious = [ious]
-        all_point_inputs = [point_inputs]
-        all_object_score_logits = [object_score_logits]
 
         # Store initial background points if they exist
         is_object_mask = ~is_bkgd_mask
         # Only perform iterative sampling on real objects
         if is_object_mask.sum() == 0:
-            return all_point_inputs, None
+            return current_out
 
         foreground_points = {
             'point_coords': point_inputs['point_coords'][is_object_mask],
@@ -518,18 +488,18 @@ class SAM2Train(SAM2Base):
                 is_bkgd_mask=iter_is_bkgd_mask,
             )
 
-            foreground_point_inputs = concat_points(foreground_points, new_points, new_labels)
+            foreground_points = concat_points(foreground_points, new_points, new_labels)
 
             # Feed the mask logits of the previous SAM outputs in the next SAM decoder step.
             # For tracking, this means that when the user adds a correction click, we also feed
             # the tracking output mask logits along with the click as input to the SAM decoder.
             mask_inputs = foreground_low_res_masks
-            multimask_output = self._use_multimask(is_init_cond_frame, foreground_point_inputs)
+            multimask_output = self._use_multimask(is_init_cond_frame, foreground_points)
             if self.use_act_ckpt_iterative_pt_sampling and not multimask_output:
                 sam_outputs = torch.utils.checkpoint.checkpoint(
                     self._forward_sam_heads,
                     backbone_features=pix_feat_with_mem[is_object_mask],
-                    point_inputs=foreground_point_inputs,
+                    point_inputs=foreground_points,
                     mask_inputs=mask_inputs,
                     high_res_features=[high_res_feature[is_object_mask] for high_res_feature in high_res_features],
                     multimask_output=multimask_output,
@@ -538,7 +508,7 @@ class SAM2Train(SAM2Base):
             else:
                 sam_outputs = self._forward_sam_heads(
                     backbone_features=pix_feat_with_mem[is_object_mask],
-                    point_inputs=foreground_point_inputs,
+                    point_inputs=foreground_points,
                     mask_inputs=mask_inputs,
                     high_res_features=[high_res_feature[is_object_mask] for high_res_feature in high_res_features],
                     multimask_output=multimask_output,
@@ -549,43 +519,23 @@ class SAM2Train(SAM2Base):
                 foreground_ious,
                 foreground_low_res_masks,
                 foreground_high_res_masks,
-                _,
+                foreground_obj_ptr,
                 foreground_object_score_logits,
             ) = sam_outputs
-            all_pred_multimasks.append(foreground_low_res_multimasks)
-            all_pred_high_res_multimasks.append(foreground_high_res_multimasks)
-            all_pred_ious.append(foreground_ious)
-            all_pred_masks.append(foreground_low_res_masks)
-            all_pred_high_res_masks.append(foreground_high_res_masks)
-            all_point_inputs.append(foreground_point_inputs)
-            all_object_score_logits.append(foreground_object_score_logits)
 
-        if is_bkgd_mask.sum() > 0:
-            # Convert tuple to list to allow modification
-            sam_outputs = list(sam_outputs)
-            if multimask_output:
-                where_top_pred_TN = all_pred_ious[0][is_bkgd_mask].argmax(0)[:1]
-            else:
-                where_top_pred_TN = [0]
-            sam_outputs[0] = torch.cat([sam_outputs[0], all_pred_multimasks[0][is_bkgd_mask,where_top_pred_TN]], dim=0)
-            sam_outputs[1] = torch.cat([sam_outputs[1], all_pred_high_res_multimasks[0][is_bkgd_mask,where_top_pred_TN]], dim=0)
-            sam_outputs[2] = torch.cat([sam_outputs[2], all_pred_ious[0][is_bkgd_mask,where_top_pred_TN]], dim=0)
-            sam_outputs[3] = torch.cat([sam_outputs[3], all_pred_masks[0][is_bkgd_mask]], dim=0)
-            sam_outputs[4] = torch.cat([sam_outputs[4], all_pred_high_res_masks[0][is_bkgd_mask]], dim=0)
-            sam_outputs[5] = torch.cat([sam_outputs[5], obj_ptr[is_bkgd_mask]], dim=0)
-            sam_outputs[6] = torch.cat([sam_outputs[6], all_object_score_logits[0][is_bkgd_mask]], dim=0)
-            # Convert back to tuple 
-            sam_outputs = tuple(sam_outputs)
+            current_out["multistep_pred_multimasks"].append(foreground_low_res_multimasks)
+            current_out["multistep_pred_multimasks_high_res"].append(foreground_high_res_multimasks)
+            current_out["multistep_pred_masks"].append(foreground_low_res_masks)
+            current_out["multistep_pred_masks_high_res"].append(foreground_high_res_masks)
+            current_out["multistep_pred_ious"].append(foreground_ious)
+            current_out["multistep_point_inputs"].append(foreground_points)
+            current_out["multistep_object_score_logits"].append(foreground_object_score_logits)
+            current_out["multistep_is_point_used"].append(is_object_mask)
 
-        # Concatenate the masks along channel (to compute losses on all of them,
-        # using `MultiStepIteractiveMasks`)
-        current_out["multistep_pred_masks"] = all_pred_masks 
-        current_out["multistep_pred_masks_high_res"] = all_pred_high_res_masks 
+        current_out["obj_ptr"][is_object_mask] = foreground_obj_ptr
 
-        current_out["multistep_pred_multimasks"] = all_pred_multimasks
-        current_out["multistep_pred_multimasks_high_res"] = all_pred_high_res_multimasks
-        current_out["multistep_pred_ious"] = all_pred_ious
-        current_out["multistep_point_inputs"] = all_point_inputs
-        current_out["multistep_object_score_logits"] = all_object_score_logits
+        # Update the final predcitions that will get passed to memory encoder
+        current_out["pred_masks"][is_object_mask] = foreground_low_res_masks
+        current_out["pred_masks_high_res"][is_object_mask] = foreground_high_res_masks
 
-        return all_point_inputs, sam_outputs
+        return current_out

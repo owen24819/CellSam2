@@ -6,7 +6,7 @@
 
 
 import copy
-from typing import Tuple
+from typing import Tuple, Optional
 
 import numpy as np
 import torch
@@ -342,3 +342,44 @@ def get_next_point(gt_masks, pred_masks, method, is_bkgd_mask=None, bkgd_mask=No
         return sample_one_point_from_error_center(gt_masks, pred_masks)
     else:
         raise ValueError(f"unknown sampling method {method}")
+
+def get_background_masks(
+    data_batch, 
+    frame_idx: int, 
+    return_mask_flags_only: bool = False
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """
+    Retrieves background masks for objects at a specific frame index.
+
+    Args:
+        data_batch: Batch containing video data with metadata and background masks
+        frame_idx: Index of the current frame being processed
+        return_mask_flags_only: If True, only returns boolean flags without mask tensors
+
+    Returns:
+        Tuple containing:
+        - is_background_mask: Boolean tensor indicating which objects are background [N]
+        - background_masks: Tensor of background masks [N, 1, H, W] or None if no backgrounds
+                          or if return_mask_flags_only is True
+    """
+    # Identify which objects are background objects (have negative IDs)
+    is_background_mask = data_batch.metadata.unique_objects_identifier[frame_idx, :, 1] < 0
+
+    # Return early if no background objects or only flags requested
+    if is_background_mask.sum() == 0 or return_mask_flags_only:
+        return is_background_mask, None
+
+    # Get batch indices for each background object
+    batch_indices = data_batch.obj_to_frame_idx[:, is_background_mask, 1]
+    frame_background_masks = data_batch.bkgd_masks[frame_idx]
+
+    # Build list of background masks, repeating each mask for all instances in its batch
+    expanded_masks = []
+    for batch_idx in range(frame_background_masks.shape[0]):
+        instances_in_batch = (batch_indices == batch_idx).sum()
+        expanded_masks.append(frame_background_masks[batch_idx].repeat(instances_in_batch, 1, 1, 1))
+
+    # Concatenate all masks into single tensor
+    background_masks = torch.cat(expanded_masks, dim=0)
+
+    return is_background_mask, background_masks
