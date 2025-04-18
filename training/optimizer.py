@@ -24,7 +24,7 @@ from typing import (
 )
 
 import hydra
-
+import omegaconf
 import torch
 import torch.nn as nn
 from omegaconf import DictConfig
@@ -181,9 +181,36 @@ def validate_param_group_params(param_groups: List[Dict], model: nn.Module):
         # no param should be repeated within a group
         assert len(pg["params"]) == len(set(pg["params"]))
     parameters = [set(param_group["params"]) for param_group in param_groups]
-    model_parameters = {parameter for _, parameter in model.named_parameters()}
+    model_parameters = {param for param in model.parameters() if param.requires_grad}  # Only check trainable parameters
+    param_to_name = {param: name for name, param in model.named_parameters() if param.requires_grad}
+    
     for p1, p2 in itertools.permutations(parameters, 2):
+        if not p1.isdisjoint(p2):
+            overlap = p1.intersection(p2)
+            overlap_names = [param_to_name[p] for p in overlap]
+            print(f"Overlap found: {overlap_names}")
+
         assert p1.isdisjoint(p2), "Scheduler generated param_groups should be disjoint"
+
+    if set.union(*parameters) != model_parameters:
+        # Calculate missing parameters
+        covered_params = set.union(*parameters)
+        missing_params = model_parameters - covered_params
+        
+        # Get parameter names for better debugging
+        missing_param_names = [param_to_name[param] for param in missing_params]
+        
+        print(f"Warning: Not all trainable parameters are included in optimization.")
+        print(f"Total trainable parameters: {len(model_parameters)}")
+        print(f"Parameters in optimizer: {len(covered_params)}")
+        print(f"Missing parameters: {len(missing_params)}")
+        print("Missing parameter names:", missing_param_names)
+        
+        raise AssertionError(
+            f"Scheduler generated param_groups must include all trainable parameters of the model. "
+            f"Found {len(covered_params)} params whereas model has {len(model_parameters)} trainable params"
+        )
+
     assert set.union(*parameters) == model_parameters, (
         "Scheduler generated param_groups must include all parameters of the model."
         f" Found {len(set.union(*parameters))} params whereas model has"
@@ -208,11 +235,10 @@ def unix_module_cls_pattern_to_parameter_names(
     allowed_parameter_names = []
     for module_cls_name in filter_module_cls_names:
         module_cls = hydra.utils.get_class(module_cls_name)
-        if module_cls not in module_cls_to_param_names:
-            raise AssertionError(
-                f"module_cls_name {module_cls_name} does not "
-                "match any classes in the model"
-            )
+        if module_cls not in module_cls_to_param_names or \
+           len(module_cls_to_param_names[module_cls]) == 0:
+            logging.warning(f"No trainable parameters found for {module_cls_name}, skipping")
+            continue
         matching_parameters = module_cls_to_param_names[module_cls]
         assert (
             len(matching_parameters) > 0
@@ -221,7 +247,7 @@ def unix_module_cls_pattern_to_parameter_names(
             f"Matches for module_cls_name [{module_cls_name}]: {matching_parameters} "
         )
         allowed_parameter_names.append(matching_parameters)
-    return set.union(*allowed_parameter_names)
+    return set.union(*allowed_parameter_names) if allowed_parameter_names else set()
 
 
 def unix_param_pattern_to_parameter_names(
@@ -263,14 +289,31 @@ def _unix_pattern_to_parameter_names(
     """
     if "param_names" not in scheduler_cfg and "module_cls_names" not in scheduler_cfg:
         return None
-    return unix_param_pattern_to_parameter_names(
+    # return unix_param_pattern_to_parameter_names(
+    #     scheduler_cfg.get("param_names"), parameter_names
+    # ).union(
+    #     unix_module_cls_pattern_to_parameter_names(
+    #         scheduler_cfg.get("module_cls_names"), module_cls_to_param_names
+    #     )
+    # )
+
+    # ✅ Use the official helper functions
+    param_matches = unix_param_pattern_to_parameter_names(
         scheduler_cfg.get("param_names"), parameter_names
-    ).union(
-        unix_module_cls_pattern_to_parameter_names(
-            scheduler_cfg.get("module_cls_names"), module_cls_to_param_names
-        )
+    )
+    module_matches = unix_module_cls_pattern_to_parameter_names(
+        scheduler_cfg.get("module_cls_names"), module_cls_to_param_names
     )
 
+    all_matches = param_matches.union(module_matches)
+
+    # ✅ Only filter 'lora' for trunk pattern
+    if "param_names" in scheduler_cfg:
+        patterns = scheduler_cfg["param_names"]
+        if isinstance(patterns, omegaconf.listconfig.ListConfig) and any("image_encoder" in p for p in patterns):
+            all_matches = {p for p in all_matches if "lora" not in p}
+
+    return all_matches
 
 def get_module_cls_to_param_names(
     model: nn.Module, param_allowlist: Set[str] = None
@@ -326,7 +369,10 @@ def construct_optimizer(
             overlap and cover all the model parameters.
     """
     if param_allowlist is None:
-        param_allowlist = {name for name, _ in model.named_parameters()}
+        param_allowlist = {
+            name for name, param in model.named_parameters() 
+            if param.requires_grad  # Only include trainable parameters
+        }
 
     named_parameters = {
         name: param

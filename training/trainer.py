@@ -152,6 +152,8 @@ class Trainer:
         model: Dict[str, Any],
         logging: Dict[str, Any],
         checkpoint: Dict[str, Any],
+        use_lora: bool,
+        lora: Dict[str, Any],
         max_epochs: int,
         mode: str = "train",
         accelerator: str = "cuda",
@@ -173,6 +175,8 @@ class Trainer:
         self.model_conf = model
         self.logging_conf = LoggingConf(**logging)
         self.checkpoint_conf = CheckpointConf(**checkpoint).infer_missing()
+        self.use_lora = use_lora
+        self.lora_conf = lora
         self.max_epochs = max_epochs
         self.mode = mode
         self.val_epoch_freq = val_epoch_freq
@@ -218,20 +222,8 @@ class Trainer:
 
         self.time_elapsed_meter = DurationMeter("Time Elapsed", self.device, ":.2f")
 
-        if self.checkpoint_conf.resume_from is not None:
-            assert os.path.exists(
-                self.checkpoint_conf.resume_from
-            ), f"The 'resume_from' checkpoint {self.checkpoint_conf.resume_from} does not exist!"
-            dst = os.path.join(self.checkpoint_conf.save_dir, "checkpoint.pt")
-            if self.distributed_rank == 0 and not os.path.exists(dst):
-                # Copy the "resume_from" checkpoint to the checkpoint folder
-                # if there is not a checkpoint to resume from already there
-                makedir(self.checkpoint_conf.save_dir)
-                g_pathmgr.copy(self.checkpoint_conf.resume_from, dst)
-            barrier()
-
         self.load_checkpoint()
-
+        
         if accelerator != "cpu":
             self._setup_ddp_distributed_training(distributed, accelerator)
         else:
@@ -350,9 +342,19 @@ class Trainer:
             checkpoint_paths.append(os.path.join(checkpoint_folder, f"{ckpt_name}.pt"))
 
         state_dict = unwrap_ddp_if_wrapped(self.model).state_dict()
-        state_dict = exclude_params_matching_unix_pattern(
-            patterns=self.checkpoint_conf.skip_saving_parameters, state_dict=state_dict
-        )
+        
+        # If using LoRA, only save trainable parameters
+        if self.use_lora:
+            state_dict = {
+                k: v for k, v in state_dict.items() 
+                if any(p.requires_grad for p in self.model.parameters() if p.data_ptr() == v.data_ptr())
+            }
+        else:
+            # For non-LoRA training, exclude any specified parameters
+            state_dict = exclude_params_matching_unix_pattern(
+                patterns=self.checkpoint_conf.skip_saving_parameters, 
+                state_dict=state_dict
+            )
 
         checkpoint = {
             "model": state_dict,
@@ -393,13 +395,19 @@ class Trainer:
         assert success
 
     def load_checkpoint(self):
-        ckpt_path = get_resume_checkpoint(self.checkpoint_conf.save_dir)
-        if ckpt_path is None:
-            self._init_model_state()
+        """Load checkpoint if specified"""
+        if self.checkpoint_conf.resume_from is not None:
+            ckpt_path = self.checkpoint_conf.resume_from
+            assert os.path.exists(ckpt_path), f"The 'resume_from' checkpoint {ckpt_path} does not exist!"
+            assert ckpt_path.endswith(".pt"), f"The 'resume_from' checkpoint {ckpt_path} is not a .pt file!"
         else:
-            if self.checkpoint_conf.initialize_after_preemption:
-                self._call_model_initializer()
+            # Check if there's an existing checkpoint in the save directory
+            ckpt_path = get_resume_checkpoint(self.checkpoint_conf.save_dir)
+        
+        if ckpt_path:
             self._load_resuming_checkpoint(ckpt_path)
+        
+        print_model_summary(self.model)
 
     def _init_model_state(self):
         # Checking that parameters that won't be saved are indeed frozen
@@ -420,9 +428,10 @@ class Trainer:
             model=self.model,
             disabled=allow_init_skip_parameters,
         ):
-            self._call_model_initializer()
+            self._call_model_initializer_without_lora()
 
-    def _call_model_initializer(self):
+    def _call_model_initializer_without_lora(self):
+        """Same as _call_model_initializer but without LoRA initialization"""
         model_weight_initializer = instantiate(
             self.checkpoint_conf.model_weight_initializer
         )
@@ -991,7 +1000,6 @@ class Trainer:
                 )
 
     def _setup_components(self):
-
         # Get the keys for all the val datasets, if any
         val_phase = Phase.VAL
         val_keys = None
@@ -1005,9 +1013,15 @@ class Trainer:
         self.steps = {Phase.TRAIN: 0, Phase.VAL: 0}
 
         self.logger = Logger(self.logging_conf)
-
+        # Initialize base model and LoRA if enabled
         self.model = instantiate(self.model_conf, _convert_="all")
-        print_model_summary(self.model)
+        self._init_model_state()  # Initialize weights first
+        
+        if self.use_lora:
+            logging.info("Initializing LoRA adapters...")
+            self.SAM2withLoRA = instantiate(self.lora_conf, model=self.model, _convert_="all")
+            self.model = self.SAM2withLoRA.model
+
 
         self.loss = None
         if self.loss_conf:
@@ -1034,7 +1048,7 @@ class Trainer:
             instantiate(self.optim_conf.gradient_logger) if self.optim_conf else None
         )
 
-        logging.info("Finished setting up components: Model, loss, optim, meters etc.")
+        logging.info("Finished setting up components: model,loss, optim, meters etc.")
 
     def _construct_optimizers(self):
         self.optim = construct_optimizer(

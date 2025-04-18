@@ -298,15 +298,10 @@ def check_load_state_dict_errors(
     missing_keys,
     unexpected_keys,
     strict: bool,
+    model: nn.Module,
     ignore_missing_keys: List[str] = None,
     ignore_unexpected_keys: List[str] = None,
 ):
-    if ignore_missing_keys is not None and len(ignore_missing_keys) > 0:
-        ignored_keys = unix_pattern_to_parameter_names(
-            ignore_missing_keys, missing_keys
-        )
-        missing_keys = [key for key in missing_keys if key not in ignored_keys]
-
     if ignore_unexpected_keys is not None and len(ignore_unexpected_keys) > 0:
         ignored_unexpected_keys = unix_pattern_to_parameter_names(
             ignore_unexpected_keys, unexpected_keys
@@ -315,16 +310,27 @@ def check_load_state_dict_errors(
             key for key in unexpected_keys if key not in ignored_unexpected_keys
         ]
 
+    # Get list of trainable parameter names
+    trainable_params = {name for name, param in model.named_parameters() if param.requires_grad}
+    
+    # Only check missing keys that correspond to trainable parameters
+    critical_missing_keys = [key for key in missing_keys if key in trainable_params]
+
     err = "State key mismatch."
     if unexpected_keys:
         err += f" Unexpected keys: {unexpected_keys}."
-    if missing_keys:
-        err += f" Missing keys: {missing_keys}."
+    if critical_missing_keys:
+        err += f" Missing trainable parameter keys: {critical_missing_keys}."
 
-    if unexpected_keys or missing_keys:
+    if unexpected_keys or critical_missing_keys:
         logging.warning(err)
-        if unexpected_keys or strict:
+        if unexpected_keys or (critical_missing_keys and strict):
             raise KeyError(err)
+    
+    # Log non-critical missing keys at info level
+    non_critical_missing = [key for key in missing_keys if key not in trainable_params]
+    if non_critical_missing:
+        logging.info(f"Missing frozen parameter keys (ignored): {non_critical_missing}")
 
 
 def load_state_dict_into_model(
@@ -355,6 +361,7 @@ def load_state_dict_into_model(
         missing_keys,
         unexpected_keys,
         strict=strict,
+        model=model,
         ignore_missing_keys=ignore_missing_keys,
         ignore_unexpected_keys=ignore_unexpected_keys,
     )
