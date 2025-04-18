@@ -11,6 +11,8 @@ scratch:
   vision_lr: 3.0e-06
   phases_per_epoch: 1
   num_epochs: 20
+  use_lora: True 
+  lora_lr: 1.0e-3
 
 dataset:
   # PATHS to Dataset
@@ -63,6 +65,20 @@ trainer:
   max_epochs: ${times:${scratch.num_epochs},${scratch.phases_per_epoch}}
   accelerator: cpu
   seed_value: 123
+
+  use_lora: ${scratch.use_lora}
+  lora:
+    _target_: adapters.sam2_lora_model.SAM2LoRAModel
+    lora_rank: 32 # Rank of LoRA matrices
+    adapt_encoder: true
+    adapt_memory: true
+    adapt_decoder: true
+    lora_alpha: 8 # Alpha scaling factor
+    lora_dropout: 0.1 # Dropout probability for LoRA layers
+    lora_bias: none # Bias type: none, all or lora_only
+    adapt_mlp: true
+    trainable_iou_pred_heads: true
+    trainable_obj_score_heads: true
 
   model:
     _target_: training.model.sam2.SAM2Train
@@ -255,6 +271,13 @@ trainer:
     options:
       lr:
         - scheduler:
+            _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+            value: ${scratch.lora_lr}
+          param_names:
+            - '**lora**'
+            - '**pred_obj_score_head**'
+            - '**iou_prediction_head**'
+        - scheduler:
             _target_: fvcore.common.param_scheduler.CosineParamScheduler
             start_value: ${scratch.base_lr}
             end_value: ${divide:${scratch.base_lr},10}
@@ -263,7 +286,7 @@ trainer:
             start_value: ${scratch.vision_lr}
             end_value: ${divide:${scratch.vision_lr},10}
           param_names:
-            - 'image_encoder.*'
+            - 'image_encoder.**'
       weight_decay:
         - scheduler:
             _target_: fvcore.common.param_scheduler.ConstantParamScheduler
