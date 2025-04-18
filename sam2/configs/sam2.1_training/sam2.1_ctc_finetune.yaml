@@ -271,8 +271,16 @@ trainer:
     options:
       lr:
         - scheduler:
-            _target_: fvcore.common.param_scheduler.ConstantParamScheduler
-            value: ${scratch.lora_lr}
+            _target_: fvcore.common.param_scheduler.CompositeParamScheduler
+            schedulers:
+              - _target_: fvcore.common.param_scheduler.LinearParamScheduler
+                start_value: 0.0
+                end_value: ${scratch.lora_lr}
+              - _target_: fvcore.common.param_scheduler.CosineParamScheduler
+                start_value: ${scratch.lora_lr}
+                end_value: ${divide:${scratch.lora_lr},10}
+            lengths: [0.1, 0.9]
+            interval_scaling: [rescaled]
           param_names:
             - '**lora**'
             - '**pred_obj_score_head**'
