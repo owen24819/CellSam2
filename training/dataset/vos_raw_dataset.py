@@ -54,6 +54,7 @@ class VOSRawDataset:
 class CTCRawDataset(VOSRawDataset):
     def __init__(self,
                  train_dir, 
+                 num_frames,
                  file_list_txt=None,
                  excluded_videos_list_txt=None,
                  truncate_video=-1,
@@ -65,6 +66,7 @@ class CTCRawDataset(VOSRawDataset):
 
         self.truncate_video = truncate_video
         self.sample_rate = sample_rate
+        self.num_frames = num_frames
 
         # Read the subset defined in file_list_txt
         if file_list_txt is not None:
@@ -85,22 +87,37 @@ class CTCRawDataset(VOSRawDataset):
             [video_name for video_name in subset if video_name not in excluded_files]
         )
 
-    def __len__(self):
-        return len(self.video_names)
+        if self.num_frames == 1:
+            self.frame_index = []
+            for video_name in self.video_names:
+                all_frames = sorted((self.train_dir / video_name).glob("*.tif"))
+                for fpath in all_frames[::self.sample_rate]:
+                    self.frame_index.append((video_name, fpath))
 
+    def __len__(self):
+        if self.num_frames == 1:
+            return len(self.frame_index)
+        else:
+            return len(self.video_names)
     def get_video(self, idx):
 
-        video_name = self.video_names[idx]
-        all_frames = sorted((self.train_dir / video_name).glob("*.tif"))
-
-        if self.truncate_video > 0:
-            all_frames = all_frames[:self.truncate_video]
-
-        frames = []
-        for _, fpath in enumerate(all_frames[:: self.sample_rate]):
-            fid = int(re.findall(r'\d+', fpath.stem)[0])
-            frames.append(VOSFrame(fid, image_path=fpath))
-        video = VOSVideo(video_name, int(video_name), frames)
+        if self.num_frames == 1:
+            # SEGMENTATION mode
+            video_name, frame_path = self.frame_index[idx]
+            fid = int(re.findall(r'\d+', frame_path.stem)[0])
+            frame = VOSFrame(fid, image_path=frame_path)
+            video = VOSVideo(video_name, int(video_name), [frame])
+        else:
+            # TRACKING mode
+            video_name = self.video_names[idx]
+            all_frames = sorted((self.train_dir / video_name).glob("*.tif"))
+            if self.truncate_video > 0:
+                all_frames = all_frames[:self.truncate_video]
+            frames = []
+            for fpath in all_frames[::self.sample_rate]:
+                fid = int(re.findall(r'\d+', fpath.stem)[0])
+                frames.append(VOSFrame(fid, image_path=fpath))
+            video = VOSVideo(video_name, int(video_name), frames)
 
         video_mask_root = self.train_dir / (video_name + "_GT") / "TRA"
         segment_loader = CTCSegmentLoader(video_mask_root)
