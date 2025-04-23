@@ -312,7 +312,7 @@ trainer:
       focal_alpha_obj_score: -1.0
 
   distributed:
-    backend: nccl # nccl for GPU
+    backend: null # nccl for distributed training
     find_unused_parameters: True # True for GPU
 
   logging:

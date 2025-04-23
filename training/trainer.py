@@ -224,10 +224,10 @@ class Trainer:
 
         self.load_checkpoint()
         
-        if accelerator != "cpu":
+        if accelerator != "cpu" and is_dist_avail_and_initialized():
             self._setup_ddp_distributed_training(distributed, accelerator)
         else:
-            print("🧠 Skipping DDP setup — running on CPU without distributed.")
+            print("🧠 Skipping DDP setup — running on CPU or single GPU.")
         barrier()
 
         self.wandb = None  # Will be set if wandb logging is enabled
