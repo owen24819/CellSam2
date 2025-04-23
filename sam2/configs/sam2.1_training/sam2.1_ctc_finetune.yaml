@@ -13,6 +13,7 @@ scratch:
   num_epochs: 20
   use_lora: True 
   lora_lr: 1.0e-3
+  use_wandb: False
 
 dataset:
   # PATHS to Dataset
@@ -354,3 +355,7 @@ launcher:
   num_nodes: 1
   gpus_per_node: 0
   experiment_log_dir: null # Path to log directory, defaults to ./sam2_logs/${config_name}
+
+wandb:
+  project: CellSAM2
+  group: null

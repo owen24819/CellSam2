@@ -230,6 +230,8 @@ class Trainer:
             print("🧠 Skipping DDP setup — running on CPU without distributed.")
         barrier()
 
+        self.wandb = None  # Will be set if wandb logging is enabled
+
     def _setup_timers(self):
         """
         Initializes counters for elapsed time and eta.
@@ -713,6 +715,24 @@ class Trainer:
             out_dict.update(self._get_trainer_state(phase))
         self._reset_meters(curr_phases)
         logging.info(f"Meters: {out_dict}")
+
+        # Log final validation metrics to wandb
+        if self.wandb is not None and self.distributed_rank == 0:
+            wandb_logs = {}
+            # Log loss metrics
+            for k, v in loss_mts.items():
+                wandb_logs[f"val/{k}"] = v.avg
+            for k, v in extra_loss_mts.items():
+                wandb_logs[f"val/{k}"] = v.avg
+            
+            # Log other meters
+            for key, meter in self._get_meters([phase]).items():
+                meter_output = meter.compute_synced()
+                for meter_subkey, meter_value in meter_output.items():
+                    wandb_logs[f"val/{key}/{meter_subkey}"] = meter_value
+            
+            self._log_to_wandb(wandb_logs, self.steps[Phase.VAL])
+
         return out_dict
 
     def _get_trainer_state(self, phase):
@@ -851,6 +871,24 @@ class Trainer:
         out_dict.update(self._get_trainer_state(phase))
         logging.info(f"Losses and meters: {out_dict}")
         self._reset_meters([phase])
+
+        # Log final training metrics to wandb
+        if self.wandb is not None and self.distributed_rank == 0:
+            wandb_logs = {}
+            # Log loss metrics
+            for k, v in loss_mts.items():
+                wandb_logs[f"train/{k}"] = v.avg
+            for k, v in extra_loss_mts.items():
+                wandb_logs[f"train/{k}"] = v.avg
+            
+            # Log other meters
+            for key, meter in self._get_meters([phase]).items():
+                meter_output = meter.compute_synced()
+                for meter_subkey, meter_value in meter_output.items():
+                    wandb_logs[f"train/{key}/{meter_subkey}"] = meter_value
+
+            self._log_to_wandb(wandb_logs, self.steps[Phase.TRAIN])
+
         return out_dict
 
     def _log_sync_data_times(self, phase, data_times):
@@ -1057,6 +1095,17 @@ class Trainer:
             self.optim_conf.options,
             self.optim_conf.param_group_modifiers,
         )
+
+    def _log_to_wandb(self, logs: Dict[str, Any], step: int) -> None:
+        """
+        Helper function to log metrics to Weights & Biases.
+        
+        Args:
+            logs: Dictionary of metrics to log
+            step: Current training step
+        """
+        if self.wandb is not None and self.distributed_rank == 0:
+            self.wandb.log(logs, step=step)
 
     def _log_loss_detailed_and_return_core_loss(self, loss, loss_str, step):
         core_loss = loss.pop(CORE_LOSS_KEY)

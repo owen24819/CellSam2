@@ -1,10 +1,14 @@
 from hydra.utils import instantiate
 import hydra
 import os
-from pathlib import Path
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 from iopath.common.file_io import g_pathmgr
 from training.utils.train_utils import makedir, register_omegaconf_resolvers
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
 
 config_path = "sam2/configs/sam2.1_training"
 config_name = "sam2.1_ctc_finetune.yaml"
@@ -13,12 +17,33 @@ model_name = "sam2.1_ctc_segmentationv2"
 register_omegaconf_resolvers()
 
 @hydra.main(version_base=None, config_path=config_path, config_name=config_name)
+def main(cfg: DictConfig) -> None:
+    # Use the global model_name variable instead
+    global model_name
 
-def main(cfg):
     if cfg.launcher.experiment_log_dir is None:
         cfg.launcher.experiment_log_dir = os.path.join(
             os.getcwd(), "sam2_logs", model_name
         )
+    else:
+        model_name = cfg.launcher.experiment_log_dir.split("/")[-1]
+
+    # Initialize wandb if available and enabled in config
+    use_wandb = cfg.scratch.get('use_wandb', False)  # Default to False if not specified
+    wandb_config = cfg.get('wandb', {})
+    
+    if use_wandb:
+        if not WANDB_AVAILABLE:
+            print("WandB logging requested but wandb package is not installed. "
+                  "Install with 'pip install wandb' to enable logging.")
+        else:
+            wandb.init(
+                project=wandb_config.get('project', 'CellSAM2'),
+                name=model_name,
+                group=wandb_config.get('group', None),
+                config=OmegaConf.to_container(cfg, resolve=True),
+            )
+
     print("###################### Train App Config ####################")
     print(OmegaConf.to_yaml(cfg))
     print("############################################################")
@@ -47,7 +72,16 @@ def main(cfg):
     os.environ["MASTER_PORT"] = "12355"
 
     trainer = instantiate(cfg.trainer, _recursive_=False)
+    
+    # Add wandb callback if available and enabled
+    if WANDB_AVAILABLE and use_wandb:
+        trainer.wandb = wandb
+    
     trainer.run()
+
+    # Close wandb run if active
+    if WANDB_AVAILABLE and use_wandb:
+        wandb.finish()
 
 if __name__ == "__main__":
     main()
