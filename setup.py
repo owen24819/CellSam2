@@ -29,6 +29,8 @@ REQUIRED_PACKAGES = [
     "hydra-core>=1.3.2",
     "iopath>=0.1.10",
     "pillow>=9.4.0",
+    "wandb>=0.19.9",
+    "imagecodecs>=2025.3.30",
 ]
 
 EXTRA_PACKAGES = {
