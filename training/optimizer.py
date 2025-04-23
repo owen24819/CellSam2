@@ -289,13 +289,6 @@ def _unix_pattern_to_parameter_names(
     """
     if "param_names" not in scheduler_cfg and "module_cls_names" not in scheduler_cfg:
         return None
-    # return unix_param_pattern_to_parameter_names(
-    #     scheduler_cfg.get("param_names"), parameter_names
-    # ).union(
-    #     unix_module_cls_pattern_to_parameter_names(
-    #         scheduler_cfg.get("module_cls_names"), module_cls_to_param_names
-    #     )
-    # )
 
     # ✅ Use the official helper functions
     param_matches = unix_param_pattern_to_parameter_names(
@@ -307,13 +300,10 @@ def _unix_pattern_to_parameter_names(
 
     all_matches = param_matches.union(module_matches)
 
-    # ✅ Only filter 'lora' for trunk pattern
-    if "param_names" in scheduler_cfg:
-        patterns = scheduler_cfg["param_names"]
-        if isinstance(patterns, omegaconf.listconfig.ListConfig) and any("image_encoder" in p for p in patterns):
-            all_matches = {p for p in all_matches if "lora" not in p}
-
-    return all_matches
+    if len(all_matches) == 0:
+        return None
+    else:
+        return all_matches
 
 def get_module_cls_to_param_names(
     model: nn.Module, param_allowlist: Set[str] = None
@@ -344,6 +334,7 @@ def construct_optimizer(
     optimizer_conf: Any,
     options_conf: Mapping[str, List] = None,
     param_group_modifiers_conf: List[Callable] = None,
+    use_lora=False,
     param_allowlist: Optional[Set[str]] = None,
     validate_param_groups=True,
 ) -> Optimizer:
@@ -390,6 +381,14 @@ def construct_optimizer(
     module_cls_to_all_param_names = get_module_cls_to_param_names(
         model, param_allowlist
     )
+
+    # Handle LoRA vs finetune learning rates
+    if use_lora:
+        options_conf.pop('lr_finetune', None)
+        options_conf['lr'] = options_conf.pop('lr_LoRA')
+    else:
+        options_conf.pop('lr_LoRA', None)
+        options_conf['lr'] = options_conf.pop('lr_finetune')
 
     scheduler_cfgs_per_option = hydra.utils.instantiate(options_conf)
     all_scheduler_cfgs = []

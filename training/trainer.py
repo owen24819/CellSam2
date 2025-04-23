@@ -1094,6 +1094,7 @@ class Trainer:
             self.optim_conf.optimizer,
             self.optim_conf.options,
             self.optim_conf.param_group_modifiers,
+            self.use_lora,
         )
 
     def _log_to_wandb(self, logs: Dict[str, Any], step: int) -> None:
