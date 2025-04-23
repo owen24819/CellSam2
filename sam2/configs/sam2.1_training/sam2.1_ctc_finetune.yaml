@@ -2,7 +2,7 @@
 
 scratch:
   resolution: 512
-  num_train_workers: 4
+  num_train_workers: 2
   num_frames: 1
   max_num_objects: 12
   max_num_bkgd_objects: 4
@@ -222,7 +222,7 @@ trainer:
     train:
       _target_: training.dataset.sam2_datasets.TorchTrainMixedDataset
       phases_per_epoch: 1
-      batch_sizes: [4]
+      batch_sizes: [2]
       datasets:
         - _target_: training.dataset.vos_dataset.VOSDataset
           training: true
@@ -250,7 +250,7 @@ trainer:
   optim:
     amp:
       enabled: True # True for GPU
-      amp_dtype: bfloat16
+      amp_dtype: float16
 
     optimizer:
       _target_: torch.optim.AdamW
