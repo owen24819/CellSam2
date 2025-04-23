@@ -1,6 +1,7 @@
 from hydra.utils import instantiate
 import hydra
 import os
+import torch
 from omegaconf import OmegaConf, DictConfig
 from iopath.common.file_io import g_pathmgr
 from training.utils.train_utils import makedir, register_omegaconf_resolvers
@@ -10,8 +11,14 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+if device == 'cuda':
+    config_name = "sam2.1_ctc_finetune.yaml"
+else:
+    config_name = "sam2.1_ctc_finetune_cpu.yaml"
+    
 config_path = "sam2/configs/sam2.1_training"
-config_name = "sam2.1_ctc_finetune.yaml"
 model_name = "sam2.1_ctc_segmentationv2"
 
 register_omegaconf_resolvers()
