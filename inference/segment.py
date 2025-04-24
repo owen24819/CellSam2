@@ -4,19 +4,20 @@ import hydra
 from hydra.core.global_hydra import GlobalHydra
 import tkinter as tk
 from tkinter import filedialog
-
+import sys
+from pathlib import Path
 # Local imports
 from sam2.build_sam import build_sam2
 from cell_segmenter import SAM2AutomaticCellSegmenter
 from inference_utils import display_masks, get_device
 
-model_name = "sam2.1_ctc_segmentation"  
-sam2_checkpoint = f"sam2_logs/{model_name}/checkpoints/checkpoint.pt"
-# config_path = f"sam2_logs/{model_name}"  
-# config_name = "config_resolved"
+sys.path.append(str(Path(__file__).parent.parent))
 
-config_path = "../sam2/configs/sam2.1"  
-config_name = "sam2.1_hiera_b+"
+model_name = "lr_0001"  
+sam2_checkpoint = f"sam2_logs/{model_name}/checkpoints/checkpoint.pt"
+
+config_path = f"../sam2_logs/{model_name}"
+config_name = "config_resolved"
 
 # Clear any existing Hydra instance
 if GlobalHydra().is_initialized():
