@@ -89,8 +89,14 @@ def build_sam2(
     # Read config and init model
     cfg = compose(config_name=config_file, overrides=hydra_overrides_extra)
     OmegaConf.resolve(cfg)
-    model = instantiate(cfg.model, _recursive_=True)
-    _load_checkpoint(model, ckpt_path)
+    model = instantiate(cfg.trainer.model, _recursive_=True)       
+    if cfg.scratch.use_lora:
+        model_weight_initializer = instantiate(cfg.trainer.checkpoint.model_weight_initializer)
+        model = model_weight_initializer(model=model)
+        logging.info("Initializing LoRA adapters...")
+        SAM2withLoRA = instantiate(cfg.trainer.lora, model=model, _convert_="all")
+        model = SAM2withLoRA.model
+    _load_checkpoint(model, ckpt_path, strict=not cfg.scratch.use_lora)
     model = model.to(device)
     if mode == "eval":
         model.eval()
@@ -161,11 +167,12 @@ def build_sam2_video_predictor_hf(model_id, **kwargs):
     )
 
 
-def _load_checkpoint(model, ckpt_path):
+def _load_checkpoint(model, ckpt_path, strict=True):
     if ckpt_path is not None:
         sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)["model"]
-        missing_keys, unexpected_keys = model.load_state_dict(sd)
-        if missing_keys:
+        # If only LoRA weights is loaded, there will be missing keys in the model
+        missing_keys, unexpected_keys = model.load_state_dict(sd, strict=strict)
+        if missing_keys and strict:
             logging.error(missing_keys)
             raise RuntimeError()
         if unexpected_keys:
