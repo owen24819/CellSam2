@@ -249,7 +249,7 @@ trainer:
     val:
       _target_: training.dataset.sam2_datasets.TorchTrainMixedDataset
       phases_per_epoch: 1
-      batch_sizes: [1]
+      batch_sizes: [2]
       datasets:
         - _target_: training.dataset.vos_dataset.VOSDataset
           training: false
