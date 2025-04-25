@@ -1034,12 +1034,18 @@ class Trainer:
                 )
 
             if self.loss_conf is not None:
-                loss_keys = set(self.loss_conf.keys()) - set(["all"])
-                assert all([k in loss_keys for k in val_keys]), (
-                    f"Keys in val datasets do not match the keys in losses."
-                    f"\nMissing in losses: {set(val_keys) - loss_keys}"
-                    f"\nMissing in val datasets: {loss_keys - set(val_keys)}"
-                )
+                # Check if 'all' is the only key in loss_conf
+                if set(self.loss_conf.keys()) == {'all'}:
+                    # If using only 'all' key, no need to check individual keys
+                    pass
+                else:
+                    # Original behavior: remove 'all' and check individual keys
+                    loss_keys = set(self.loss_conf.keys()) - set(["all"])
+                    assert all([k in loss_keys for k in val_keys]), (
+                        f"Keys in val datasets do not match the keys in losses."
+                        f"\nMissing in losses: {set(val_keys) - loss_keys}"
+                        f"\nMissing in val datasets: {loss_keys - set(val_keys)}"
+                    )
 
     def _setup_components(self):
         # Get the keys for all the val datasets, if any

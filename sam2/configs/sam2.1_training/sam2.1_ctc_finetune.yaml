@@ -272,7 +272,7 @@ trainer:
       collate_fn:
         _target_: training.utils.data_utils.collate_fn
         _partial_: true
-        dict_key: val_losses
+        dict_key: all
 
   optim:
     amp:
@@ -326,18 +326,6 @@ trainer:
 
   loss:
     all:
-      _target_: training.loss_fns.MultiStepMultiMasksAndIous
-      weight_dict:
-        loss_mask: 20
-        loss_dice: 1
-        loss_iou: 1
-        loss_class: 1
-      supervise_all_iou: true
-      iou_use_l1_loss: true
-      pred_obj_scores: true
-      focal_gamma_obj_score: 0.0
-      focal_alpha_obj_score: -1.0
-    val_losses:
       _target_: training.loss_fns.MultiStepMultiMasksAndIous
       weight_dict:
         loss_mask: 20
