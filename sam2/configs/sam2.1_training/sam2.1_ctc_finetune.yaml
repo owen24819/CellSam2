@@ -246,6 +246,33 @@ trainer:
         _target_: training.utils.data_utils.collate_fn
         _partial_: true
         dict_key: all
+    val:
+      _target_: training.dataset.sam2_datasets.TorchTrainMixedDataset
+      phases_per_epoch: 1
+      batch_sizes: [1]
+      datasets:
+        - _target_: training.dataset.vos_dataset.VOSDataset
+          training: false
+          transforms: ${vos.train_transforms}
+          video_dataset:
+            _target_: training.dataset.vos_raw_dataset.CTCRawDataset
+            train_dir: ${dataset.data_dir}/val
+            num_frames: ${scratch.num_frames}
+            file_list_txt: ${dataset.file_list_txt}  # optional
+          sampler:
+            _target_: training.dataset.vos_sampler.RandomUniformSampler
+            num_frames: ${scratch.num_frames}
+            max_num_objects: ${scratch.max_num_objects}
+            max_num_bkgd_objects: ${scratch.max_num_bkgd_objects}
+          multiplier: ${dataset.multiplier}
+      shuffle: True
+      num_workers: ${scratch.num_train_workers}
+      pin_memory: True
+      drop_last: True
+      collate_fn:
+        _target_: training.utils.data_utils.collate_fn
+        _partial_: true
+        dict_key: val_losses
 
   optim:
     amp:
@@ -310,7 +337,19 @@ trainer:
       pred_obj_scores: true
       focal_gamma_obj_score: 0.0
       focal_alpha_obj_score: -1.0
-
+    val_losses:
+      _target_: training.loss_fns.MultiStepMultiMasksAndIous
+      weight_dict:
+        loss_mask: 20
+        loss_dice: 1
+        loss_iou: 1
+        loss_class: 1
+      supervise_all_iou: true
+      iou_use_l1_loss: true
+      pred_obj_scores: true
+      focal_gamma_obj_score: 0.0
+      focal_alpha_obj_score: -1.0
+      
   distributed:
     backend: null # nccl for distributed training
     find_unused_parameters: True # True for GPU

@@ -695,7 +695,7 @@ class Trainer:
                         self.steps[Phase.VAL],
                     )
 
-            if data_iter % 10 == 0:
+            if data_iter % 10 == 0 and is_dist_avail_and_initialized():
                 dist.barrier()
 
         self.est_epoch_time[phase] = batch_time.avg * iters_per_epoch
