@@ -135,11 +135,7 @@ class SAM2LoRAModel:
             
         for name, param in self.model.named_parameters():
             if any(pattern in name.lower() for pattern in trainable_patterns):
-                print(f'Trainable: {name}')
                 param.requires_grad = True
-            else:
-                print(f'Freezing {name}')
-                param.requires_grad = False
 
         self.print_trainable()
 
