@@ -132,7 +132,14 @@ class SAM2LoRAModel:
             trainable_patterns.append('iou_prediction_head')
         if self.trainable_obj_score_heads:
             trainable_patterns.append('pred_obj_score_head')
-            
+
+        if not self.adapt_encoder:
+            trainable_patterns.append('image_encoder')
+        if not self.adapt_memory:
+            trainable_patterns.append('memory_encoder')
+        if not self.adapt_decoder:
+            trainable_patterns.append('sam_mask_decoder')
+
         for name, param in self.model.named_parameters():
             if any(pattern in name.lower() for pattern in trainable_patterns):
                 param.requires_grad = True
