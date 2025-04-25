@@ -730,8 +730,10 @@ class Trainer:
                 meter_output = meter.compute_synced()
                 for meter_subkey, meter_value in meter_output.items():
                     wandb_logs[f"val/{key}/{meter_subkey}"] = meter_value
+
+            wandb_logs["val_step"] = self.steps[Phase.VAL]
             
-            self._log_to_wandb(wandb_logs, self.steps[Phase.VAL])
+            self._log_to_wandb(wandb_logs)
 
         return out_dict
 
@@ -887,7 +889,9 @@ class Trainer:
                 for meter_subkey, meter_value in meter_output.items():
                     wandb_logs[f"train/{key}/{meter_subkey}"] = meter_value
 
-            self._log_to_wandb(wandb_logs, self.steps[Phase.TRAIN])
+            wandb_logs["train_step"] = self.steps[Phase.TRAIN]
+
+            self._log_to_wandb(wandb_logs)
 
         return out_dict
 
@@ -1097,16 +1101,15 @@ class Trainer:
             self.use_lora,
         )
 
-    def _log_to_wandb(self, logs: Dict[str, Any], step: int) -> None:
+    def _log_to_wandb(self, logs: Dict[str, Any]) -> None:
         """
         Helper function to log metrics to Weights & Biases.
         
         Args:
             logs: Dictionary of metrics to log
-            step: Current training step
         """
         if self.wandb is not None and self.distributed_rank == 0:
-            self.wandb.log(logs, step=step)
+            self.wandb.log(logs)
 
     def _log_loss_detailed_and_return_core_loss(self, loss, loss_str, step):
         core_loss = loss.pop(CORE_LOSS_KEY)

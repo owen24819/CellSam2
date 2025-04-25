@@ -51,6 +51,10 @@ def main(cfg: DictConfig) -> None:
                 config=OmegaConf.to_container(cfg, resolve=True),
             )
 
+            # 🛠️ Define how different metrics are tracked
+            wandb.define_metric("train/*", step_metric="train_step")
+            wandb.define_metric("val/*", step_metric="val_step")
+
     print("###################### Train App Config ####################")
     print(OmegaConf.to_yaml(cfg))
     print("############################################################")
