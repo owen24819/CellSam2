@@ -335,6 +335,7 @@ def construct_optimizer(
     options_conf: Mapping[str, List] = None,
     param_group_modifiers_conf: List[Callable] = None,
     use_lora=False,
+    freeze_encoder=False,
     param_allowlist: Optional[Set[str]] = None,
     validate_param_groups=True,
 ) -> Optimizer:
@@ -389,6 +390,15 @@ def construct_optimizer(
     else:
         options_conf.pop('lr_LoRA', None)
         options_conf['lr'] = options_conf.pop('lr_finetune')
+        
+        # Remove image encoder scheduler if freeze_encoder is True
+        if options_conf.get('lr') and freeze_encoder:
+            # Filter out any scheduler that targets image_encoder
+            options_conf['lr'] = [
+                scheduler_cfg for scheduler_cfg in options_conf['lr']
+                if not (scheduler_cfg.get('param_names') and 
+                        any('image_encoder' in pattern for pattern in scheduler_cfg.get('param_names', [])))
+            ]
 
     scheduler_cfgs_per_option = hydra.utils.instantiate(options_conf)
     all_scheduler_cfgs = []
