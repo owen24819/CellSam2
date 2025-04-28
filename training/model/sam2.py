@@ -422,7 +422,7 @@ class SAM2Train(SAM2Base):
                 is_bkgd_mask,
             )
 
-        point_inputs = current_out["multistep_point_inputs"]
+
 
         # Finally run the memory encoder on the predicted mask to encode
         # it into a new memory feature (that can be used in future frames)
