@@ -370,7 +370,7 @@ def get_background_masks(
         return is_background_mask, None
 
     # Get batch indices for each background object
-    batch_indices = data_batch.obj_to_frame_idx[:, is_background_mask, 1]
+    batch_indices = data_batch.obj_to_frame_idx[frame_idx, is_background_mask, 1]
     frame_background_masks = data_batch.bkgd_masks[frame_idx]
 
     # Build list of background masks, repeating each mask for all instances in its batch
