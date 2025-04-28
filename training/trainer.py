@@ -166,6 +166,7 @@ class Trainer:
         optim_overrides: Optional[List[Dict[str, Any]]] = None,
         meters: Optional[Dict[str, Any]] = None,
         loss: Optional[Dict[str, Any]] = None,
+        freeze_encoder: bool = False,
     ):
 
         self._setup_env_variables(env_variables)
@@ -183,6 +184,7 @@ class Trainer:
         self.optim_conf = OptimConf(**optim) if optim is not None else None
         self.meters_conf = meters
         self.loss_conf = loss
+        self.freeze_encoder = freeze_encoder
         distributed = DistributedConf(**distributed or {})
         cuda = CudaConf(**cuda or {})
         self.where = 0.0
@@ -1069,6 +1071,10 @@ class Trainer:
             logging.info("Initializing LoRA adapters...")
             self.SAM2withLoRA = instantiate(self.lora_conf, model=self.model, _convert_="all")
             self.model = self.SAM2withLoRA.model
+        elif self.freeze_encoder:
+            logging.info("Freezing encoder...")
+            for param in self.model.image_encoder.parameters():
+                param.requires_grad = False
 
 
         self.loss = None

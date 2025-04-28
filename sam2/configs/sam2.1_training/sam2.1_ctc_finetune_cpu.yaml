@@ -14,6 +14,7 @@ scratch:
   use_lora: True 
   lora_lr: 1.0e-3
   use_wandb: False
+  freeze_encoder: False
 
 dataset:
   # PATHS to Dataset
@@ -66,6 +67,7 @@ trainer:
   max_epochs: ${times:${scratch.num_epochs},${scratch.phases_per_epoch}}
   accelerator: cpu
   seed_value: 123
+  freeze_encoder: ${scratch.freeze_encoder}
 
   use_lora: ${scratch.use_lora}
   lora:
