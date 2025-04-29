@@ -10,7 +10,7 @@ import torch
 from torch import nn, Tensor
 
 from sam2.modeling.sam.transformer import RoPEAttention
-
+from adapters.adapter_modules import RoPELoRAAdapter
 from sam2.modeling.sam2_utils import get_activation_fn, get_clones
 
 
@@ -66,7 +66,7 @@ class MemoryAttentionLayer(nn.Module):
     def _forward_ca(self, tgt, memory, query_pos, pos, num_k_exclude_rope=0):
         kwds = {}
         if num_k_exclude_rope > 0:
-            assert isinstance(self.cross_attn_image, RoPEAttention)
+            assert isinstance(self.cross_attn_image, RoPEAttention) or isinstance(self.cross_attn_image, RoPELoRAAdapter)
             kwds = {"num_k_exclude_rope": num_k_exclude_rope}
 
         # Cross-Attention
@@ -149,7 +149,7 @@ class MemoryAttention(nn.Module):
 
         for layer in self.layers:
             kwds = {}
-            if isinstance(layer.cross_attn_image, RoPEAttention):
+            if isinstance(layer.cross_attn_image, RoPEAttention) or isinstance(layer.cross_attn_image, RoPELoRAAdapter):
                 kwds = {"num_k_exclude_rope": num_obj_ptr_tokens}
 
             output = layer(
