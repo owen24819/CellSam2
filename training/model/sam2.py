@@ -459,10 +459,13 @@ class SAM2Train(SAM2Base):
         if is_object_mask.sum() == 0:
             return current_out
 
-        foreground_points = {
-            'point_coords': point_inputs['point_coords'][is_object_mask],
-            'point_labels': point_inputs['point_labels'][is_object_mask],
-        }
+        if point_inputs is not None:    
+            foreground_points = {
+                'point_coords': point_inputs['point_coords'][is_object_mask],
+                'point_labels': point_inputs['point_labels'][is_object_mask],
+            }
+        else:
+            foreground_points = None
 
         foreground_high_res_masks = high_res_masks[is_object_mask]
         foreground_low_res_masks = low_res_masks[is_object_mask]
