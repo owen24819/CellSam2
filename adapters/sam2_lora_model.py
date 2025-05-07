@@ -127,7 +127,7 @@ class SAM2LoRAModel:
             param.requires_grad = False
 
         # Unfreeze LoRA parameters and optionally prediction heads
-        trainable_patterns = ['lora']
+        trainable_patterns = ['lora', 'div']
         if self.trainable_iou_pred_heads:
             trainable_patterns.append('iou_prediction_head')
         if self.trainable_obj_score_heads:

@@ -225,6 +225,9 @@ def sample_random_points_from_errors(gt_masks, pred_masks, is_bkgd_mask=None, bk
     B, _, H_im, W_im = gt_masks.shape
     device = gt_masks.device
 
+    if is_bkgd_mask is None:
+        is_bkgd_mask = torch.zeros((B), device=device, dtype=torch.bool)
+
     is_object_mask = ~is_bkgd_mask
     gt_masks = gt_masks[is_object_mask]
     pred_masks = pred_masks[is_object_mask]   
@@ -363,14 +366,14 @@ def get_background_masks(
                           or if return_mask_flags_only is True
     """
     # Identify which objects are background objects (have negative IDs)
-    is_background_mask = data_batch.metadata.unique_objects_identifier[frame_idx, :, 1] < 0
+    is_background_mask = data_batch.metadata.unique_objects_identifier[frame_idx][:, 1] < 0
 
     # Return early if no background objects or only flags requested
     if is_background_mask.sum() == 0 or return_mask_flags_only:
         return is_background_mask, None
 
     # Get batch indices for each background object
-    batch_indices = data_batch.obj_to_frame_idx[frame_idx, is_background_mask, 1]
+    batch_indices = data_batch.obj_to_frame_idx[frame_idx][is_background_mask, 1]
     frame_background_masks = data_batch.bkgd_masks[frame_idx]
 
     # Build list of background masks, repeating each mask for all instances in its batch
@@ -383,3 +386,19 @@ def get_background_masks(
     background_masks = torch.cat(expanded_masks, dim=0)
 
     return is_background_mask, background_masks
+
+def compute_iou(pred, gt):
+    """
+    Compute IoU between prediction and ground truth masks.
+    
+    Args:
+        pred: [N, H, W] prediction masks, can be float values between 0 and 1
+        gt: [N, H, W] ground truth masks, can be float values between 0 and 1
+        
+    Returns:
+        IoU scores for each mask [N]
+    """
+    # For float inputs, we need to handle the intersection and union differently
+    intersection = (pred * gt).sum(dim=(1,2))
+    union = pred.sum(dim=(1,2)) + gt.sum(dim=(1,2)) - intersection
+    return intersection / (union + 1e-6)  # avoid div by zero

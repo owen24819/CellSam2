@@ -8,7 +8,6 @@ import logging
 
 import numpy as np
 import torch
-import torch.distributed
 from sam2.modeling.sam2_base import SAM2Base
 from sam2.modeling.sam2_utils import get_next_point, sample_box_points, get_background_masks
 
@@ -290,6 +289,11 @@ class SAM2Train(SAM2Base):
             "cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
             "non_cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
         }
+
+        tracking_object_ids = input.metadata.unique_objects_identifier[0][:,1]
+        memory_dict = {}
+        all_frame_outputs = {}
+
         for stage_id in processing_order:
             # Get the image features for the current frames
             # img_ids = input.find_inputs[stage_id].img_ids
@@ -310,10 +314,9 @@ class SAM2Train(SAM2Base):
                     input.flat_img_batch, img_ids
                 )
 
-            stage_id_is_bkgd_mask, _ = get_background_masks(input, stage_id)
 
             # Get output masks based on this frame's prompts and previous memory
-            current_out = self.track_step(
+            current_out, tracking_object_ids, memory_dict = self.track_step(
                 frame_idx=stage_id,
                 is_init_cond_frame=stage_id in init_cond_frames,
                 current_vision_feats=current_vision_feats,
@@ -325,25 +328,16 @@ class SAM2Train(SAM2Base):
                 frames_to_add_correction_pt=frames_to_add_correction_pt,
                 output_dict=output_dict,
                 num_frames=num_frames,
-                is_bkgd_mask=stage_id_is_bkgd_mask,
-            )
-            # Append the output, depending on whether it's a conditioning frame
-            add_output_as_cond_frame = stage_id in init_cond_frames or (
-                self.add_all_frames_to_correct_as_cond
-                and stage_id in frames_to_add_correction_pt
+                input=input,
+                tracking_object_ids=tracking_object_ids,
+                memory_dict=memory_dict,
             )
 
-            if add_output_as_cond_frame:
-                output_dict["cond_frame_outputs"][stage_id] = current_out
-            else:
-                output_dict["non_cond_frame_outputs"][stage_id] = current_out
+            all_frame_outputs[stage_id] = current_out
 
         if return_dict:
             return output_dict
         # turn `output_dict` into a list for loss function
-        all_frame_outputs = {}
-        all_frame_outputs.update(output_dict["cond_frame_outputs"])
-        all_frame_outputs.update(output_dict["non_cond_frame_outputs"])
         all_frame_outputs = [all_frame_outputs[t] for t in range(num_frames)]
         # Make DDP happy with activation checkpointing by removing unused keys
         all_frame_outputs = [
@@ -363,15 +357,37 @@ class SAM2Train(SAM2Base):
         mask_inputs,
         output_dict,
         num_frames,
+        input,
+        tracking_object_ids,
+        memory_dict,
         track_in_reverse=False,  # tracking in reverse time order (for demo usage)
         run_mem_encoder=True,  # Whether to run the memory encoder on the predicted masks.
         prev_sam_mask_logits=None,  # The previously predicted SAM mask logits.
         frames_to_add_correction_pt=None,
         gt_masks=None,
-        is_bkgd_mask=None,
     ):
+        """
+        Process a single frame in the tracking sequence.
+        
+        This method handles:
+        1. Running the SAM model on the current frame
+        2. Managing cell division events
+        3. Updating object tracking IDs
+        4. Storing memory features for temporal tracking
+        5. Applying iterative correction points only on the first frame
+        """
+        # Initialize memory dict if first frame
+        if "frame_idx" not in memory_dict:
+            memory_dict["frame_idx"] = []
+            
+        # Get cell division information for current frame
+        is_dividing = input.cell_divides[frame_idx]
+        
+        # Set default for frames_to_add_correction_pt if None
         if frames_to_add_correction_pt is None:
             frames_to_add_correction_pt = []
+            
+        # Run the core tracking step
         current_out, sam_outputs, high_res_features, pix_feat = self._track_step(
             frame_idx,
             is_init_cond_frame,
@@ -384,161 +400,382 @@ class SAM2Train(SAM2Base):
             num_frames,
             track_in_reverse,
             prev_sam_mask_logits,
+            is_dividing,
+            tracking_object_ids,
+            memory_dict,
+            gt_masks
         )
 
+        # Unpack SAM outputs
         (
-            low_res_multimasks,
-            high_res_multimasks,
             ious,
             low_res_masks,
             high_res_masks,
             obj_ptr,
             object_score_logits,
+            div_score_logits,
+            post_split_object_score_logits,
+            is_dividing,
         ) = sam_outputs
 
-        current_out["multistep_pred_masks"] = [low_res_masks]
-        current_out["multistep_pred_masks_high_res"] = [high_res_masks]
-        current_out["multistep_pred_multimasks"] = [low_res_multimasks]
-        current_out["multistep_pred_multimasks_high_res"] = [high_res_multimasks]
-        current_out["multistep_pred_ious"] = [ious]
-        current_out["multistep_point_inputs"] = [point_inputs]
-        current_out["multistep_object_score_logits"] = [object_score_logits]
-        current_out["multistep_is_point_used"] = [torch.ones_like(is_bkgd_mask).bool()]
-        current_out["obj_ptr"] = obj_ptr
+        # Store prediction results
+        self._store_prediction_results(
+            current_out,
+            low_res_masks,
+            high_res_masks,
+            ious,
+            point_inputs,
+            object_score_logits,
+            div_score_logits,
+            post_split_object_score_logits
+        )
 
-        # Use the final prediction (after all correction steps for output and eval)
-        current_out["pred_masks"] = low_res_masks
-        current_out["pred_masks_high_res"] = high_res_masks
+        # Handle cell tracking and division
+        keep_tokens_mask, tracking_object_ids, mother_ids, prev_tracking_object_ids = self._handle_cell_tracking(
+            current_out,
+            input,
+            frame_idx,
+            is_dividing,
+            tracking_object_ids,
+            obj_ptr
+        )
 
-        # Optionally, sample correction points iteratively to correct the mask
-        if frame_idx in frames_to_add_correction_pt:
+        # Apply iterative correction points if needed
+        if frame_idx in frames_to_add_correction_pt and keep_tokens_mask.sum() > 0:
+            assert frame_idx == 0 and is_dividing.sum() == 0
+            # Only add points to first frame
+            # Maybe adapt this for other frames but will need to handle dividing cells
             current_out = self._iter_correct_pt_sampling(
-                is_init_cond_frame,
                 point_inputs,
                 gt_masks,
                 high_res_features,
                 pix_feat,
                 current_out,
-                is_bkgd_mask,
+                keep_tokens_mask,
             )
 
+        # Adjust vision features based on token count changes
+        current_vision_feats = self._adjust_vision_features(
+            pix_feat.shape[0],
+            current_out["pred_masks"].shape[0],
+            current_vision_feats
+        )
 
+        # Update memory with new features
+        if current_out["pred_masks"].shape[0] > 0:
+            self._update_memory_features(
+                current_vision_feats,
+                feat_sizes,
+                point_inputs,
+                run_mem_encoder,
+                current_out,
+                memory_dict,
+                tracking_object_ids,
+                frame_idx,
+                mother_ids,
+                prev_tracking_object_ids,
+                input
+            )
 
-        # Finally run the memory encoder on the predicted mask to encode
-        # it into a new memory feature (that can be used in future frames)
-        self._encode_memory_in_output(
+        return current_out, tracking_object_ids, memory_dict
+
+    def _store_prediction_results(
+        self,
+        current_out,
+        low_res_masks,
+        high_res_masks,
+        ious,
+        point_inputs,
+        object_score_logits,
+        div_score_logits,
+        post_split_object_score_logits
+    ):
+        """Store prediction results in the output dictionary."""
+        current_out["multistep_pred_masks"] = [low_res_masks]
+        current_out["multistep_pred_masks_high_res"] = [high_res_masks]
+        current_out["multistep_pred_ious"] = [ious]
+        current_out["multistep_point_inputs"] = [point_inputs]
+        current_out["multistep_object_score_logits"] = [object_score_logits]
+        current_out["multistep_div_score_logits"] = [div_score_logits]
+        current_out["post_split_object_score_logits"] = [post_split_object_score_logits]
+        
+    def _handle_cell_tracking(
+        self,
+        current_out,
+        input,
+        frame_idx,
+        is_dividing,
+        tracking_object_ids,
+        obj_ptr
+    ):
+        """Handle cell tracking and division events."""
+        # Get cell tracking mask for current frame
+        cell_tracks_mask = input.cell_tracks_mask[frame_idx]
+        
+        # Store pre-division target objects
+        pre_div_target_obj = cell_tracks_mask.float()[:,None]
+        current_out["pre_div_target_obj"] = [pre_div_target_obj]
+        
+        # Create mask for tokens to keep after division
+        keep_tokens_mask = torch.cat((
+            cell_tracks_mask[~is_dividing], 
+            torch.ones(is_dividing.sum()*2, device=cell_tracks_mask.device).bool()
+        ))
+        current_out["post_div_target_obj"] = [keep_tokens_mask.float()[:,None]]
+        current_out["multistep_is_point_used"] = [torch.ones_like(keep_tokens_mask).bool()]
+
+        # Update tracking object IDs to account for cell division
+        prev_tracking_object_ids = tracking_object_ids.clone()
+        mother_ids = tracking_object_ids[is_dividing]
+        
+        # Get new daughter cell IDs
+        new_daughter_ids = input.daughter_ids[frame_idx].flatten()
+        new_daughter_ids = new_daughter_ids[new_daughter_ids > 0]
+        
+        # Update tracking object IDs - swap out mother ID with daughter IDs
+        tracking_object_ids = torch.cat((tracking_object_ids[~is_dividing], new_daughter_ids))
+        
+        # Filter out objects that are no longer tracked
+        exit_object_ids = tracking_object_ids[~keep_tokens_mask]
+        tracking_object_ids = tracking_object_ids[keep_tokens_mask]
+        
+        if frame_idx % 10 == 0:  # Reduce logging frequency
+            logging.debug(f'Frame: {frame_idx} | Tracking IDs: {tracking_object_ids} | Exit IDs: {exit_object_ids}')
+        
+        # Update object pointers
+        obj_ptrs = obj_ptr[keep_tokens_mask]
+        current_out["obj_ptr"] = obj_ptrs
+        
+        # Update mask predictions
+        current_out["pred_masks"] = current_out["multistep_pred_masks"][0][keep_tokens_mask]
+        current_out["pred_masks_high_res"] = current_out["multistep_pred_masks_high_res"][0][keep_tokens_mask]
+        current_out["pred_object_score_logits"] = current_out["post_split_object_score_logits"][0][keep_tokens_mask]
+        
+        return keep_tokens_mask, tracking_object_ids, mother_ids, prev_tracking_object_ids
+        
+    def _adjust_vision_features(self, prev_num_tokens, cur_num_tokens, current_vision_feats):
+        """Adjust vision features based on token count changes."""
+        if prev_num_tokens > cur_num_tokens:
+            # Reduce feature dimensions if tokens were removed
+            return [feat[:, :cur_num_tokens] for feat in current_vision_feats]
+        elif prev_num_tokens < cur_num_tokens:
+            # Expand feature dimensions if tokens were added (e.g., cell division)
+            return [
+                torch.cat((
+                    feat, 
+                    feat[:, :1].repeat(1, cur_num_tokens - prev_num_tokens, 1)
+                ), dim=1) 
+                for feat in current_vision_feats
+            ]
+        return current_vision_feats
+        
+    def _update_memory_features(
+        self,
+        current_vision_feats,
+        feat_sizes,
+        point_inputs,
+        run_mem_encoder,
+        current_out,
+        memory_dict,
+        tracking_object_ids,
+        frame_idx,
+        mother_ids,
+        prev_tracking_object_ids,
+        input
+    ):
+        """Update memory features for temporal tracking."""
+        # Encode current frame predictions into memory features
+        maskmem_features, maskmem_pos_enc = self._encode_memory_in_output(
             current_vision_feats,
             feat_sizes,
             point_inputs,
             run_mem_encoder,
-            high_res_masks,
-            object_score_logits,
             current_out,
         )
-        return current_out
+        
+        if maskmem_features is None or maskmem_pos_enc is None:
+            return
+            
+        # Store position encoding
+        memory_dict["mask_mem_pos_enc"] = maskmem_pos_enc[0]
+        
+        # Update memory features for each tracked object
+        for i, object_id in enumerate(tracking_object_ids):
+            obj_id = object_id.item()
+            
+            if obj_id not in memory_dict:
+                # Initialize memory for new object
+                memory_dict[obj_id] = {
+                    "mask_mem_features": maskmem_features[i:i+1], 
+                    "obj_ptr": current_out["obj_ptr"][i:i+1], 
+                    "frame_idx": [frame_idx]
+                }
+            else:
+                # Update memory for existing object
+                memory_dict[obj_id]["mask_mem_features"] = torch.cat(
+                    (memory_dict[obj_id]["mask_mem_features"], maskmem_features[i:i+1]), 
+                    dim=0
+                )
+                memory_dict[obj_id]["obj_ptr"] = torch.cat(
+                    (memory_dict[obj_id]["obj_ptr"], current_out["obj_ptr"][i:i+1]), 
+                    dim=0
+                )
+                memory_dict[obj_id]["frame_idx"].append(frame_idx)
+        
+        # Handle memory inheritance for daughter cells
+        for mother_id in mother_ids:
+            try:
+                # Find mother cell index
+                mother_id_index = torch.where(prev_tracking_object_ids == mother_id)[0].item()
+                daughter_ids = input.daughter_ids[frame_idx][mother_id_index]
+                
+                # Verify mother cell has memory from previous frame
+                mother_id_item = mother_id.item()
+                if mother_id_item not in memory_dict:
+                    logging.warning(f"Mother ID {mother_id_item} not found in memory dict")
+                    continue
+                    
+                if memory_dict[mother_id_item]["frame_idx"][-1] != frame_idx-1:
+                    logging.warning(f"Mother ID {mother_id_item} last frame is not {frame_idx-1}")
+                    continue
+                
+                # Transfer mother's memory to daughters
+                for daughter_id in daughter_ids:
+                    if daughter_id.item() == 0:  # Skip invalid daughter IDs
+                        continue
+                        
+                    daughter_id_item = daughter_id.item()
+                    if daughter_id_item not in memory_dict:
+                        logging.warning(f"Daughter ID {daughter_id_item} not found in memory dict")
+                        continue
+                        
+                    # Prepend mother's last memory to daughter's memory
+                    memory_dict[daughter_id_item]["mask_mem_features"] = torch.cat(
+                        (memory_dict[mother_id_item]["mask_mem_features"][-1:], 
+                         memory_dict[daughter_id_item]["mask_mem_features"]), 
+                        dim=0
+                    )
+                    memory_dict[daughter_id_item]["obj_ptr"] = torch.cat(
+                        (memory_dict[mother_id_item]["obj_ptr"][-1:], 
+                         memory_dict[daughter_id_item]["obj_ptr"]), 
+                        dim=0
+                    )
+                    memory_dict[daughter_id_item]["frame_idx"].insert(0, frame_idx-1)
+            except Exception as e:
+                logging.error(f"Error handling memory for mother ID {mother_id.item()}: {str(e)}")
 
     def _iter_correct_pt_sampling(
         self,
-        is_init_cond_frame,
         point_inputs,
         gt_masks,
         high_res_features,
         pix_feat_with_mem,
         current_out,
-        is_bkgd_mask,
+        keep_tokens_mask,
     ):
-
-        low_res_masks = current_out["multistep_pred_masks"][0]
-        high_res_masks = current_out["multistep_pred_masks_high_res"][0]
-
-        assert gt_masks is not None
-
-        # Store initial background points if they exist
-        is_object_mask = ~is_bkgd_mask
-        # Only perform iterative sampling on real objects
-        if is_object_mask.sum() == 0:
-            return current_out
-
-        if point_inputs is not None:    
-            foreground_points = {
-                'point_coords': point_inputs['point_coords'][is_object_mask],
-                'point_labels': point_inputs['point_labels'][is_object_mask],
-            }
-        else:
-            foreground_points = None
-
-        foreground_high_res_masks = high_res_masks[is_object_mask]
-        foreground_low_res_masks = low_res_masks[is_object_mask]
-
-        gt_masks_objects = gt_masks[is_object_mask]
-        iter_is_bkgd_mask = is_bkgd_mask[is_object_mask]
-
+        """
+        Iteratively sample correction points to improve mask predictions.
+        
+        Args:
+            point_inputs: Dictionary containing initial point coordinates and labels
+            gt_masks: Ground truth masks for evaluation
+            high_res_features: High resolution features from the image encoder
+            pix_feat_with_mem: Pixel features with memory
+            current_out: Current output dictionary to update
+            keep_tokens_mask: Boolean mask indicating which tokens to keep
+        
+        Returns:
+            Updated current_out dictionary with iterative correction results
+        """
+        # Filter inputs based on keep_tokens_mask
+        gt_masks = gt_masks[keep_tokens_mask]
+        high_res_features = [feat[keep_tokens_mask] for feat in high_res_features]
+        pix_feat_with_mem = pix_feat_with_mem[keep_tokens_mask]
+        
+        point_inputs = {
+            'point_coords': point_inputs['point_coords'][keep_tokens_mask],
+            'point_labels': point_inputs['point_labels'][keep_tokens_mask],
+        }
+        
+        # Get initial masks from the first prediction step
+        low_res_masks = current_out["multistep_pred_masks"][0][keep_tokens_mask]
+        high_res_masks = current_out["multistep_pred_masks_high_res"][0][keep_tokens_mask]
+        is_dividing = torch.zeros(low_res_masks.shape[0], dtype=torch.bool)
+        
+        assert gt_masks is not None, "Ground truth masks required for correction point sampling"
+        
+        # Iteratively add correction points
         for _ in range(self.num_correction_pt_per_frame):
-            # sample a new point from the error between prediction and ground-truth
-            # (with a small probability, directly sample from GT masks instead of errors)
+            # Determine whether to sample from GT or error regions
+            sample_from_gt = False
             if self.training and self.prob_to_sample_from_gt_for_train > 0:
-                sample_from_gt = (
-                    self.rng.random() < self.prob_to_sample_from_gt_for_train
-                )
-            else:
-                sample_from_gt = False
-            # if `pred_for_new_pt` is None, only GT masks will be used for point sampling
-            pred_for_new_pt = None if sample_from_gt else (foreground_high_res_masks > 0)
+                sample_from_gt = self.rng.random() < self.prob_to_sample_from_gt_for_train
+                
+            # If sampling from GT, don't use prediction for point selection
+            pred_for_new_pt = None if sample_from_gt else (high_res_masks > 0)
+            
+            # Sample a new correction point
             new_points, new_labels = get_next_point(
-                gt_masks=gt_masks_objects,
+                gt_masks=gt_masks,
                 pred_masks=pred_for_new_pt,
                 method="uniform" if self.training else self.pt_sampling_for_eval,
-                is_bkgd_mask=iter_is_bkgd_mask,
             )
-
-            foreground_points = concat_points(foreground_points, new_points, new_labels)
-
-            # Feed the mask logits of the previous SAM outputs in the next SAM decoder step.
-            # For tracking, this means that when the user adds a correction click, we also feed
-            # the tracking output mask logits along with the click as input to the SAM decoder.
-            mask_inputs = foreground_low_res_masks
-            multimask_output = self._use_multimask(is_init_cond_frame, foreground_points)
-            if self.use_act_ckpt_iterative_pt_sampling and not multimask_output:
+            
+            # Add the new point to existing points
+            point_inputs = concat_points(point_inputs, new_points, new_labels)
+            
+            # Use previous mask prediction as input for the next step
+            mask_inputs = low_res_masks
+            
+            # Forward through SAM heads (with optional activation checkpointing)
+            if self.use_act_ckpt_iterative_pt_sampling:
                 sam_outputs = torch.utils.checkpoint.checkpoint(
                     self._forward_sam_heads,
-                    backbone_features=pix_feat_with_mem[is_object_mask],
-                    point_inputs=foreground_points,
+                    backbone_features=pix_feat_with_mem,
+                    point_inputs=point_inputs,
                     mask_inputs=mask_inputs,
-                    high_res_features=[high_res_feature[is_object_mask] for high_res_feature in high_res_features],
-                    multimask_output=multimask_output,
+                    high_res_features=high_res_features,
                     use_reentrant=False,
+                    is_dividing=is_dividing,
                 )
             else:
                 sam_outputs = self._forward_sam_heads(
-                    backbone_features=pix_feat_with_mem[is_object_mask],
-                    point_inputs=foreground_points,
+                    backbone_features=pix_feat_with_mem,
+                    point_inputs=point_inputs,
                     mask_inputs=mask_inputs,
-                    high_res_features=[high_res_feature[is_object_mask] for high_res_feature in high_res_features],
-                    multimask_output=multimask_output,
+                    high_res_features=high_res_features,
+                    is_dividing=is_dividing,
                 )
+                
+            # Unpack SAM outputs
             (
-                foreground_low_res_multimasks,
-                foreground_high_res_multimasks,
-                foreground_ious,
-                foreground_low_res_masks,
-                foreground_high_res_masks,
-                foreground_obj_ptr,
-                foreground_object_score_logits,
+                ious,
+                low_res_masks,
+                high_res_masks,
+                obj_ptr,
+                object_score_logits,
+                div_score_logits,
+                post_split_object_score_logits,
+                is_dividing,
             ) = sam_outputs
-
-            current_out["multistep_pred_multimasks"].append(foreground_low_res_multimasks)
-            current_out["multistep_pred_multimasks_high_res"].append(foreground_high_res_multimasks)
-            current_out["multistep_pred_masks"].append(foreground_low_res_masks)
-            current_out["multistep_pred_masks_high_res"].append(foreground_high_res_masks)
-            current_out["multistep_pred_ious"].append(foreground_ious)
-            current_out["multistep_point_inputs"].append(foreground_points)
-            current_out["multistep_object_score_logits"].append(foreground_object_score_logits)
-            current_out["multistep_is_point_used"].append(is_object_mask)
-
-        current_out["obj_ptr"][is_object_mask] = foreground_obj_ptr
-
-        # Update the final predcitions that will get passed to memory encoder
-        current_out["pred_masks"][is_object_mask] = foreground_low_res_masks
-        current_out["pred_masks_high_res"][is_object_mask] = foreground_high_res_masks
-
+            
+            # Store results for this correction step
+            current_out["multistep_pred_masks"].append(low_res_masks)
+            current_out["multistep_pred_masks_high_res"].append(high_res_masks)
+            current_out["multistep_pred_ious"].append(ious)
+            current_out["multistep_point_inputs"].append(point_inputs)
+            current_out["multistep_object_score_logits"].append(object_score_logits)
+            current_out["multistep_div_score_logits"].append(div_score_logits)
+            current_out["post_split_object_score_logits"].append(post_split_object_score_logits)
+            current_out["multistep_is_point_used"].append(keep_tokens_mask)
+            
+            # No divisions in the first frame
+            current_out["pre_div_target_obj"].append(torch.ones_like(div_score_logits).float())
+            current_out["post_div_target_obj"].append(torch.ones_like(div_score_logits).float())
+        
+        # Update final predictions for memory encoder
+        current_out["obj_ptr"] = obj_ptr
+        current_out["pred_masks"] = low_res_masks
+        current_out["pred_masks_high_res"] = high_res_masks
+        
         return current_out
