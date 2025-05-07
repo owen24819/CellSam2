@@ -50,6 +50,9 @@ class BatchedVideoDatapoint:
     metadata: BatchedVideoMetaData
     bkgd_masks: torch.BoolTensor
     dict_key: str
+    cell_divides: torch.IntTensor
+    cell_tracks_mask: torch.BoolTensor
+    daughter_ids: torch.IntTensor
 
     def pin_memory(self, device=None):
         return self.apply(torch.Tensor.pin_memory, device=device)
@@ -74,8 +77,15 @@ class BatchedVideoDatapoint:
         Returns a flattened tensor containing the object to img index.
         The flat index can be used to access a flattened img_batch of shape [(T*B)xCxHxW]
         """
-        frame_idx, video_idx = self.obj_to_frame_idx.unbind(dim=-1)
-        flat_idx = video_idx * self.num_frames + frame_idx
+
+        flat_idx = []
+
+        for i in range(len(self.obj_to_frame_idx)):
+            batch = self.obj_to_frame_idx[i]
+            frame_idx = batch[:,0]
+            video_idx = batch[:,1]
+            flat_idx.append(video_idx * self.num_frames + frame_idx)
+
         return flat_idx
 
     @property
@@ -94,12 +104,16 @@ class Object:
     # Index of the frame in the media (0 if single image)
     frame_index: int
     segment: Union[torch.Tensor, dict]  # RLE dict or binary mask
-
+    entering: Optional[bool] = None
+    parent_id: Optional[int] = None
+    daughter_ids: Optional[torch.Tensor] = None
+    is_in_next_object_ids_list: Optional[bool] = None
 
 @dataclass
 class Frame:
     data: Union[torch.Tensor, PILImage.Image]
     objects: List[Object]
+    object_ids: List[int]
 
 
 @dataclass
@@ -109,7 +123,7 @@ class VideoDatapoint:
     frames: List[Frame]
     video_id: int
     size: Tuple[int, int]
-
+    man_track: torch.IntTensor
 
 def collate_fn(
     batch: List[VideoDatapoint],
@@ -135,42 +149,80 @@ def collate_fn(
         [] for _ in range(T)
     ]  # List to store frame indices for each time step
 
-    bkgd_masks = torch.zeros(T,B,H,W,device=img_batch.device)
+    bkgd_masks = torch.zeros(T,B,H,W,device=img_batch.device, dtype=torch.bool)
+
+    step_t_cell_divides = [[] for _ in range(T)]
+    step_t_cell_tracks_mask = [[] for _ in range(T)]
+    step_t_daughter_ids = [[] for _ in range(T)]
 
     for video_idx, video in enumerate(batch):
         orig_video_id = video.video_id
         orig_frame_size = video.size
         for t, frame in enumerate(video.frames):
             objects = frame.objects
+            dividing_masks = {}
             for obj in objects:
                 if obj.object_id == -1000:
                     bkgd_masks[t,video_idx] += obj.segment
                     continue
+
+                # Divided cells are only used for the masks since the mother cells are the inputs to the frame
+                if t > 0 and obj.entering and obj.parent_id > 0:                      
+                    dividing_masks[obj.object_id] = obj.segment.to(torch.bool)
+                    continue 
+
+                if obj.daughter_ids.sum() > 0:
+                    step_t_daughter_ids[t].append(obj.daughter_ids)
+                else:
+                    step_t_daughter_ids[t].append(torch.zeros((2), dtype=torch.int32))
+
                 orig_obj_id = obj.object_id
                 orig_frame_idx = obj.frame_index
                 step_t_obj_to_frame_idx[t].append(
                     torch.tensor([t, video_idx], dtype=torch.int)
                 )
-                step_t_masks[t].append(obj.segment.to(torch.bool))
+
+                # Skip the mask of the mother cell dividing since we will use the daugher cells masks instead
+                # The mother cell is the input and the daughter cells are the outputs
+                if obj.daughter_ids.sum() == 0:
+                    step_t_masks[t].append(obj.segment.to(torch.bool))
+
                 step_t_objects_identifier[t].append(
                     torch.tensor([orig_video_id, orig_obj_id, orig_frame_idx])
                 )
                 step_t_frame_orig_size[t].append(torch.tensor(orig_frame_size))
 
-    obj_to_frame_idx = torch.stack(
-        [
-            torch.stack(obj_to_frame_idx, dim=0)
-            for obj_to_frame_idx in step_t_obj_to_frame_idx
-        ],
-        dim=0,
-    )
-    masks = torch.stack([torch.stack(masks, dim=0) for masks in step_t_masks], dim=0)
-    objects_identifier = torch.stack(
-        [torch.stack(id, dim=0) for id in step_t_objects_identifier], dim=0
-    )
-    frame_orig_size = torch.stack(
-        [torch.stack(id, dim=0) for id in step_t_frame_orig_size], dim=0
-    )
+                step_t_cell_divides[t].append(obj.daughter_ids.sum() > 0)
+
+                # This signifies that a cell is being tracked to the next frame regardless if it exists in the next frame or not
+                # This keeps track of cells being tracked after exiting the current frame for VOSSampler.num_frames_track_lost_objects frames
+                # The VOS Sampler decides the number of frames we track object after it exits
+                step_t_cell_tracks_mask[t].append((obj.is_in_next_object_ids_list))
+
+            for daughter_ids in step_t_daughter_ids[t]:
+                if daughter_ids.sum() > 0:
+                    for daughter_id in daughter_ids:
+                        step_t_masks[t].append(dividing_masks[int(daughter_id)])
+
+    # Handle empty lists to prevent stack errors
+    for t in range(T):
+        if not step_t_obj_to_frame_idx[t]:
+            step_t_obj_to_frame_idx[t].append(torch.tensor([t, 0], dtype=torch.int))
+            step_t_masks[t].append(torch.zeros((H, W), dtype=torch.bool, device=img_batch.device))
+            step_t_objects_identifier[t].append(torch.tensor([0, 0, 0]))
+            step_t_frame_orig_size[t].append(torch.tensor([H, W]))
+            step_t_cell_divides[t].append(False)
+            step_t_cell_tracks_mask[t].append(False)
+            step_t_daughter_ids[t].append(torch.zeros((2), dtype=torch.int32))
+
+    obj_to_frame_idx = [torch.stack(obj_to_frame_idx, dim=0) for obj_to_frame_idx in step_t_obj_to_frame_idx]
+    masks = [torch.stack(masks, dim=0) for masks in step_t_masks]
+    objects_identifier = [torch.stack(id, dim=0) for id in step_t_objects_identifier]
+    frame_orig_size = [torch.stack(id, dim=0) for id in step_t_frame_orig_size]
+    cell_divides = [torch.stack(id, dim=0) for id in step_t_cell_divides]
+    cell_tracks_mask = [torch.tensor(id, dtype=torch.bool) for id in step_t_cell_tracks_mask]
+    daughter_ids = [torch.stack(id, dim=0) for id in step_t_daughter_ids]
+    
     return BatchedVideoDatapoint(
         img_batch=img_batch,
         obj_to_frame_idx=obj_to_frame_idx,
@@ -180,6 +232,9 @@ def collate_fn(
             frame_orig_size=frame_orig_size,
         ),
         bkgd_masks=bkgd_masks,
+        cell_divides=cell_divides,
+        cell_tracks_mask=cell_tracks_mask,
+        daughter_ids=daughter_ids,
         dict_key=dict_key,
         batch_size=[T],
     )
