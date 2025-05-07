@@ -50,26 +50,14 @@ class VOSDataset(VisionDataset):
 
     def _get_datapoint(self, idx):
 
-        for retry in range(MAX_RETRIES):
-            try:
-                if isinstance(idx, torch.Tensor):
-                    idx = idx.item()
-                # sample a video
-                video, segment_loader = self.video_dataset.get_video(idx)
-                # sample frames and object indices to be used in a datapoint
-                sampled_frms_and_objs = self.sampler.sample(
-                    video, segment_loader, epoch=self.curr_epoch
-                )
-                break  # Succesfully loaded video
-            except Exception as e:
-                if self.training:
-                    logging.warning(
-                        f"Loading failed (id={idx}); Retry {retry} with exception: {e}"
-                    )
-                    idx = random.randrange(0, len(self.video_dataset))
-                else:
-                    # Shouldn't fail to load a val video
-                    raise e
+        if isinstance(idx, torch.Tensor):
+            idx = idx.item()
+        # sample a video
+        video, segment_loader = self.video_dataset.get_video(idx)
+        # sample frames and object indices to be used in a datapoint
+        sampled_frms_and_objs = self.sampler.sample(
+            video, segment_loader, epoch=self.curr_epoch
+        )
 
         datapoint = self.construct(video, sampled_frms_and_objs, segment_loader)
         for transform in self._transforms:
@@ -81,17 +69,19 @@ class VOSDataset(VisionDataset):
         Constructs a VideoDatapoint sample to pass to transforms
         """
         sampled_frames = sampled_frms_and_objs.frames
-        sampled_object_ids = sampled_frms_and_objs.object_ids
+        sampled_object_ids_list = sampled_frms_and_objs.object_ids_list
+        man_track = video.man_track
 
         images = []
         rgb_images = load_images(sampled_frames)
         # Iterate over the sampled frames and store their rgb data and object data (bbox, segment)
-        for frame_idx, frame in enumerate(sampled_frames):
+        for frame_idx, (frame, sampled_object_ids) in enumerate(zip(sampled_frames, sampled_object_ids_list)):
             w, h = rgb_images[frame_idx].size
             images.append(
                 Frame(
                     data=rgb_images[frame_idx],
                     objects=[],
+                    object_ids=sampled_object_ids,
                 )
             )
             # We load the gt segments associated with the current frame
@@ -101,6 +91,7 @@ class VOSDataset(VisionDataset):
                 )
             else:
                 segments = segment_loader.load(frame.frame_idx)
+
             for obj_id in sampled_object_ids:
                 # Extract the segment
                 if obj_id in segments:
@@ -115,26 +106,66 @@ class VOSDataset(VisionDataset):
                         continue
                     segment = torch.zeros(h, w, dtype=torch.uint8)
 
+                # Initialize default values
+                parent_id = 0
+                entering = True
+                daughter_ids = torch.zeros((2), dtype=torch.int32)
+                is_in_next_object_ids_list = True
+
+                if man_track is not None and obj_id > 0:
+                    # Get cell lineage information from man_track
+                    cell_info = man_track[man_track[:,0] == obj_id]
+                    if len(cell_info) > 0:  # Check if cell_info is not empty
+                        cell_info = cell_info[0]
+                        _, start_frame, end_frame, parent_id = cell_info
+                        parent_id = int(parent_id)
+
+                        # Cell is entering if current frame is its start frame
+                        entering = bool(start_frame == frame.frame_idx)
+
+                        # Check if this cell has daughter cells and is currently dividing
+                        if obj_id in man_track[:,-1] and end_frame + 1 == frame.frame_idx:
+                            # Get IDs of daughter cells when division occurs
+                            daughter_ids = torch.tensor(
+                                man_track[man_track[:,-1] == obj_id, 0], 
+                                dtype=torch.int32
+                            )
+                
+                # Determine if this cell should be tracked in the next frame
+                if frame_idx < len(sampled_object_ids_list) - 1:
+                    # Cell is in next frame's object list or has daughter cells
+                    is_in_next_object_ids_list = (
+                        obj_id in sampled_object_ids_list[frame_idx+1] or 
+                        daughter_ids.sum() > 0
+                    )
+
                 images[frame_idx].objects.append(
                     Object(
                         object_id=obj_id,
                         frame_index=frame.frame_idx,
                         segment=segment,
+                        entering=entering,
+                        parent_id=parent_id,
+                        daughter_ids=daughter_ids,
+                        is_in_next_object_ids_list=is_in_next_object_ids_list
                     )
                 )
 
-            images[frame_idx].objects.append(
-                Object(
-                    object_id=-1000,
-                    frame_index=frame.frame_idx,
-                    segment=segments['bkgd_mask'],
+            # Add background mask if available
+            if 'bkgd_mask' in segments:
+                images[frame_idx].objects.append(
+                    Object(
+                        object_id=-1000,
+                        frame_index=frame.frame_idx,
+                        segment=segments['bkgd_mask'],
+                    )
                 )
-            )
             
         return VideoDatapoint(
             frames=images,
             video_id=video.video_id,
             size=(h, w),
+            man_track=man_track,
         )
 
     def __getitem__(self, idx):
