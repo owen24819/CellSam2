@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Optional
 import re
 import torch
+import numpy as np
 
 from iopath.common.file_io import g_pathmgr
 
@@ -39,6 +40,7 @@ class VOSVideo:
     video_name: str
     video_id: int
     frames: List[VOSFrame]
+    man_track: Optional[str] = None
 
     def __len__(self):
         return len(self.frames)
@@ -100,7 +102,6 @@ class CTCRawDataset(VOSRawDataset):
         else:
             return len(self.video_names)
     def get_video(self, idx):
-
         if self.num_frames == 1:
             # SEGMENTATION mode
             video_name, frame_path = self.frame_index[idx]
@@ -117,7 +118,8 @@ class CTCRawDataset(VOSRawDataset):
             for fpath in all_frames[::self.sample_rate]:
                 fid = int(re.findall(r'\d+', fpath.stem)[0])
                 frames.append(VOSFrame(fid, image_path=fpath))
-            video = VOSVideo(video_name, int(video_name), frames)
+            man_track = np.loadtxt(self.train_dir / (video_name + "_GT") / "TRA" / "man_track.txt",dtype=np.int16)
+            video = VOSVideo(video_name, int(video_name), frames, man_track)
 
         video_mask_root = self.train_dir / (video_name + "_GT") / "TRA"
         segment_loader = CTCSegmentLoader(video_mask_root)
