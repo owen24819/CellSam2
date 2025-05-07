@@ -16,7 +16,7 @@ MAX_RETRIES = 1000
 @dataclass
 class SampledFramesAndObjects:
     frames: List[int]
-    object_ids: List[int]
+    object_ids_list: List[List[int]]
 
 
 class VOSSampler:
@@ -29,19 +29,39 @@ class VOSSampler:
 
 
 class RandomUniformSampler(VOSSampler):
+    """
+    VOS Sampler for training: sampling random frames and objects
+    """
     def __init__(
         self,
         num_frames,
         max_num_objects,
         max_num_bkgd_objects,
         reverse_time_prob=0.0,
+        num_frames_track_lost_objects=1,
     ):
         self.num_frames = num_frames
         self.max_num_objects = max_num_objects
         self.max_num_bkgd_objects = max_num_bkgd_objects
         self.reverse_time_prob = reverse_time_prob
 
+        if num_frames == 1:
+            self.num_frames_track_lost_objects = 0
+        else:
+            self.num_frames_track_lost_objects = num_frames_track_lost_objects
+
     def sample(self, video, segment_loader, epoch=None):
+        """
+        Sample random frames and objects from a video
+
+        Args:
+            video: The video (VOSVideo) to sample from
+            segment_loader: The segment loader (CTCSegmentLoader) to load segments from
+            epoch: The epoch number
+
+        Returns:
+            SampledFramesAndObjects: The sampled frames and objects
+        """
 
         for retry in range(MAX_RETRIES):
             if len(video.frames) < self.num_frames:
@@ -67,25 +87,52 @@ class RandomUniformSampler(VOSSampler):
                     if segment.sum() and object_id != 'bkgd_mask':
                         visible_object_ids.append(object_id)
 
-            object_ids = random.sample(
+            object_ids = sorted(random.sample(
                 visible_object_ids,
                 min(len(visible_object_ids), self.max_num_objects),
-            )
-            if len(visible_object_ids) > 0:
-                max_num_bkgd_points = min(self.max_num_objects - len(object_ids), self.max_num_bkgd_objects)
-                # Randomly select a number between 0 and max_num_fp_points
-                num_bkgd_points = random.randint(0, max_num_bkgd_points)
-            else:
-                object_ids = []
-                num_bkgd_points = self.max_num_bkgd_objects
-                assert self.num_frames == 1, "Will need to rethink this for tracking multiple frames"
+            ))
 
-            # Generate FP object IDs starting after max visible ID
+            object_ids_list = [object_ids]
+            object_ids_dict = {0: object_ids}
+
+            if video.man_track is not None:
+                for i, frame in enumerate(frames):
+                    if i == 0:
+                        continue
+                    
+                    # Get all object ids in the current frame
+                    object_ids_dict[i] = []
+                    input_object_ids = []
+                    
+                    for object_id, segment in segment_loader.load(frame.frame_idx).items():
+                        if isinstance(object_id, int):
+                            input_object_ids.append(object_id)
+                            object_ids_dict[i].append(object_id)
+                    
+                    # Include objects from previous frames within tracking window
+                    for j in range(i-self.num_frames_track_lost_objects, i):
+                        if j >= 0:  # Ensure we don't access negative indices
+                            input_object_ids.extend(object_ids_dict[j])
+                    
+                    # Remove duplicates and sort
+                    input_object_ids = sorted(list(set(input_object_ids)))
+                    object_ids_list.append(input_object_ids)
+
+            # Calculate how many background points to add
+            max_num_bkgd_points = min(
+                max(0, self.max_num_objects - len(object_ids_list[0])), 
+                self.max_num_bkgd_objects
+            )
+            num_bkgd_points = random.randint(0, max_num_bkgd_points)
+
+            # Generate background object IDs using negative integers
             bkgd_object_ids = list(range(-1, -1 - num_bkgd_points, -1))  # e.g. [-1, -2, -3, ...]
 
-            all_object_ids = object_ids + bkgd_object_ids
+            # Add background objects to frames within tracking window
+            for j in range(0, min(len(object_ids_list), self.num_frames_track_lost_objects + 1)):
+                object_ids_list[j] = object_ids_list[j] + bkgd_object_ids
 
-            return SampledFramesAndObjects(frames=frames, object_ids=all_object_ids)
+            return SampledFramesAndObjects(frames=frames, object_ids_list=object_ids_list)
 
         raise Exception("Exceeded MAX_RETRIES in RandomUniformSampler")
 
