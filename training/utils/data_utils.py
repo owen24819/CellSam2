@@ -149,7 +149,7 @@ def collate_fn(
         [] for _ in range(T)
     ]  # List to store frame indices for each time step
 
-    bkgd_masks = torch.zeros(T,B,H,W,device=img_batch.device, dtype=torch.bool)
+    bkgd_masks = torch.zeros(T,B,H,W, dtype=torch.bool)
 
     step_t_cell_divides = [[] for _ in range(T)]
     step_t_cell_tracks_mask = [[] for _ in range(T)]
@@ -163,7 +163,7 @@ def collate_fn(
             dividing_masks = {}
             for obj in objects:
                 if obj.object_id == -1000:
-                    bkgd_masks[t,video_idx] += obj.segment
+                    bkgd_masks[t,video_idx] += obj.segment.to(torch.bool)
                     continue
 
                 # Divided cells are only used for the masks since the mother cells are the inputs to the frame
@@ -208,7 +208,7 @@ def collate_fn(
     for t in range(T):
         if not step_t_obj_to_frame_idx[t]:
             step_t_obj_to_frame_idx[t].append(torch.tensor([t, 0], dtype=torch.int))
-            step_t_masks[t].append(torch.zeros((H, W), dtype=torch.bool, device=img_batch.device))
+            step_t_masks[t].append(torch.zeros((H, W), dtype=torch.bool))
             step_t_objects_identifier[t].append(torch.tensor([0, 0, 0]))
             step_t_frame_orig_size[t].append(torch.tensor([H, W]))
             step_t_cell_divides[t].append(False)

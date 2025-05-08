@@ -479,7 +479,6 @@ class Trainer:
         model: nn.Module,
         phase: str,
     ):
-
         outputs = model(batch)
         targets, target_divide = batch.masks, batch.cell_divides
         batch_size = len(batch.img_batch)
@@ -646,6 +645,15 @@ class Trainer:
             data_time.update(time.time() - end)
 
             batch = batch.to(self.device, non_blocking=True)
+            
+            # These are tensors within lists so the general .to(self.device) only works for the img_batch
+            batch.masks = [masks.to(self.device) for masks in batch.masks]
+            batch.bkgd_masks = [bkgd_masks.to(self.device) for bkgd_masks in batch.bkgd_masks]
+            batch.cell_divides = [cell_divides.to(self.device) for cell_divides in batch.cell_divides]
+            batch.cell_tracks_mask = [cell_tracks_mask.to(self.device) for cell_tracks_mask in batch.cell_tracks_mask]
+            batch.daughter_ids = [daughter_ids.to(self.device) for daughter_ids in batch.daughter_ids]
+            batch.obj_to_frame_idx = [obj_to_frame_idx.to(self.device) for obj_to_frame_idx in batch.obj_to_frame_idx]
+            batch.metadata.unique_objects_identifier = [unique_objects_identifier.to(self.device) for unique_objects_identifier in batch.metadata.unique_objects_identifier]
 
             # compute output
             with torch.no_grad():
@@ -790,6 +798,15 @@ class Trainer:
             batch = batch.to(
                 self.device, non_blocking=True
             )  # move tensors in a tensorclass
+
+            # These are tensors within lists so the general .to(self.device) only works for the img_batch
+            batch.masks = [masks.to(self.device) for masks in batch.masks]
+            batch.bkgd_masks = [bkgd_masks.to(self.device) for bkgd_masks in batch.bkgd_masks]
+            batch.cell_divides = [cell_divides.to(self.device) for cell_divides in batch.cell_divides]
+            batch.cell_tracks_mask = [cell_tracks_mask.to(self.device) for cell_tracks_mask in batch.cell_tracks_mask]
+            batch.daughter_ids = [daughter_ids.to(self.device) for daughter_ids in batch.daughter_ids]
+            batch.obj_to_frame_idx = [obj_to_frame_idx.to(self.device) for obj_to_frame_idx in batch.obj_to_frame_idx]
+            batch.metadata.unique_objects_identifier = [unique_objects_identifier.to(self.device) for unique_objects_identifier in batch.metadata.unique_objects_identifier]
 
             try:
                 self._run_step(batch, phase, loss_mts, extra_loss_mts)

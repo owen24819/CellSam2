@@ -424,7 +424,7 @@ class SAM2Base(torch.nn.Module):
         """
         # Use -10/+10 as logits for neg/pos pixels (very close to 0/1 in prob after sigmoid).
         out_scale, out_bias = 20.0, -10.0  # sigmoid(-10.0)=4.5398e-05
-        mask_inputs_float = mask_inputs.float()
+        mask_inputs_float = mask_inputs.to(torch.float32)
         high_res_masks = mask_inputs_float * out_scale + out_bias
         low_res_masks = F.interpolate(
             high_res_masks,
