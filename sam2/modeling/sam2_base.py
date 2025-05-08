@@ -641,7 +641,7 @@ class SAM2Base(torch.nn.Module):
         
         # Prepare positional embeddings
         memory_pos_embed = memory_dict["mask_mem_pos_enc"]
-        memory_pos_embed = memory_pos_embed.flatten(2).permute(2, 0, 1)
+        memory_pos_embed = memory_pos_embed[:1].flatten(2).permute(2, 0, 1)
         memory_pos_embed = memory_pos_embed[None].expand(N, H*W, B, self.mem_dim)
         
         # Add temporal positional encoding
