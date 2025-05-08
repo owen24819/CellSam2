@@ -539,8 +539,8 @@ class SAM2Train(SAM2Base):
         exit_object_ids = tracking_object_ids[~keep_tokens_mask]
         tracking_object_ids = tracking_object_ids[keep_tokens_mask]
         
-        if frame_idx % 10 == 0:  # Reduce logging frequency
-            logging.debug(f'Frame: {frame_idx} | Tracking IDs: {tracking_object_ids} | Exit IDs: {exit_object_ids}')
+        # if frame_idx % 10 == 0:  # Reduce logging frequency
+        #     logging.debug(f'Frame: {frame_idx} | Tracking IDs: {tracking_object_ids} | Exit IDs: {exit_object_ids}')
         
         # Update object pointers
         obj_ptrs = obj_ptr[keep_tokens_mask]
