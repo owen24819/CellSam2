@@ -3,7 +3,7 @@
 scratch:
   resolution: 512
   num_train_workers: 2
-  num_frames: 1
+  num_frames: 4
   max_num_objects: 12
   max_num_bkgd_objects: 4
   base_lr: 5.0e-6
@@ -13,7 +13,7 @@ scratch:
   use_lora: True 
   lora_lr: 1.0e-3
   use_wandb: False
-  freeze_encoder: True
+  freeze_encoder: False
 
 dataset:
   # PATHS to Dataset
@@ -188,6 +188,9 @@ trainer:
     pred_obj_scores: true
     pred_obj_scores_mlp: true
     fixed_no_obj_ptr: true
+    # cell division prediction
+    pred_div_scores: true
+    pred_div_scores_mlp: true
     # multimask tracking settings
     multimask_output_for_tracking: true
     use_multimask_token_for_obj_ptr: true
@@ -199,19 +202,19 @@ trainer:
 
     ####### Training specific params #######
     # box/point input and corrections
-    prob_to_use_pt_input_for_train: 0.5
+    prob_to_use_pt_input_for_train: 1
     prob_to_use_pt_input_for_eval: 0.0
     prob_to_use_box_input_for_train: 0.5  # 0.5*0.5 = 0.25 prob to use box instead of points
     prob_to_use_box_input_for_eval: 0.0
     prob_to_sample_from_gt_for_train: 0.1  # with a small prob, sampling correction points from GT mask instead of prediction errors
-    num_frames_to_correct_for_train: 2  # iteratively sample on random 1~2 frames (always include the first frame)
+    num_frames_to_correct_for_train: 1  # iteratively sample on random 1~2 frames (always include the first frame)
     num_frames_to_correct_for_eval: 1  # only iteratively sample on first frame
     rand_frames_to_correct_for_train: True  # random #init-cond-frame ~ 2
     add_all_frames_to_correct_as_cond: True  # when a frame receives a correction click, it becomes a conditioning frame (even if it's not initially a conditioning frame)
     # maximum 2 initial conditioning frames
-    num_init_cond_frames_for_train: 2
+    num_init_cond_frames_for_train: 1
     rand_init_cond_frames_for_train: True  # random 1~2
-    num_correction_pt_per_frame: 7
+    num_correction_pt_per_frame: 5
     use_act_ckpt_iterative_pt_sampling: false
     
 
@@ -224,7 +227,7 @@ trainer:
     train:
       _target_: training.dataset.sam2_datasets.TorchTrainMixedDataset
       phases_per_epoch: 1
-      batch_sizes: [2]
+      batch_sizes: [1]
       datasets:
         - _target_: training.dataset.vos_dataset.VOSDataset
           training: true
@@ -251,7 +254,7 @@ trainer:
     val:
       _target_: training.dataset.sam2_datasets.TorchTrainMixedDataset
       phases_per_epoch: 1
-      batch_sizes: [2]
+      batch_sizes: [1]
       datasets:
         - _target_: training.dataset.vos_dataset.VOSDataset
           training: false

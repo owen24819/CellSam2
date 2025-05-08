@@ -2,9 +2,8 @@
 
 scratch:
   resolution: 512
-  train_batch_size: 1
   num_train_workers: 0
-  num_frames: 2
+  num_frames: 3
   max_num_objects: 12
   max_num_bkgd_objects: 4
   base_lr: 5.0e-6
@@ -188,7 +187,10 @@ trainer:
     # object occlusion prediction
     pred_obj_scores: true
     pred_obj_scores_mlp: true
-    fixed_no_obj_ptr: true
+    fixed_no_obj_ptr: true    
+    # cell division prediction
+    pred_div_scores: true
+    pred_div_scores_mlp: true
     # multimask tracking settings
     multimask_output_for_tracking: true
     use_multimask_token_for_obj_ptr: true
@@ -212,7 +214,7 @@ trainer:
     # maximum 2 initial conditioning frames
     num_init_cond_frames_for_train: 1
     rand_init_cond_frames_for_train: True  # random 1~2
-    num_correction_pt_per_frame: 7
+    num_correction_pt_per_frame: 2
     use_act_ckpt_iterative_pt_sampling: false
     
 
