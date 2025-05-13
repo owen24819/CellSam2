@@ -33,7 +33,7 @@ def dice_loss(inputs, targets, num_objects):
     denominator = inputs.sum(-1) + targets.sum(-1)
     loss = 1 - (numerator + 1) / (denominator + 1)
 
-    return loss.sum() / num_objects
+    return loss / num_objects
 
 
 def sigmoid_focal_loss(
@@ -68,7 +68,7 @@ def sigmoid_focal_loss(
         alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
         loss = alpha_t * loss
 
-    return loss.mean(1).sum() / num_objects
+    return loss.flatten(1).mean(-1) / num_objects
 
 
 def iou_loss(
@@ -98,7 +98,7 @@ def iou_loss(
         loss = F.l1_loss(pred_ious, actual_ious, reduction="none")
     else:
         loss = F.mse_loss(pred_ious, actual_ious, reduction="none")
-    return loss.sum() / num_objects
+    return loss / num_objects
 
 
 class MultiStepMultiMasksAndIous(nn.Module):
@@ -257,7 +257,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
         losses["loss_dice"] += loss_dice.sum()
         losses["loss_iou"] += loss_iou.sum()
         losses["loss_div"] += loss_div.sum()
-        losses["loss_class"] += loss_class
+        losses["loss_class"] += loss_class.sum()
 
     def reduce_loss(self, losses):
         reduced_loss = 0.0
