@@ -106,8 +106,10 @@ class RandomUniformSampler(VOSSampler):
                     
                     for object_id, segment in segment_loader.load(frame.frame_idx).items():
                         if isinstance(object_id, int):
-                            input_object_ids.append(object_id)
-                            object_ids_dict[i].append(object_id)
+                            parent_id = video.man_track[video.man_track[:, 0] == object_id, -1]
+                            if any([object_id in object_ids_dict[j] for j in range(i)]) or any([parent_id in object_ids_dict[j] for j in range(i)]):
+                                input_object_ids.append(object_id)
+                                object_ids_dict[i].append(object_id)
                     
                     # Include objects from previous frames within tracking window
                     for j in range(i-self.num_frames_track_lost_objects, i):
