@@ -503,15 +503,21 @@ class SAM2Train(SAM2Base):
         cell_tracks_mask = input.cell_tracks_mask[frame_idx]
         
         # Store pre-division target objects
-        pre_div_target_obj = cell_tracks_mask.float()[:,None]
+        pre_div_target_obj = input.target_obj_mask[frame_idx].float()[:,None]
         current_out["pre_div_target_obj"] = [pre_div_target_obj]
-        
+
+        # Create mask for tokens to keep after division
+        post_div_target_obj = torch.cat((
+            pre_div_target_obj[~is_dividing], 
+            torch.ones((is_dividing.sum()*2, 1), device=cell_tracks_mask.device).float()
+        ))
+        current_out["post_div_target_obj"] = [post_div_target_obj]
+
         # Create mask for tokens to keep after division
         keep_tokens_mask = torch.cat((
             cell_tracks_mask[~is_dividing], 
             torch.ones(is_dividing.sum()*2, device=cell_tracks_mask.device).bool()
         ))
-        current_out["post_div_target_obj"] = [keep_tokens_mask.float()[:,None]]
         current_out["multistep_is_point_used"] = [torch.ones_like(keep_tokens_mask).bool()]
 
         # Update tracking object IDs to account for cell division
@@ -759,9 +765,8 @@ class SAM2Train(SAM2Base):
             current_out["post_split_object_score_logits"].append(post_split_object_score_logits)
             current_out["multistep_is_point_used"].append(keep_tokens_mask)
             
-            # No divisions in the first frame
-            current_out["pre_div_target_obj"].append(torch.ones_like(div_score_logits).float())
-            current_out["post_div_target_obj"].append(torch.ones_like(div_score_logits).float())
+            current_out["pre_div_target_obj"].append(current_out["pre_div_target_obj"][0].clone())
+            current_out["post_div_target_obj"].append(current_out["post_div_target_obj"][0].clone())
         
         # Update final predictions for memory encoder
         current_out["obj_ptr"] = obj_ptr

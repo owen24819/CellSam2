@@ -54,7 +54,8 @@ class BatchedVideoDatapoint:
     cell_tracks_mask: torch.BoolTensor
     daughter_ids: torch.IntTensor
     no_inputs: torch.BoolTensor
-
+    target_obj_mask: torch.BoolTensor
+    
     def pin_memory(self, device=None):
         return self.apply(torch.Tensor.pin_memory, device=device)
 
@@ -154,6 +155,7 @@ def collate_fn(
 
     step_t_cell_divides = [[] for _ in range(T)]
     step_t_cell_tracks_mask = [[] for _ in range(T)]
+    step_t_target_obj_mask = [[] for _ in range(T)]
     step_t_daughter_ids = [[] for _ in range(T)]
     step_t_no_inputs = []
 
@@ -195,11 +197,11 @@ def collate_fn(
                 step_t_frame_orig_size[t].append(torch.tensor(orig_frame_size))
 
                 step_t_cell_divides[t].append(obj.daughter_ids.sum() > 0)
-
                 # This signifies that a cell is being tracked to the next frame regardless if it exists in the next frame or not
                 # This keeps track of cells being tracked after exiting the current frame for VOSSampler.num_frames_track_lost_objects frames
                 # The VOS Sampler decides the number of frames we track object after it exits
                 step_t_cell_tracks_mask[t].append((obj.is_in_next_object_ids_list))
+                step_t_target_obj_mask[t].append(obj.segment.sum() > 0)
 
             for daughter_ids in step_t_daughter_ids[t]:
                 if daughter_ids.sum() > 0:
@@ -218,8 +220,9 @@ def collate_fn(
             step_t_masks[t].append(torch.zeros((H, W), dtype=torch.bool))
             step_t_objects_identifier[t].append(torch.tensor([0, 0, 0]))
             step_t_frame_orig_size[t].append(torch.tensor([H, W]))
-            step_t_cell_divides[t].append(False)
-            step_t_cell_tracks_mask[t].append(False)
+            step_t_cell_divides[t].append(torch.zeros(1, dtype=torch.bool))
+            step_t_cell_tracks_mask[t].append(torch.zeros(1, dtype=torch.bool))
+            step_t_target_obj_mask[t].append(torch.zeros(1, dtype=torch.bool))
             step_t_daughter_ids[t].append(torch.zeros((2), dtype=torch.int32))
 
     obj_to_frame_idx = [torch.stack(obj_to_frame_idx, dim=0) for obj_to_frame_idx in step_t_obj_to_frame_idx]
@@ -227,7 +230,8 @@ def collate_fn(
     objects_identifier = [torch.stack(id, dim=0) for id in step_t_objects_identifier]
     frame_orig_size = [torch.stack(id, dim=0) for id in step_t_frame_orig_size]
     cell_divides = [torch.stack(id, dim=0) for id in step_t_cell_divides]
-    cell_tracks_mask = [torch.tensor(id, dtype=torch.bool) for id in step_t_cell_tracks_mask]
+    cell_tracks_mask = [torch.tensor(id, dtype=torch.bool) for id in step_t_cell_tracks_mask] # whether the object is being tracked to the next frame regardless if it exists in the current frame
+    target_obj_mask = [torch.stack(id, dim=0) for id in step_t_target_obj_mask] # whether the cell exists in the frame
     daughter_ids = [torch.stack(id, dim=0) for id in step_t_daughter_ids]
     no_inputs = torch.stack(step_t_no_inputs, dim=0) # whether a frame any inputs, foreground or background
     
@@ -242,6 +246,7 @@ def collate_fn(
         bkgd_masks=bkgd_masks,
         cell_divides=cell_divides,
         cell_tracks_mask=cell_tracks_mask,
+        target_obj_mask=target_obj_mask,
         daughter_ids=daughter_ids,
         no_inputs=no_inputs,
         dict_key=dict_key,
