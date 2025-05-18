@@ -482,6 +482,8 @@ class Trainer:
         outputs = model(batch)
         targets, target_divide = batch.masks, batch.cell_divides
         batch_size = len(batch.img_batch)
+        targets = [target for target, no_inputs in zip(targets, batch.no_inputs) if not no_inputs]
+        target_divide = [target_divide for target_divide, no_inputs in zip(target_divide, batch.no_inputs) if not no_inputs]
 
         key = batch.dict_key  # key for dataset
         loss = self.loss[key](outputs, targets, target_divide)

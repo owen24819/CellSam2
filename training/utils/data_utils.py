@@ -53,6 +53,7 @@ class BatchedVideoDatapoint:
     cell_divides: torch.IntTensor
     cell_tracks_mask: torch.BoolTensor
     daughter_ids: torch.IntTensor
+    no_inputs: torch.BoolTensor
 
     def pin_memory(self, device=None):
         return self.apply(torch.Tensor.pin_memory, device=device)
@@ -154,6 +155,7 @@ def collate_fn(
     step_t_cell_divides = [[] for _ in range(T)]
     step_t_cell_tracks_mask = [[] for _ in range(T)]
     step_t_daughter_ids = [[] for _ in range(T)]
+    step_t_no_inputs = []
 
     for video_idx, video in enumerate(batch):
         orig_video_id = video.video_id
@@ -204,6 +206,11 @@ def collate_fn(
                     for daughter_id in daughter_ids:
                         step_t_masks[t].append(dividing_masks[int(daughter_id)])
 
+            if not step_t_obj_to_frame_idx[t]:
+                step_t_no_inputs.append(torch.tensor(True))
+            else:
+                step_t_no_inputs.append(torch.tensor(False))
+
     # Handle empty lists to prevent stack errors
     for t in range(T):
         if not step_t_obj_to_frame_idx[t]:
@@ -222,6 +229,7 @@ def collate_fn(
     cell_divides = [torch.stack(id, dim=0) for id in step_t_cell_divides]
     cell_tracks_mask = [torch.tensor(id, dtype=torch.bool) for id in step_t_cell_tracks_mask]
     daughter_ids = [torch.stack(id, dim=0) for id in step_t_daughter_ids]
+    no_inputs = torch.stack(step_t_no_inputs, dim=0) # whether a frame any inputs, foreground or background
     
     return BatchedVideoDatapoint(
         img_batch=img_batch,
@@ -235,6 +243,7 @@ def collate_fn(
         cell_divides=cell_divides,
         cell_tracks_mask=cell_tracks_mask,
         daughter_ids=daughter_ids,
+        no_inputs=no_inputs,
         dict_key=dict_key,
         batch_size=[T],
     )

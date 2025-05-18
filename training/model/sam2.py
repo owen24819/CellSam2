@@ -291,6 +291,9 @@ class SAM2Train(SAM2Base):
         all_frame_outputs = {}
 
         for stage_id in processing_order:
+            if input.no_inputs[stage_id]:
+                continue
+
             # Get the image features for the current frames
             # img_ids = input.find_inputs[stage_id].img_ids
             img_ids = input.flat_obj_to_img_idx[stage_id]
@@ -330,7 +333,7 @@ class SAM2Train(SAM2Base):
             all_frame_outputs[stage_id] = current_out
 
         # turn `output_dict` into a list for loss function
-        all_frame_outputs = [all_frame_outputs[t] for t in range(num_frames)]
+        all_frame_outputs = [all_frame_outputs[t] for t in range(num_frames) if not input.no_inputs[t]]
         # Make DDP happy with activation checkpointing by removing unused keys
         all_frame_outputs = [
             {k: v for k, v in d.items() if k != "obj_ptr"} for d in all_frame_outputs
