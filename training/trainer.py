@@ -655,6 +655,7 @@ class Trainer:
             batch.cell_tracks_mask = [cell_tracks_mask.to(self.device) for cell_tracks_mask in batch.cell_tracks_mask]
             batch.daughter_ids = [daughter_ids.to(self.device) for daughter_ids in batch.daughter_ids]
             batch.obj_to_frame_idx = [obj_to_frame_idx.to(self.device) for obj_to_frame_idx in batch.obj_to_frame_idx]
+            batch.target_obj_mask = [target_obj_mask.to(self.device) for target_obj_mask in batch.target_obj_mask]
             batch.metadata.unique_objects_identifier = [unique_objects_identifier.to(self.device) for unique_objects_identifier in batch.metadata.unique_objects_identifier]
 
             # compute output
@@ -808,6 +809,7 @@ class Trainer:
             batch.cell_tracks_mask = [cell_tracks_mask.to(self.device) for cell_tracks_mask in batch.cell_tracks_mask]
             batch.daughter_ids = [daughter_ids.to(self.device) for daughter_ids in batch.daughter_ids]
             batch.obj_to_frame_idx = [obj_to_frame_idx.to(self.device) for obj_to_frame_idx in batch.obj_to_frame_idx]
+            batch.target_obj_mask = [target_obj_mask.to(self.device) for target_obj_mask in batch.target_obj_mask]
             batch.metadata.unique_objects_identifier = [unique_objects_identifier.to(self.device) for unique_objects_identifier in batch.metadata.unique_objects_identifier]
 
             try:
