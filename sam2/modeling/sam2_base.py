@@ -501,16 +501,13 @@ class SAM2Base(torch.nn.Module):
 
     def _prepare_memory_conditioned_features(
         self,
-        frame_idx,
         is_init_cond_frame,
         current_vision_feats,
         current_vision_pos_embeds,
         feat_sizes,
-        output_dict,
         num_frames,
         tracking_object_ids,
         memory_dict,
-        track_in_reverse=False,  # tracking in reverse time order (for demo usage)
     ):
         """
         Fuse the current frame's visual feature map with previous memory.
@@ -719,16 +716,13 @@ class SAM2Base(torch.nn.Module):
 
     def _track_step(
         self,
-        frame_idx,
         is_init_cond_frame,
         current_vision_feats,
         current_vision_pos_embeds,
         feat_sizes,
         point_inputs,
         mask_inputs,
-        output_dict,
         num_frames,
-        track_in_reverse,
         prev_sam_mask_logits,
         is_dividing,
         tracking_object_ids,
@@ -755,16 +749,13 @@ class SAM2Base(torch.nn.Module):
         else:
             # fused the visual feature with previous memory features in the memory bank
             pix_feat = self._prepare_memory_conditioned_features(
-                frame_idx=frame_idx,
                 is_init_cond_frame=is_init_cond_frame,
                 current_vision_feats=current_vision_feats[-1:],
                 current_vision_pos_embeds=current_vision_pos_embeds[-1:],
                 feat_sizes=feat_sizes[-1:],
-                output_dict=output_dict,
                 num_frames=num_frames,
                 tracking_object_ids=tracking_object_ids,
                 memory_dict=memory_dict,
-                track_in_reverse=track_in_reverse,
             )
             # apply SAM-style segmentation head
             # here we might feed previously predicted low-res SAM mask logits into the SAM mask decoder,

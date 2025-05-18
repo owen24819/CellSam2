@@ -285,10 +285,6 @@ class SAM2Train(SAM2Base):
         # first process all the initial conditioning frames to encode them as memory,
         # and then conditioning on them to track the remaining frames
         processing_order = init_cond_frames + backbone_out["frames_not_in_init_cond"]
-        output_dict = {
-            "cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
-            "non_cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
-        }
 
         tracking_object_ids = input.metadata.unique_objects_identifier[0][:,1]
         memory_dict = {}
@@ -314,7 +310,6 @@ class SAM2Train(SAM2Base):
                     input.flat_img_batch, img_ids
                 )
 
-
             # Get output masks based on this frame's prompts and previous memory
             current_out, tracking_object_ids, memory_dict = self.track_step(
                 frame_idx=stage_id,
@@ -326,7 +321,6 @@ class SAM2Train(SAM2Base):
                 mask_inputs=backbone_out["mask_inputs_per_frame"].get(stage_id, None),
                 gt_masks=backbone_out["gt_masks_per_frame"].get(stage_id, None),
                 frames_to_add_correction_pt=frames_to_add_correction_pt,
-                output_dict=output_dict,
                 num_frames=num_frames,
                 input=input,
                 tracking_object_ids=tracking_object_ids,
@@ -335,8 +329,6 @@ class SAM2Train(SAM2Base):
 
             all_frame_outputs[stage_id] = current_out
 
-        if return_dict:
-            return output_dict
         # turn `output_dict` into a list for loss function
         all_frame_outputs = [all_frame_outputs[t] for t in range(num_frames)]
         # Make DDP happy with activation checkpointing by removing unused keys
@@ -355,12 +347,10 @@ class SAM2Train(SAM2Base):
         feat_sizes,
         point_inputs,
         mask_inputs,
-        output_dict,
         num_frames,
         input,
         tracking_object_ids,
         memory_dict,
-        track_in_reverse=False,  # tracking in reverse time order (for demo usage)
         run_mem_encoder=True,  # Whether to run the memory encoder on the predicted masks.
         prev_sam_mask_logits=None,  # The previously predicted SAM mask logits.
         frames_to_add_correction_pt=None,
@@ -389,16 +379,13 @@ class SAM2Train(SAM2Base):
             
         # Run the core tracking step
         current_out, sam_outputs, high_res_features, pix_feat = self._track_step(
-            frame_idx,
             is_init_cond_frame,
             current_vision_feats,
             current_vision_pos_embeds,
             feat_sizes,
             point_inputs,
             mask_inputs,
-            output_dict,
             num_frames,
-            track_in_reverse,
             prev_sam_mask_logits,
             is_dividing,
             tracking_object_ids,
