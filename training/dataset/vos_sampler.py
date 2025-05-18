@@ -125,7 +125,8 @@ class RandomUniformSampler(VOSSampler):
                 max(0, self.max_num_objects - len(object_ids_list[0])), 
                 self.max_num_bkgd_objects
             )
-            num_bkgd_points = random.randint(0, max_num_bkgd_points)
+            min_num_bkgd_points = int(len(object_ids_list[0]) == 0)
+            num_bkgd_points = random.randint(min_num_bkgd_points, max_num_bkgd_points)
 
             # Generate background object IDs using negative integers
             bkgd_object_ids = list(range(-1, -1 - num_bkgd_points, -1))  # e.g. [-1, -2, -3, ...]
