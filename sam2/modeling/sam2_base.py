@@ -533,7 +533,7 @@ class SAM2Base(torch.nn.Module):
         device = current_vision_feats[-1].device
         
         # Skip memory fusion for image-only mode
-        if self.num_maskmem == 0:
+        if self.num_maskmem == 0 or len(tracking_object_ids) == 0:
             pix_feat = current_vision_feats[-1].permute(1, 2, 0).view(B, C, H, W)
             return pix_feat
 
