@@ -225,13 +225,12 @@ class MultiStepMultiMasksAndIous(nn.Module):
                 gamma=self.focal_gamma_obj_score,
             )
 
-
         num_dividing_objects = target_divide.sum()
         if num_dividing_objects > 0:
             loss_div = sigmoid_focal_loss(
                 div_score_logits,
                 target_divide[:,None].to(torch.float),
-                num_dividing_objects,
+                num_objects,
                 alpha=self.focal_alpha_obj_score,
                 gamma=self.focal_gamma_obj_score,
             )
