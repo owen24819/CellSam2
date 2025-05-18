@@ -59,7 +59,6 @@ class MaskDecoder(nn.Module):
         self.iou_token = nn.Embedding(1, transformer_dim)
         self.num_mask_tokens = num_multimask_outputs + 1
         self.mask_tokens = nn.Embedding(self.num_mask_tokens, transformer_dim)
-        self.division_tokens = nn.Embedding(1, transformer_dim)
 
         self.pred_obj_scores = pred_obj_scores
         if self.pred_obj_scores:
@@ -251,7 +250,7 @@ class MaskDecoder(nn.Module):
 
         if self.pred_div_scores:
             output_tokens = torch.cat(
-                [output_tokens, self.division_tokens.weight], dim=0
+                [output_tokens, self.div_score_token.weight], dim=0
             )
 
         output_tokens = output_tokens.unsqueeze(0).expand(
