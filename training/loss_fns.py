@@ -225,17 +225,13 @@ class MultiStepMultiMasksAndIous(nn.Module):
                 gamma=self.focal_gamma_obj_score,
             )
 
-        num_dividing_objects = target_divide.sum()
-        if num_dividing_objects > 0:
-            loss_div = sigmoid_focal_loss(
-                div_score_logits,
-                target_divide[:,None].to(torch.float),
-                num_objects,
-                alpha=self.focal_alpha_obj_score,
-                gamma=self.focal_gamma_obj_score,
-            )
-        else:
-            loss_div = torch.zeros_like(div_score_logits)
+        loss_div = sigmoid_focal_loss(
+            div_score_logits,
+            target_divide[:,None].to(torch.float),
+            num_objects,
+            alpha=self.focal_alpha_obj_score,
+            gamma=self.focal_gamma_obj_score,
+        )
 
         loss_iou = iou_loss(
             src_masks,
@@ -249,7 +245,6 @@ class MultiStepMultiMasksAndIous(nn.Module):
         loss_mask = loss_mask * post_div_target_obj
         loss_dice = loss_dice * post_div_target_obj
         loss_iou = loss_iou * post_div_target_obj
-        loss_div = loss_div * pre_div_target_obj
 
         # sum over batch dimension (note that the losses are already divided by num_objects)
         losses["loss_mask"] += loss_mask.sum()
