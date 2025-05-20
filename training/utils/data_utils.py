@@ -55,7 +55,7 @@ class BatchedVideoDatapoint:
     daughter_ids: torch.IntTensor
     no_inputs: torch.BoolTensor
     target_obj_mask: torch.BoolTensor
-    
+
     def pin_memory(self, device=None):
         return self.apply(torch.Tensor.pin_memory, device=device)
 
@@ -201,7 +201,7 @@ def collate_fn(
                 # This keeps track of cells being tracked after exiting the current frame for VOSSampler.num_frames_track_lost_objects frames
                 # The VOS Sampler decides the number of frames we track object after it exits
                 step_t_cell_tracks_mask[t].append((obj.is_in_next_object_ids_list))
-                step_t_target_obj_mask[t].append(obj.segment.sum() > 0)
+                step_t_target_obj_mask[t].append(obj.segment.sum() > 0 or obj.daughter_ids.sum() > 0)
 
             for daughter_ids in step_t_daughter_ids[t]:
                 if daughter_ids.sum() > 0:
