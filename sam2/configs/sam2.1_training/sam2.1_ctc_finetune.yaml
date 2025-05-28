@@ -81,6 +81,7 @@ trainer:
     adapt_mlp: true
     trainable_iou_pred_heads: true
     trainable_obj_score_heads: true
+    mode: train
 
   model:
     _target_: training.model.sam2.SAM2Train
