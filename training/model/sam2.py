@@ -390,9 +390,9 @@ class SAM2Train(SAM2Base):
             mask_inputs,
             num_frames,
             prev_sam_mask_logits,
-            is_dividing,
             tracking_object_ids,
             memory_dict,
+            is_dividing,
             gt_masks
         )
 
@@ -402,9 +402,8 @@ class SAM2Train(SAM2Base):
             low_res_masks,
             high_res_masks,
             obj_ptr,
-            object_score_logits,
+            object_score_logits_dict,
             div_score_logits,
-            post_split_object_score_logits,
             is_dividing,
         ) = sam_outputs
 
@@ -415,9 +414,8 @@ class SAM2Train(SAM2Base):
             high_res_masks,
             ious,
             point_inputs,
-            object_score_logits,
+            object_score_logits_dict,
             div_score_logits,
-            post_split_object_score_logits
         )
 
         # Handle cell tracking and division
@@ -476,18 +474,18 @@ class SAM2Train(SAM2Base):
         high_res_masks,
         ious,
         point_inputs,
-        object_score_logits,
+        object_score_logits_dict,
         div_score_logits,
-        post_split_object_score_logits
     ):
+        
         """Store prediction results in the output dictionary."""
         current_out["multistep_pred_masks"] = [low_res_masks]
         current_out["multistep_pred_masks_high_res"] = [high_res_masks]
         current_out["multistep_pred_ious"] = [ious]
         current_out["multistep_point_inputs"] = [point_inputs]
-        current_out["multistep_object_score_logits"] = [object_score_logits]
+        current_out["multistep_object_score_logits"] = [object_score_logits_dict["pre_div"]]
         current_out["multistep_div_score_logits"] = [div_score_logits]
-        current_out["post_split_object_score_logits"] = [post_split_object_score_logits]
+        current_out["post_split_object_score_logits"] = [object_score_logits_dict["post_div"]]
         
     def _handle_cell_tracking(
         self,
@@ -749,9 +747,8 @@ class SAM2Train(SAM2Base):
                 low_res_masks,
                 high_res_masks,
                 obj_ptr,
-                object_score_logits,
+                object_score_logits_dict,
                 div_score_logits,
-                post_split_object_score_logits,
                 is_dividing,
             ) = sam_outputs
             
@@ -760,9 +757,9 @@ class SAM2Train(SAM2Base):
             current_out["multistep_pred_masks_high_res"].append(high_res_masks)
             current_out["multistep_pred_ious"].append(ious)
             current_out["multistep_point_inputs"].append(point_inputs)
-            current_out["multistep_object_score_logits"].append(object_score_logits)
+            current_out["multistep_object_score_logits"].append(object_score_logits_dict["pre_div"])
             current_out["multistep_div_score_logits"].append(div_score_logits)
-            current_out["post_split_object_score_logits"].append(post_split_object_score_logits)
+            current_out["post_split_object_score_logits"].append(object_score_logits_dict["post_div"])
             current_out["multistep_is_point_used"].append(keep_tokens_mask)
             
             current_out["pre_div_target_obj"].append(current_out["pre_div_target_obj"][0].clone())

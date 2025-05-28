@@ -218,8 +218,10 @@ class MaskDecoder(nn.Module):
                 # If no dividing cells, just use the non-dividing scores
                 post_split_object_score_logits = pred_scores
 
+        object_score_logits_dict = {"pre_div" : object_score_logits, "post_div" : post_split_object_score_logits}
+
         # Return all outputs
-        return pred_masks, pred_ious, pred_tokens, object_score_logits, div_score_logits, post_split_object_score_logits, is_dividing
+        return pred_masks, pred_ious, pred_tokens, object_score_logits_dict, div_score_logits, is_dividing
 
     def predict_masks(
         self,

@@ -347,9 +347,8 @@ class SAM2Base(torch.nn.Module):
             low_res_masks,
             ious,
             sam_output_tokens,
-            object_score_logits,
+            object_score_logits_dict,
             div_score_logits,
-            post_split_object_score_logits,
             is_dividing,
         ) = self.sam_mask_decoder(
             image_embeddings=backbone_features,
@@ -366,7 +365,7 @@ class SAM2Base(torch.nn.Module):
 
         # Apply object score thresholding for non-dividing cells
         if self.pred_obj_scores and num_non_dividing_cells > 0:
-            is_obj_appearing = object_score_logits > 0
+            is_obj_appearing = object_score_logits_dict["post_div"] > 0
             
             # Apply hard thresholding to low_res_masks based on object scores
             # Set masks to NO_OBJ_SCORE where object is not appearing
@@ -395,7 +394,7 @@ class SAM2Base(torch.nn.Module):
         if self.pred_obj_scores and num_non_dividing_cells > 0:
             # Calculate object appearance factor (soft or hard threshold)
             if self.soft_no_obj_ptr:
-                lambda_is_obj_appearing = object_score_logits[:num_non_dividing_cells].sigmoid()
+                lambda_is_obj_appearing = object_score_logits_dict["post_div"][:num_non_dividing_cells].sigmoid()
             else:
                 lambda_is_obj_appearing = is_obj_appearing[:num_non_dividing_cells].float()
 
@@ -411,9 +410,8 @@ class SAM2Base(torch.nn.Module):
             low_res_masks,
             high_res_masks,
             obj_ptr,
-            object_score_logits,
+            object_score_logits_dict,
             div_score_logits,
-            post_split_object_score_logits,
             is_dividing,
         )
 
@@ -724,9 +722,9 @@ class SAM2Base(torch.nn.Module):
         mask_inputs,
         num_frames,
         prev_sam_mask_logits,
-        is_dividing,
         tracking_object_ids,
         memory_dict,
+        is_dividing=None,
         gt_masks=None,
     ):
         current_out = {"point_inputs": point_inputs, "mask_inputs": mask_inputs}
