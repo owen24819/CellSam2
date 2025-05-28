@@ -37,13 +37,11 @@ class RandomUniformSampler(VOSSampler):
         num_frames,
         max_num_objects,
         max_num_bkgd_objects,
-        reverse_time_prob=0.0,
         num_frames_track_lost_objects=1,
     ):
         self.num_frames = num_frames
         self.max_num_objects = max_num_objects
         self.max_num_bkgd_objects = max_num_bkgd_objects
-        self.reverse_time_prob = reverse_time_prob
 
         if num_frames == 1:
             self.num_frames_track_lost_objects = 0
@@ -70,9 +68,6 @@ class RandomUniformSampler(VOSSampler):
                 )
             start = random.randrange(0, len(video.frames) - self.num_frames + 1)
             frames = [video.frames[start + step] for step in range(self.num_frames)]
-            if random.uniform(0, 1) < self.reverse_time_prob:
-                # Reverse time
-                frames = frames[::-1]
 
             # Get first frame object ids
             visible_object_ids = []
