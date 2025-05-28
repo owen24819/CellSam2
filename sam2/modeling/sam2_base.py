@@ -531,7 +531,7 @@ class SAM2Base(torch.nn.Module):
         device = current_vision_feats[-1].device
         
         # Skip memory fusion for image-only mode
-        if self.num_maskmem == 0 or len(tracking_object_ids) == 0:
+        if self.num_maskmem == 0 or (tracking_object_ids is not None and len(tracking_object_ids) == 0):
             pix_feat = current_vision_feats[-1].permute(1, 2, 0).view(B, C, H, W)
             return pix_feat
 
@@ -588,11 +588,12 @@ class SAM2Base(torch.nn.Module):
         
         # Process each tracked object
         for idx, object_id in enumerate(tracking_object_ids):
-            obj_id = object_id.item()
+            if not isinstance(object_id, int):
+                object_id = object_id.item()
             
             # Get memory features for this object if available
-            if obj_id in memory_dict:
-                mask_mem_features = memory_dict[obj_id]["mask_mem_features"]
+            if object_id in memory_dict:
+                mask_mem_features = memory_dict[object_id]["mask_mem_features"]
                 num_mem_frames = min(mask_mem_features.shape[0], self.num_maskmem)
                 memory[:num_mem_frames, idx] = mask_mem_features[-num_mem_frames:]
                 N = max(N, num_mem_frames)
@@ -607,8 +608,8 @@ class SAM2Base(torch.nn.Module):
             
             # Process object pointers if enabled
             if self.use_obj_ptrs_in_encoder:
-                if obj_id in memory_dict:
-                    obj_ptrs = memory_dict[obj_id]["obj_ptr"][-num_mem_frames:]
+                if object_id in memory_dict:
+                    obj_ptrs = memory_dict[object_id]["obj_ptr"][-num_mem_frames:]
                     # Split pointer into tokens for mem_dim < C
                     obj_ptrs = obj_ptrs.reshape(-1, C // self.mem_dim, self.mem_dim)
                     obj_ptrs_mem[:num_mem_frames, idx] = obj_ptrs
@@ -800,6 +801,12 @@ class SAM2Base(torch.nn.Module):
         
         high_res_masks = current_out["pred_masks_high_res"]
         object_score_logits = current_out["pred_object_score_logits"]
+
+        if high_res_masks.ndim == 3:
+            high_res_masks = high_res_masks[:,None]
+
+        if object_score_logits.ndim == 1:
+            object_score_logits = object_score_logits[:,None]
         
         maskmem_features, maskmem_pos_enc = self._encode_new_memory(
             current_vision_feats=current_vision_feats,
