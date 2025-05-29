@@ -29,8 +29,6 @@ class SAM2Transforms(nn.Module):
         self.std = [0.229, 0.224, 0.225]
         self.to_tensor = ToTensor()
         
-        # Custom resize and pad function that can't be torchscript-ed
-        self.resize_pad = ResizeLongestSide(resolution)
         
         # Only normalize is torchscript-ed now
         self.transforms = torch.jit.script(
@@ -39,7 +37,20 @@ class SAM2Transforms(nn.Module):
             )
         )
 
+        self.params_set = False
+
+    def _set_hw_params(self, image, image_size):
+        self.resized_image_size, self.orig_hw = get_resize_longest_side(image, image_size)
+        # Custom resize and pad function that can't be torchscript-ed
+        self.resize_pad = ResizeLongestSide(image_size, self.resized_image_size)
+        padding = self.resize_pad.get_padding()
+        self.params_set = True
+
+        return self.resized_image_size, padding
+
     def __call__(self, x):
+        if not self.params_set:
+            raise ValueError("Parameters not set. Call _set_hw_params first.")
         x = self.to_tensor(x)
         x = self.resize_pad(x)
         return self.transforms(x)
@@ -50,7 +61,7 @@ class SAM2Transforms(nn.Module):
         return img_batch
 
     def transform_coords(
-        self, coords: torch.Tensor, normalize=False, orig_hw=None
+        self, coords: torch.Tensor, normalize=False
     ) -> torch.Tensor:
         """
         Expects a torch tensor with length 2 in the last dimension. The coordinates can be in absolute image or normalized coordinates,
@@ -60,8 +71,8 @@ class SAM2Transforms(nn.Module):
             Un-normalized coordinates in the range of [0, 1] which is expected by the SAM2 model.
         """
         if normalize:
-            assert orig_hw is not None
-            h, w = orig_hw
+            assert self.orig_hw is not None
+            h, w = self.orig_hw
             coords = coords.clone()
             coords[..., 0] = coords[..., 0] / w
             coords[..., 1] = coords[..., 1] / h
@@ -70,16 +81,16 @@ class SAM2Transforms(nn.Module):
         return coords
 
     def transform_boxes(
-        self, boxes: torch.Tensor, normalize=False, orig_hw=None
+        self, boxes: torch.Tensor, normalize=False
     ) -> torch.Tensor:
         """
         Expects a tensor of shape Bx4. The coordinates can be in absolute image or normalized coordinates,
         if the coords are in absolute image coordinates, normalize should be set to True and original image size is required.
         """
-        boxes = self.transform_coords(boxes.reshape(-1, 2, 2), normalize, orig_hw)
+        boxes = self.transform_coords(boxes.reshape(-1, 2, 2), normalize)
         return boxes
 
-    def postprocess_masks(self, masks: torch.Tensor, orig_hw, resized_image_size) -> torch.Tensor:
+    def postprocess_masks(self, masks: torch.Tensor, orig_hw) -> torch.Tensor:
         """
         Perform PostProcessing on output masks.
         """
@@ -124,7 +135,7 @@ class SAM2Transforms(nn.Module):
         masks = F.interpolate(masks, (h*4, w*4), mode="bilinear", align_corners=False)
         
         # Get the dimensions from resized_image_size
-        new_h, new_w = resized_image_size
+        new_h, new_w = self.resized_image_size
         
         # Calculate padding offsets to crop from the center
         h_total = h * 4
@@ -148,27 +159,34 @@ def get_resize_longest_side(x, target_length):
         w, h = x.size  
     else:
         raise ValueError(f"Unsupported input type: {type(x)}")
+    
     scale = target_length / max(h, w)
     new_h = int(h * scale)
     new_w = int(w * scale)
-    return new_h, new_w
+    return (new_h, new_w), (h, w)
 
 class ResizeLongestSide(nn.Module):
-    def __init__(self, target_length):
+    def __init__(self, target_length, resized_image_size):
         super().__init__()
         self.target_length = target_length
+        self.new_h, self.new_w = resized_image_size
 
-    def forward(self, x):
-        new_h, new_w = get_resize_longest_side(x, self.target_length)
-        # Resize
-        x = F.interpolate(x.unsqueeze(0), size=(new_h, new_w), mode='bilinear', align_corners=False).squeeze(0)
+    def get_padding(self):
         
         # Pad
-        pad_h = self.target_length - new_h
-        pad_w = self.target_length - new_w
+        pad_h = self.target_length - self.new_h
+        pad_w = self.target_length - self.new_w
         pad_top = pad_h // 2
         pad_bottom = pad_h - pad_top
         pad_left = pad_w // 2
         pad_right = pad_w - pad_left
+
+        return pad_left, pad_right, pad_top, pad_bottom
+
+    def forward(self, x):
+        # Resize
+        x = F.interpolate(x.unsqueeze(0), size=(self.new_h, self.new_w), mode='bilinear', align_corners=False).squeeze(0)
+
+        pad_left, pad_right, pad_top, pad_bottom = self.get_padding()
         
         return F.pad(x, (pad_left, pad_right, pad_top, pad_bottom))
