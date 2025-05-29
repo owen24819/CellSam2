@@ -451,7 +451,8 @@ class SAM2Train(SAM2Base):
 
         # Update memory with new features
         if current_out["pred_masks"].shape[0] > 0:
-            self._update_memory_features(
+            daughter_ids_list = input.daughter_ids[frame_idx]
+            memory_dict = self._update_memory_features(
                 current_vision_feats,
                 feat_sizes,
                 point_inputs,
@@ -462,7 +463,7 @@ class SAM2Train(SAM2Base):
                 frame_idx,
                 mother_ids,
                 prev_tracking_object_ids,
-                input
+                daughter_ids_list,
             )
 
         return current_out, tracking_object_ids, memory_dict
@@ -562,101 +563,6 @@ class SAM2Train(SAM2Base):
                 for feat in current_vision_feats
             ]
         return current_vision_feats
-        
-    def _update_memory_features(
-        self,
-        current_vision_feats,
-        feat_sizes,
-        point_inputs,
-        run_mem_encoder,
-        current_out,
-        memory_dict,
-        tracking_object_ids,
-        frame_idx,
-        mother_ids,
-        prev_tracking_object_ids,
-        input
-    ):
-        """Update memory features for temporal tracking."""
-        # Encode current frame predictions into memory features
-        maskmem_features, maskmem_pos_enc = self._encode_memory_in_output(
-            current_vision_feats,
-            feat_sizes,
-            point_inputs,
-            run_mem_encoder,
-            current_out,
-        )
-        
-        if maskmem_features is None or maskmem_pos_enc is None:
-            return
-            
-        # Store position encoding
-        memory_dict["mask_mem_pos_enc"] = maskmem_pos_enc[0]
-        
-        # Update memory features for each tracked object
-        for i, object_id in enumerate(tracking_object_ids):
-            obj_id = object_id.item()
-            
-            if obj_id not in memory_dict:
-                # Initialize memory for new object
-                memory_dict[obj_id] = {
-                    "mask_mem_features": maskmem_features[i:i+1], 
-                    "obj_ptr": current_out["obj_ptr"][i:i+1], 
-                    "frame_idx": [frame_idx]
-                }
-            else:
-                # Update memory for existing object
-                memory_dict[obj_id]["mask_mem_features"] = torch.cat(
-                    (memory_dict[obj_id]["mask_mem_features"], maskmem_features[i:i+1]), 
-                    dim=0
-                )
-                memory_dict[obj_id]["obj_ptr"] = torch.cat(
-                    (memory_dict[obj_id]["obj_ptr"], current_out["obj_ptr"][i:i+1]), 
-                    dim=0
-                )
-                memory_dict[obj_id]["frame_idx"].append(frame_idx)
-        
-        # Handle memory inheritance for daughter cells
-        for mother_id in mother_ids:
-            try:
-                # Find mother cell index
-                mother_id_index = torch.where(prev_tracking_object_ids == mother_id)[0].item()
-                daughter_ids = input.daughter_ids[frame_idx][mother_id_index]
-                
-                # Verify mother cell has memory from previous frame
-                mother_id_item = mother_id.item()
-                if mother_id_item not in memory_dict:
-                    logging.warning(f"Mother ID {mother_id_item} not found in memory dict")
-                    continue
-                    
-                if memory_dict[mother_id_item]["frame_idx"][-1] != frame_idx-1:
-                    logging.warning(f"Mother ID {mother_id_item} last frame is not {frame_idx-1}")
-                    continue
-                
-                # Transfer mother's memory to daughters
-                for daughter_id in daughter_ids:
-                    if daughter_id.item() == 0:  # Skip invalid daughter IDs
-                        continue
-                        
-                    daughter_id_item = daughter_id.item()
-                    if daughter_id_item not in memory_dict:
-                        logging.warning(f"Daughter ID {daughter_id_item} not found in memory dict")
-                        continue
-                        
-                    # Prepend mother's last memory to daughter's memory
-                    memory_dict[daughter_id_item]["mask_mem_features"] = torch.cat(
-                        (memory_dict[mother_id_item]["mask_mem_features"][-1:], 
-                         memory_dict[daughter_id_item]["mask_mem_features"]), 
-                        dim=0
-                    )
-                    memory_dict[daughter_id_item]["obj_ptr"] = torch.cat(
-                        (memory_dict[mother_id_item]["obj_ptr"][-1:], 
-                         memory_dict[daughter_id_item]["obj_ptr"]), 
-                        dim=0
-                    )
-                    memory_dict[daughter_id_item]["frame_idx"].insert(0, frame_idx-1)
-            except Exception as e:
-                logging.error(f"Error handling memory for mother ID {mother_id.item()}: {str(e)}")
 
     def _iter_correct_pt_sampling(
         self,
