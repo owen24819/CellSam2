@@ -201,6 +201,10 @@ trainer:
     # Compilation flag
     # compile_image_encoder: False
 
+    pred_iou_thresh: 0.7
+    obj_score_thresh: 0.5
+    div_obj_score_thresh: 0.5
+
     ####### Training specific params #######
     # box/point input and corrections
     prob_to_use_pt_input_for_train: 1

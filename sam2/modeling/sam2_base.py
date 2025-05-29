@@ -97,6 +97,9 @@ class SAM2Base(torch.nn.Module):
         pred_div_scores: bool = False,
         # Whether to use an MLP to predict cell division scores
         pred_div_scores_mlp: bool = False,
+        pred_iou_thresh: float = 0.7,
+        obj_score_thresh: float = 0.5,
+        div_obj_score_thresh: float = 0.5,
     ):
         super().__init__()
 
@@ -183,6 +186,10 @@ class SAM2Base(torch.nn.Module):
         if no_obj_embed_spatial:
             self.no_obj_embed_spatial = torch.nn.Parameter(torch.zeros(1, self.mem_dim))
             trunc_normal_(self.no_obj_embed_spatial, std=0.02)
+        
+        self.pred_iou_thresh = pred_iou_thresh
+        self.obj_score_thresh = obj_score_thresh
+        self.div_obj_score_thresh = div_obj_score_thresh
 
         self._build_sam_heads()
         self.max_cond_frames_in_attn = max_cond_frames_in_attn
@@ -244,6 +251,9 @@ class SAM2Base(torch.nn.Module):
             pred_div_scores=self.pred_div_scores,
             pred_div_scores_mlp=self.pred_div_scores_mlp,
             use_multimask_token_for_obj_ptr=self.use_multimask_token_for_obj_ptr,
+            pred_iou_thresh=self.pred_iou_thresh,
+            obj_score_thresh=self.obj_score_thresh,
+            div_obj_score_thresh=self.div_obj_score_thresh,
             **(self.sam_mask_decoder_extra_args or {}),
         )
         if self.use_obj_ptrs_in_encoder:

@@ -33,6 +33,9 @@ class MaskDecoder(nn.Module):
         use_multimask_token_for_obj_ptr: bool = False,
         pred_div_scores: bool = False,
         pred_div_scores_mlp: bool = False,
+        pred_iou_thresh: float = None,
+        obj_score_thresh: float = None,
+        div_obj_score_thresh: float = None,
     ) -> None:
         """
         Predicts masks given an image and prompt embeddings, using a
@@ -120,6 +123,10 @@ class MaskDecoder(nn.Module):
         self.dynamic_multimask_stability_delta = dynamic_multimask_stability_delta
         self.dynamic_multimask_stability_thresh = dynamic_multimask_stability_thresh
 
+        self.pred_iou_thresh = pred_iou_thresh
+        self.obj_score_thresh = obj_score_thresh
+        self.div_obj_score_thresh = div_obj_score_thresh
+
     def forward(
         self,
         image_embeddings: torch.Tensor,
@@ -164,7 +171,7 @@ class MaskDecoder(nn.Module):
 
         # Determine which cells are dividing
         if is_dividing is None:
-            is_dividing = (div_score_logits > 0) & (object_score_logits > 0)
+            is_dividing = (div_score_logits[:,0] > self.div_obj_score_thresh) & (object_score_logits[:,0] > self.obj_score_thresh) & (iou_pred[:,1:3] > self.pred_iou_thresh).all(1)
         
         # Ensure is_dividing is a flat boolean tensor
         is_dividing = is_dividing.view(-1)
