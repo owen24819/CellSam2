@@ -38,6 +38,7 @@ class SAM2AutomaticCellTracker:
         max_hole_area: int = 0,
         max_sprinkle_area: int = 0,
         mask_threshold: float = 0.0,
+        segment: bool = False,
     ) -> None:
         """
         Using a SAM 2 model, generates and tracks masks for an entire video.
@@ -70,6 +71,7 @@ class SAM2AutomaticCellTracker:
             memory.
           use_m2m (bool): Whether to add a one step refinement using previous mask predictions.
           multimask_output (bool): Whether to output multimask at each point of the grid.
+          segment (bool): Whether to segment or track.
         """
 
         assert output_mode in [
@@ -106,6 +108,7 @@ class SAM2AutomaticCellTracker:
         self.pred_iou_thresh = pred_iou_thresh
         self.obj_score_thresh = obj_score_thresh
         self.div_obj_score_thresh = div_obj_score_thresh
+        self.segment = segment
 
         self._transforms = SAM2Transforms(
             resolution=self.model.image_size,
@@ -268,6 +271,10 @@ class SAM2AutomaticCellTracker:
         # Save points and labels in inference_state for later reference
         inference_state["point_inputs"] = {0: {"point_coords": points, "point_labels": labels}}
 
+        if self.segment:
+            for i in range(1,len(inference_state["images"])):
+                inference_state["point_inputs"][i] = {"point_coords": points, "point_labels": labels}
+
         return inference_state
 
     def track_cells(self, inference_state):
@@ -312,12 +319,14 @@ class SAM2AutomaticCellTracker:
 
         for frame_idx in tqdm(processing_order, desc="propagate in video"):     
 
-            if frame_idx == 0:
+            if frame_idx == 0 or self.segment:
                 tracking_object_ids = None
                 batch_size = inference_state["point_inputs"][frame_idx]['point_coords'].shape[0]
+                is_init_cond_frame = True
             else:
                 tracking_object_ids = inference_state["obj_ids"][frame_idx-1]
                 batch_size = len(tracking_object_ids)       
+                is_init_cond_frame = False
 
             if batch_size == 0:
                 inference_state["obj_ids"][frame_idx] = torch.zeros(0, device=self.device, dtype=torch.int32)
@@ -335,7 +344,7 @@ class SAM2AutomaticCellTracker:
             
             # Run the core tracking step
             current_out, sam_outputs, high_res_features, pix_feat = self.model._track_step(
-                is_init_cond_frame=frame_idx == 0,
+                is_init_cond_frame=is_init_cond_frame,
                 current_vision_feats=current_vision_feats,
                 current_vision_pos_embeds=current_vision_pos_embeds,
                 feat_sizes=feat_sizes,
@@ -506,19 +515,20 @@ class SAM2AutomaticCellTracker:
             feat_sizes,
         ) = self._get_image_feature(inference_state, frame_idx, current_out["pred_masks_high_res"].shape[0])
                         
-        inference_state["memory_dict"] = self.model._update_memory_features(
-            current_vision_feats,
-            feat_sizes,
-            inference_state["point_inputs"].get(frame_idx, None),
-            run_mem_encoder=True,
-            current_out=current_out,
-            memory_dict=inference_state["memory_dict"],
-            tracking_object_ids=obj_ids,
-            frame_idx=frame_idx,
-            mother_ids=mother_ids,
-            prev_tracking_object_ids=prev_obj_ids,
-            daughter_ids_list=daughter_ids_list,
-        )
+        if not self.segment:
+            inference_state["memory_dict"] = self.model._update_memory_features(
+                current_vision_feats,
+                feat_sizes,
+                inference_state["point_inputs"].get(frame_idx, None),
+                run_mem_encoder=True,
+                current_out=current_out,
+                memory_dict=inference_state["memory_dict"],
+                tracking_object_ids=obj_ids,
+                frame_idx=frame_idx,
+                mother_ids=mother_ids,
+                prev_tracking_object_ids=prev_obj_ids,
+                daughter_ids_list=daughter_ids_list,
+            )
 
         track_mask = self.postprocess_mask(data["masks"], inference_state)
 
@@ -554,9 +564,7 @@ class SAM2AutomaticCellTracker:
 
     def save_ctc(self, track_mask, frame_idx, inference_state):
 
-        res_track = inference_state["res_track"]
         res_path = inference_state["res_path"]
-        parent_ids = inference_state["parent_ids"][frame_idx]
 
         cell_ids = np.unique(track_mask)
         cell_ids = cell_ids[cell_ids != 0]
@@ -566,22 +574,29 @@ class SAM2AutomaticCellTracker:
 
         cv2.imwrite(str(res_path / f'mask_{frame_idx:03d}.tif'), track_mask.astype(np.uint16))
 
-        for cell_id, parent_id in zip(cell_ids, parent_ids):
-            if cell_id not in res_track[:,0]:
-                res_track = np.concatenate([res_track, np.array([[cell_id, frame_idx, frame_idx, parent_id]])], axis=0)
+        if not self.segment:
+
+            parent_ids = inference_state["parent_ids"][frame_idx]
+            res_track = inference_state["res_track"]
+
+            for cell_id, parent_id in zip(cell_ids, parent_ids):
+                if cell_id not in res_track[:,0]:
+                    res_track = np.concatenate([res_track, np.array([[cell_id, frame_idx, frame_idx, parent_id]])], axis=0)
             else:
                 assert res_track[res_track[:,0] == cell_id,2] == frame_idx-1, "cell_id must be continuous"
                 res_track[res_track[:,0] == cell_id,2] = frame_idx
 
-        np.savetxt(res_path / 'res_track.txt',res_track,fmt='%d')
+            np.savetxt(res_path / 'res_track.txt',res_track,fmt='%d')
 
-        inference_state["res_track"] = res_track
+            inference_state["res_track"] = res_track
 
     def save_tracking_results(self, inference_state, tracking_results, alpha=0.3):
-        res_track = inference_state["res_track"]
         res_path = inference_state["res_path"]
 
-        num_colors = inference_state["max_obj_id"] + 1  # Add 1 to account for 0-based indexing
+        if self.segment:
+            num_colors = 1000
+        else:
+            num_colors = inference_state["max_obj_id"] + 1  # Add 1 to account for 0-based indexing
         colors = np.random.randint(0, 255, (num_colors, 3))
         color_stack = np.zeros((len(tracking_results), inference_state["video_height"], 
                               inference_state["video_width"], 3), dtype=np.uint8)
@@ -617,52 +632,54 @@ class SAM2AutomaticCellTracker:
                           (centroid_x-5, centroid_y+3),
                           cv2.FONT_HERSHEY_SIMPLEX,
                           0.5,  # Font scale
-                          (255, 255, 255),  # black color
+                          (0, 0, 0),  # black color
                           1,    # Line thickness
                           cv2.LINE_AA)
                 
-            parent_ids = inference_state["parent_ids"][frame_idx].cpu().numpy()
-            parent_ids_unique = np.unique(parent_ids)
-            parent_ids_unique = parent_ids_unique[parent_ids_unique != 0]
+            if not self.segment:
+                parent_ids = inference_state["parent_ids"][frame_idx].cpu().numpy()
+                parent_ids_unique = np.unique(parent_ids)
+                parent_ids_unique = parent_ids_unique[parent_ids_unique != 0]
 
-            for parent_id in parent_ids_unique:
-                dau_cell_ids = inference_state["obj_ids"][frame_idx][parent_ids == parent_id]
+                for parent_id in parent_ids_unique:
+                    dau_cell_ids = inference_state["obj_ids"][frame_idx][parent_ids == parent_id]
 
-                # Draw line between daughter cells
-                if len(dau_cell_ids) == 2:
-                    # Get centroids of both daughter cells
-                    mask1 = track_mask == dau_cell_ids[0]
-                    y1, x1 = np.where(mask1)
-                    if len(y1) > 0:
-                        centroid1_y = int(np.mean(y1))
-                        centroid1_x = int(np.mean(x1))
+                    # Draw line between daughter cells
+                    if len(dau_cell_ids) == 2:
+                        # Get centroids of both daughter cells
+                        mask1 = track_mask == dau_cell_ids[0]
+                        y1, x1 = np.where(mask1)
+                        if len(y1) > 0:
+                            centroid1_y = int(np.mean(y1))
+                            centroid1_x = int(np.mean(x1))
 
-                        mask2 = track_mask == dau_cell_ids[1] 
-                        y2, x2 = np.where(mask2)
-                        if len(y2) > 0:
-                            centroid2_y = int(np.mean(y2))
-                            centroid2_x = int(np.mean(x2))
+                            mask2 = track_mask == dau_cell_ids[1] 
+                            y2, x2 = np.where(mask2)
+                            if len(y2) > 0:
+                                centroid2_y = int(np.mean(y2))
+                                centroid2_x = int(np.mean(x2))
 
-                            # Draw line connecting centroids
-                            cv2.line(color_stack[frame_idx],
-                                    (centroid1_x, centroid1_y),
-                                    (centroid2_x, centroid2_y),
-                                    (0, 0, 0),  # Black color
-                                    1)  # Line thickness
+                                # Draw line connecting centroids
+                                cv2.line(color_stack[frame_idx],
+                                        (centroid1_x, centroid1_y),
+                                        (centroid2_x, centroid2_y),
+                                        (0, 0, 0),  # Black color
+                                        1)  # Line thickness
 
             # Add frame number to top of frame
             cv2.putText(color_stack[frame_idx],
                         f"{frame_idx:03}",
-                        (5, 15), # Position in top-left
+                        (0, 15), # Position in top-left
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.5,  # Font scale 
-                        (0, 0, 0),  # Black color
+                        (255, 255, 255),  # White color
                         1,    # Line thickness
                         cv2.LINE_AA)
 
         # Save as video
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(str(res_path / 'pred_video.mp4'), 
+        mode = 'segment' if self.segment else 'track'
+        out = cv2.VideoWriter(str(res_path / f'pred_{mode}_video.mp4'), 
                             fourcc, 10.0, # 10 fps
                             (inference_state["video_width"], inference_state["video_height"]))
         
