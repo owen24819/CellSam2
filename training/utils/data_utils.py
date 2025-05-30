@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 
 from PIL import Image as PILImage
 from tensordict import tensorclass
@@ -47,6 +48,7 @@ class BatchedVideoDatapoint:
     img_batch: torch.FloatTensor
     obj_to_frame_idx: torch.IntTensor
     masks: torch.BoolTensor
+    heatmaps: torch.FloatTensor
     metadata: BatchedVideoMetaData
     bkgd_masks: torch.BoolTensor
     dict_key: str
@@ -158,6 +160,7 @@ def collate_fn(
     step_t_target_obj_mask = [[] for _ in range(T)]
     step_t_daughter_ids = [[] for _ in range(T)]
     step_t_no_inputs = []
+    step_t_centroids = [[] for _ in range(T)]
 
     for video_idx, video in enumerate(batch):
         orig_video_id = video.video_id
@@ -165,14 +168,18 @@ def collate_fn(
         for t, frame in enumerate(video.frames):
             objects = frame.objects
             dividing_masks = {}
+            dividing_centroids = {}
             for obj in objects:
                 if obj.object_id == -1000:
                     bkgd_masks[t,video_idx] += obj.segment.to(torch.bool)
                     continue
 
+                centroid = get_centroids_from_mask(obj.segment)
+
                 # Divided cells are only used for the masks since the mother cells are the inputs to the frame
                 if t > 0 and obj.entering and obj.parent_id > 0:                      
                     dividing_masks[obj.object_id] = obj.segment.to(torch.bool)
+                    dividing_centroids[obj.object_id] = centroid
                     continue 
 
                 if obj.daughter_ids.sum() > 0:
@@ -190,6 +197,7 @@ def collate_fn(
                 # The mother cell is the input and the daughter cells are the outputs
                 if obj.daughter_ids.sum() == 0:
                     step_t_masks[t].append(obj.segment.to(torch.bool))
+                    step_t_centroids[t].append(centroid)
 
                 step_t_objects_identifier[t].append(
                     torch.tensor([orig_video_id, orig_obj_id, orig_frame_idx])
@@ -207,6 +215,7 @@ def collate_fn(
                 if daughter_ids.sum() > 0:
                     for daughter_id in daughter_ids:
                         step_t_masks[t].append(dividing_masks[int(daughter_id)])
+                        step_t_centroids[t].append(dividing_centroids[int(daughter_id)])
 
             if not step_t_obj_to_frame_idx[t]:
                 step_t_no_inputs.append(torch.tensor(True))
@@ -224,6 +233,7 @@ def collate_fn(
             step_t_cell_tracks_mask[t].append(torch.zeros(1, dtype=torch.bool))
             step_t_target_obj_mask[t].append(torch.zeros(1, dtype=torch.bool))
             step_t_daughter_ids[t].append(torch.zeros((2), dtype=torch.int32))
+            step_t_centroids[t].append(torch.zeros((2), dtype=torch.float32))
 
     obj_to_frame_idx = [torch.stack(obj_to_frame_idx, dim=0) for obj_to_frame_idx in step_t_obj_to_frame_idx]
     masks = [torch.stack(masks, dim=0) for masks in step_t_masks]
@@ -235,10 +245,14 @@ def collate_fn(
     daughter_ids = [torch.stack(id, dim=0) for id in step_t_daughter_ids]
     no_inputs = torch.stack(step_t_no_inputs, dim=0) # whether a frame any inputs, foreground or background
     
+    centroids = [torch.stack(id, dim=0) for id in step_t_centroids]
+    heatmaps = [make_gaussian_heatmap(H//4, W//4, centroid/4, mask) for centroid,mask in zip(centroids,masks)]
+
     return BatchedVideoDatapoint(
         img_batch=img_batch,
         obj_to_frame_idx=obj_to_frame_idx,
         masks=masks,
+        heatmaps=heatmaps,
         metadata=BatchedVideoMetaData(
             unique_objects_identifier=objects_identifier,
             frame_orig_size=frame_orig_size,
@@ -252,3 +266,32 @@ def collate_fn(
         dict_key=dict_key,
         batch_size=[T],
     )
+
+def make_gaussian_heatmap(h, w, centers, masks, sigma=1):
+    """Returns (H, W) heatmap with Gaussians at each (x, y) center."""
+    y = torch.arange(h).view(h, 1).expand(h, w)
+    x = torch.arange(w).view(1, w).expand(h, w)
+    heatmap = torch.zeros((h, w))
+    masks_resized = F.interpolate(masks.unsqueeze(0)*1.0, size=(h, w), mode='bilinear', align_corners=False).squeeze(0)
+    for (cx, cy), mask_resized in zip(centers, masks_resized):
+        if cx == 0 and cy == 0:
+            continue
+        g = torch.exp(-((x - cx)**2 + (y - cy)**2) / (2 * sigma**2))
+        g = g * mask_resized
+        heatmap = torch.maximum(heatmap, g)  # in case of overlapping cells
+    return heatmap
+
+def get_centroids_from_mask(mask):
+    """
+    Args:
+        mask: binary (H, W) tensor
+
+    Returns:
+        (x, y) float tuple
+    """
+    ys, xs = torch.where(mask)
+    if len(xs) == 0:
+        return torch.zeros((2), dtype=torch.float32)
+    cx = xs.float().mean()
+    cy = ys.float().mean()
+    return torch.tensor([cx.item(), cy.item()], dtype=torch.float32)

@@ -272,6 +272,20 @@ class SAM2Base(torch.nn.Module):
         else:
             self.obj_ptr_tpos_proj = torch.nn.Identity()
 
+        self.heatmap_predictor = torch.nn.Sequential(
+            torch.nn.Conv2d(self.hidden_dim // 8 * 3, self.hidden_dim // 8, kernel_size=3, padding=1),  # Local context
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Conv2d(self.hidden_dim // 8, self.hidden_dim // 8, kernel_size=3, padding=1),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Conv2d(self.hidden_dim // 8, 1, kernel_size=1),  # Compress to heatmap
+        )
+
+        self.feature_dim_reducers = torch.nn.ModuleList([
+            torch.nn.Conv2d(self.hidden_dim // 8, self.hidden_dim // 8, kernel_size=1),
+            torch.nn.Conv2d(self.hidden_dim // 4, self.hidden_dim // 8, kernel_size=1), 
+            torch.nn.Conv2d(self.hidden_dim, self.hidden_dim // 8, kernel_size=1)
+        ])
+
     def _forward_sam_heads(
         self,
         backbone_features,
@@ -1027,3 +1041,44 @@ class SAM2Base(torch.nn.Module):
                 logging.error(f"Error handling memory for mother ID {mother_id.item()}: {str(e)}")
 
         return memory_dict
+    
+    def get_heatmap_predictions(self, current_vision_feats, feat_sizes):
+        """
+        Generate heatmap predictions from multi-scale vision features.
+        
+        Args:
+            current_vision_feats (List[torch.Tensor]): List of feature maps at different scales
+            feat_sizes (List[Tuple[int, int]]): Original spatial dimensions for each feature map
+        
+        Returns:
+            torch.Tensor: Predicted heatmap of shape (B, 1, H, H) where H = image_size // 4
+        """
+        # Define target size for all feature maps
+        heatmap_size = self.image_size // 4
+        
+        # Process each feature map
+        heatmap_vision_feats = []
+        for idx, vision_feat in enumerate(current_vision_feats):
+            # Reshape and reduce channel dimension
+            feat = vision_feat[:, 0].permute(1, 0).reshape(1, vision_feat.shape[-1], feat_sizes[idx][0], feat_sizes[idx][1])
+            # feat = vision_feat[:, :1].reshape(1,-1,feat_sizes[idx][0], feat_sizes[idx][1])
+            feat = self.feature_dim_reducers[idx](feat)
+            
+            # Resize to target heatmap size
+            feat = F.interpolate(
+                feat,
+                size=(heatmap_size, heatmap_size),
+                mode='bilinear',
+                align_corners=False
+            )
+            heatmap_vision_feats.append(feat)
+
+        # Concatenate features along channel dimension
+        fused_features = torch.cat(heatmap_vision_feats, dim=1)
+        
+        # Generate final heatmap prediction
+        heatmap = self.heatmap_predictor(fused_features)
+        
+        return heatmap
+        
+    
