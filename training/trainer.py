@@ -480,13 +480,14 @@ class Trainer:
         phase: str,
     ):
         outputs = model(batch)
-        targets, target_divide = batch.masks, batch.cell_divides
+        targets, target_divide, target_heatmaps = batch.masks, batch.cell_divides, batch.heatmaps
         batch_size = len(batch.img_batch)
         targets = [target for target, no_inputs in zip(targets, batch.no_inputs) if not no_inputs]
         target_divide = [target_divide for target_divide, no_inputs in zip(target_divide, batch.no_inputs) if not no_inputs]
+        target_heatmaps = [target_heatmaps for target_heatmaps, no_inputs in zip(target_heatmaps, batch.no_inputs) if not no_inputs]
 
         key = batch.dict_key  # key for dataset
-        loss = self.loss[key](outputs, targets, target_divide)
+        loss = self.loss[key](outputs, targets, target_divide, target_heatmaps)
         loss_str = f"Losses/{phase}_{key}_loss"
 
         loss_log_str = os.path.join("Step_Losses", loss_str)
@@ -657,6 +658,7 @@ class Trainer:
             batch.obj_to_frame_idx = [obj_to_frame_idx.to(self.device) for obj_to_frame_idx in batch.obj_to_frame_idx]
             batch.target_obj_mask = [target_obj_mask.to(self.device) for target_obj_mask in batch.target_obj_mask]
             batch.metadata.unique_objects_identifier = [unique_objects_identifier.to(self.device) for unique_objects_identifier in batch.metadata.unique_objects_identifier]
+            batch.heatmaps = [heatmaps.to(self.device) for heatmaps in batch.heatmaps]
 
             # compute output
             with torch.no_grad():
@@ -811,6 +813,7 @@ class Trainer:
             batch.obj_to_frame_idx = [obj_to_frame_idx.to(self.device) for obj_to_frame_idx in batch.obj_to_frame_idx]
             batch.target_obj_mask = [target_obj_mask.to(self.device) for target_obj_mask in batch.target_obj_mask]
             batch.metadata.unique_objects_identifier = [unique_objects_identifier.to(self.device) for unique_objects_identifier in batch.metadata.unique_objects_identifier]
+            batch.heatmaps = [heatmaps.to(self.device) for heatmaps in batch.heatmaps]
 
             try:
                 self._run_step(batch, phase, loss_mts, extra_loss_mts)

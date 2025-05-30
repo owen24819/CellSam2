@@ -100,6 +100,17 @@ def iou_loss(
         loss = F.mse_loss(pred_ious, actual_ious, reduction="none")
     return loss / num_objects
 
+def weighted_mse_loss(pred, target, fg_weight=5.0, bg_weight=1.0):
+    """
+    Weighted MSE loss that emphasizes accurate peaks (foreground) but tolerates extra responses.
+    
+    Args:
+        pred: (B, 1, H, W)
+        target: (B, 1, H, W) with Gaussians at centroids
+    """
+    weight = torch.where(target > 0.1, fg_weight, bg_weight)
+    loss = weight * (pred - target) ** 2
+    return loss.mean()
 
 class MultiStepMultiMasksAndIous(nn.Module):
     def __init__(
@@ -142,18 +153,18 @@ class MultiStepMultiMasksAndIous(nn.Module):
         self.iou_use_l1_loss = iou_use_l1_loss
         self.pred_obj_scores = pred_obj_scores
 
-    def forward(self, outs_batch: List[Dict], targets_batch: torch.Tensor, target_divide_batch: torch.Tensor):
+    def forward(self, outs_batch: List[Dict], targets_batch: torch.Tensor, target_divide_batch: torch.Tensor, target_heatmaps_batch: torch.Tensor):
         assert len(outs_batch) == len(targets_batch)
 
         losses = defaultdict(int)
-        for outs, targets, target_divide in zip(outs_batch, targets_batch, target_divide_batch):
-            cur_losses = self._forward(outs, targets, target_divide)
+        for outs, targets, target_divide, target_heatmaps in zip(outs_batch, targets_batch, target_divide_batch, target_heatmaps_batch):
+            cur_losses = self._forward(outs, targets, target_divide, target_heatmaps)
             for k, v in cur_losses.items():
                 losses[k] += v
 
         return losses
 
-    def _forward(self, outputs: Dict, targets: torch.Tensor, target_divide: torch.Tensor):
+    def _forward(self, outputs: Dict, targets: torch.Tensor, target_divide: torch.Tensor, target_heatmaps: torch.Tensor):
         """
         Compute the losses related to the masks: the focal loss and the dice loss.
         and also the MAE or MSE loss between predicted IoUs and actual IoUs.
@@ -178,12 +189,16 @@ class MultiStepMultiMasksAndIous(nn.Module):
         pre_div_target_obj_list = outputs["pre_div_target_obj"]
         post_div_target_obj_list = outputs["post_div_target_obj"]
 
+        heatmap_predictions = outputs["heatmap_predictions"]
+
+        loss_heatmap = weighted_mse_loss(heatmap_predictions, target_heatmaps)
+
         assert len(src_masks_list) == len(ious_list)
         assert len(object_score_logits_list) == len(ious_list)
         assert len(div_score_logits_list) == len(ious_list)
 
         # accumulate the loss over prediction steps
-        losses = {"loss_mask": 0, "loss_dice": 0, "loss_iou": 0, "loss_div": 0, "loss_class": 0}
+        losses = {"loss_mask": 0, "loss_dice": 0, "loss_iou": 0, "loss_div": 0, "loss_class": 0, "loss_heatmap": loss_heatmap}
         for src_masks, ious, object_score_logits, div_score_logits, is_point_used, pre_div_target_obj, post_div_target_obj in zip(src_masks_list, ious_list, object_score_logits_list, div_score_logits_list, is_point_used_list, pre_div_target_obj_list, post_div_target_obj_list):
             target_masks_used = target_masks[is_point_used]
             assert len(target_masks_used) == len(src_masks)
