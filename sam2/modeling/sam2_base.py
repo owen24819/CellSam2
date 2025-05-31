@@ -272,7 +272,7 @@ class SAM2Base(torch.nn.Module):
         else:
             self.obj_ptr_tpos_proj = torch.nn.Identity()
 
-        self.cell_pos_head = torch.nn.Sequential(
+        self.heatmap_predictor = torch.nn.Sequential(
             torch.nn.Conv2d(self.hidden_dim // 8 * 3, self.hidden_dim // 8, kernel_size=3, padding=1),  # Local context
             torch.nn.ReLU(inplace=True),
             torch.nn.Conv2d(self.hidden_dim // 8, self.hidden_dim // 8, kernel_size=3, padding=1),
@@ -281,9 +281,9 @@ class SAM2Base(torch.nn.Module):
             torch.nn.Sigmoid()
         )
 
-        self.reduce_channel_dim = torch.nn.ModuleList([
+        self.feature_dim_reducers = torch.nn.ModuleList([
             torch.nn.Conv2d(self.hidden_dim // 8, self.hidden_dim // 8, kernel_size=1),
-            torch.nn.Conv2d(self.hidden_dim // 4, self.hidden_dim // 8, kernel_size=1),
+            torch.nn.Conv2d(self.hidden_dim // 4, self.hidden_dim // 8, kernel_size=1), 
             torch.nn.Conv2d(self.hidden_dim, self.hidden_dim // 8, kernel_size=1)
         ])
 
@@ -1062,7 +1062,7 @@ class SAM2Base(torch.nn.Module):
         for idx, vision_feat in enumerate(current_vision_feats):
             # Reshape and reduce channel dimension
             feat = vision_feat[:, :1].reshape(1,-1,feat_sizes[idx][0], feat_sizes[idx][1])
-            feat = self.reduce_channel_dim[idx](feat)
+            feat = self.feature_dim_reducers[idx](feat)
             
             # Resize to target heatmap size
             feat = F.interpolate(
@@ -1077,7 +1077,7 @@ class SAM2Base(torch.nn.Module):
         fused_features = torch.cat(heatmap_vision_feats, dim=1)
         
         # Generate final heatmap prediction
-        heatmap = self.cell_pos_head(fused_features)
+        heatmap = self.heatmap_predictor(fused_features)
         
         return heatmap
         
