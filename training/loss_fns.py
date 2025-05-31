@@ -100,7 +100,7 @@ def iou_loss(
         loss = F.mse_loss(pred_ious, actual_ious, reduction="none")
     return loss / num_objects
 
-def weighted_mse_loss(pred, target, fg_weight=2.0, bg_weight=1.0, fg_threshold=0.1):
+def weighted_mse_loss(pred, target, fg_weight=2.0, bg_weight=1.0, fg_threshold=0.5):
     """
     Weighted MSE loss that emphasizes accurate peaks (foreground) but tolerates extra responses.
     

@@ -266,7 +266,7 @@ def collate_fn(
         batch_size=[T],
     )
 
-def make_gaussian_heatmap(h, w, centers, sigma=2.0):
+def make_gaussian_heatmap(h, w, centers, sigma=3.0):
     """Returns (H, W) heatmap with Gaussians at each (x, y) center."""
     y = torch.arange(h).view(h, 1).expand(h, w)
     x = torch.arange(w).view(1, w).expand(h, w)
