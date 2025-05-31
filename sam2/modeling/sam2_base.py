@@ -281,7 +281,11 @@ class SAM2Base(torch.nn.Module):
             torch.nn.Sigmoid()
         )
 
-        self.reduce_channel_dim = [torch.nn.Conv2d(self.hidden_dim // 8, self.hidden_dim // 8, kernel_size=1),  torch.nn.Conv2d(self.hidden_dim // 4, self.hidden_dim // 8, kernel_size=1), torch.nn.Conv2d(self.hidden_dim, self.hidden_dim // 8, kernel_size=1)]
+        self.reduce_channel_dim = torch.nn.ModuleList([
+            torch.nn.Conv2d(self.hidden_dim // 8, self.hidden_dim // 8, kernel_size=1),
+            torch.nn.Conv2d(self.hidden_dim // 4, self.hidden_dim // 8, kernel_size=1),
+            torch.nn.Conv2d(self.hidden_dim, self.hidden_dim // 8, kernel_size=1)
+        ])
 
     def _forward_sam_heads(
         self,
