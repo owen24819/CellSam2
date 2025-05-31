@@ -100,15 +100,18 @@ def iou_loss(
         loss = F.mse_loss(pred_ious, actual_ious, reduction="none")
     return loss / num_objects
 
-def weighted_mse_loss(pred, target, fg_weight=5.0, bg_weight=1.0):
+def weighted_mse_loss(pred, target, fg_weight=2.0, bg_weight=1.0, fg_threshold=0.8):
     """
     Weighted MSE loss that emphasizes accurate peaks (foreground) but tolerates extra responses.
     
     Args:
         pred: (B, 1, H, W)
         target: (B, 1, H, W) with Gaussians at centroids
+        fg_weight: weight for foreground
+        bg_weight: weight for background
+        fg_threshold: threshold for foreground weight
     """
-    weight = torch.where(target > 0.1, fg_weight, bg_weight)
+    weight = torch.where(target > fg_threshold, fg_weight, bg_weight)
     loss = weight * (pred - target) ** 2
     return loss.mean()
 
