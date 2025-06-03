@@ -48,7 +48,8 @@ def main(config_name):
         box_nms_thresh=0.7,
         min_mask_region_area=30,
         use_m2m=True,  # Use mask-to-mask refinement
-        segment=True,
+        segment=False,
+        use_heatmap=True,
     )
 
     video_path = 'C:/Users/17742/Documents/DeepLearning/datasets/moma/CTC/test/29'

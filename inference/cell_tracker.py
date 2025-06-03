@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 from torchvision.ops import batched_nms
+import torch.nn.functional as F
 import cv2
 
 from sam2.modeling.sam2_base import SAM2Base
@@ -39,6 +40,7 @@ class SAM2AutomaticCellTracker:
         max_sprinkle_area: int = 0,
         mask_threshold: float = 0.0,
         segment: bool = False,
+        use_heatmap: bool = False,
     ) -> None:
         """
         Using a SAM 2 model, generates and tracks masks for an entire video.
@@ -109,6 +111,7 @@ class SAM2AutomaticCellTracker:
         self.obj_score_thresh = obj_score_thresh
         self.div_obj_score_thresh = div_obj_score_thresh
         self.segment = segment
+        self.use_heatmap = use_heatmap
 
         self._transforms = SAM2Transforms(
             resolution=self.model.image_size,
@@ -163,16 +166,13 @@ class SAM2AutomaticCellTracker:
         else:
             inference_state["storage_device"] = compute_device
         # inputs on each frame
-        inference_state["point_inputs_per_obj"] = {}
-        inference_state["mask_inputs_per_obj"] = {}
+        inference_state["point_inputs"] = {}
         # visual features on a small number of recently visited frames for quick interactions
         inference_state["cached_features"] = {}
         # values that don't change across frames (so we only need to hold one copy of them)
         inference_state["constants"] = {}
         # mapping between client-side object id and model-side object index
         inference_state["obj_ids"] = None
-        # Slice (view) of each object tracking results, sharing the same memory with "output_dict"
-        inference_state["output_dict_per_obj"] = {}
         # A temporary storage to hold new outputs when user interact with a frame
         # to add clicks or mask (it's merged into "output_dict" before propagation starts)
         inference_state["temp_output_dict_per_obj"] = {}
@@ -206,8 +206,9 @@ class SAM2AutomaticCellTracker:
             offload_state_to_cpu=offload_state_to_cpu
         )
         
-        # Generate points for the first frame
-        inference_state = self.generate_proportional_point_grid(inference_state)
+        if not self.use_heatmap:
+            # Generate points for the first frame or whole video if segment is True
+            inference_state = self.generate_proportional_point_grid(inference_state)
         
         # Detect and track the detected cells through the video
         tracking_results = self.track_cells(inference_state)
@@ -269,7 +270,7 @@ class SAM2AutomaticCellTracker:
         labels = torch.ones((len(points), 1), dtype=torch.int, device=self.device)  # [N]
         
         # Save points and labels in inference_state for later reference
-        inference_state["point_inputs"] = {0: {"point_coords": points, "point_labels": labels}}
+        inference_state["point_inputs"][0] = {"point_coords": points, "point_labels": labels}
 
         if self.segment:
             for i in range(1,len(inference_state["images"])):
@@ -320,6 +321,9 @@ class SAM2AutomaticCellTracker:
         for frame_idx in tqdm(processing_order, desc="propagate in video"):     
 
             if frame_idx == 0 or self.segment:
+                if self.use_heatmap:
+                    input_points, point_labels = self.get_input_points_from_heatmap(inference_state, frame_idx)
+                    inference_state["point_inputs"][frame_idx] = {"point_coords": input_points, "point_labels": point_labels}
                 tracking_object_ids = None
                 batch_size = inference_state["point_inputs"][frame_idx]['point_coords'].shape[0]
                 is_init_cond_frame = True
@@ -360,6 +364,58 @@ class SAM2AutomaticCellTracker:
             # update cell tracks
             inference_state, track_mask = self.update_cell_tracks(inference_state, frame_idx, sam_outputs, current_out, tracking_object_ids)
 
+            if not self.segment and frame_idx > 0 and self.use_heatmap:
+                input_points, point_labels = self.get_input_points_from_heatmap(inference_state, frame_idx)
+                input_points_copy = input_points.clone()
+
+                pad_left, pad_right, pad_top, pad_bottom = inference_state["padding"]
+                input_points[:,0,0] -= pad_left
+                input_points[:,0,1] -= pad_top
+
+                input_points[:,0,0] = (input_points[:,0,0] * (inference_state["video_width"] / inference_state["resized_image_size"][1]))
+                input_points[:,0,1] = (input_points[:,0,1] * (inference_state["video_height"] / inference_state["resized_image_size"][0]))
+
+                input_points = input_points.long()
+
+                track_cell_ids = track_mask[input_points[:,0,1], input_points[:,0,0]]
+
+                # Find indices where track_cell_ids is 0 (background)
+                background_point_indices = np.where(track_cell_ids == 0)[0]
+
+                if len(background_point_indices) > 0:
+                    input_points = input_points_copy[background_point_indices]
+                    point_labels = point_labels[background_point_indices]
+
+                    inference_state["point_inputs"][frame_idx] = {"point_coords": input_points, "point_labels": point_labels}
+                    batch_size = input_points.shape[0]
+
+                    # Retrieve image features (only need to compute once for all objects)
+                    (
+                        _,
+                        _,
+                        current_vision_feats,
+                        current_vision_pos_embeds,
+                        feat_sizes,
+                    ) = self._get_image_feature(inference_state, frame_idx, batch_size)
+                    
+                    # Run the core tracking step
+                    current_out, sam_outputs, high_res_features, pix_feat = self.model._track_step(
+                        is_init_cond_frame=True,
+                        current_vision_feats=current_vision_feats,
+                        current_vision_pos_embeds=current_vision_pos_embeds,
+                        feat_sizes=feat_sizes,
+                        point_inputs=inference_state["point_inputs"].get(frame_idx, None),
+                        mask_inputs=None,
+                        num_frames=inference_state["num_frames"],
+                        prev_sam_mask_logits=None,
+                        tracking_object_ids=None,
+                        memory_dict=inference_state["memory_dict"],
+                    )
+
+                    inference_state, detected_mask = self.update_cell_tracks(inference_state, frame_idx, sam_outputs, current_out, tracking_object_ids, heatmap_input=True)
+
+                    track_mask[(detected_mask > 0) * (track_mask == 0)] = detected_mask[(detected_mask > 0) * (track_mask == 0)]
+
             yield frame_idx, inference_state, track_mask
 
     @torch.inference_mode()
@@ -398,11 +454,10 @@ class SAM2AutomaticCellTracker:
         features = (expanded_image,) + features
         return features
 
-    def update_cell_tracks(self, inference_state, frame_idx, sam_outputs, current_out, tracking_object_ids):
+    def update_cell_tracks(self, inference_state, frame_idx, sam_outputs, current_out, tracking_object_ids, heatmap_input=False):
         """Update the cell tracks based on the current output and SAM outputs."""
         obj_ids = tracking_object_ids
         
-
         # Unpack SAM outputs
         (
             ious,
@@ -413,6 +468,26 @@ class SAM2AutomaticCellTracker:
             div_score_logits,
             is_dividing,
         ) = sam_outputs
+
+        # Keep only largest connected component for each mask
+        for i in range(high_res_masks.shape[0]):
+            mask = high_res_masks[i,0].cpu().numpy()
+            mask_binary = mask > self.mask_threshold
+            if mask_binary.any():
+                # Find connected components
+                num_labels, labels = cv2.connectedComponents(mask_binary.astype(np.uint8))
+                if num_labels > 1:  # If there are multiple components
+                    # Find sizes of all components
+                    unique_labels, counts = np.unique(labels, return_counts=True)
+                    # Get label of largest component (excluding background label 0)
+                    largest_label = unique_labels[1:][np.argmax(counts[1:])]
+                    # Keep only largest component
+                    mask_binary = (labels == largest_label)
+                    high_res_masks[i,0] = torch.from_numpy(mask_binary).to(high_res_masks.device)
+                    # Resize high_res_mask to low_res_mask size and replace
+                    low_res_size = low_res_masks.shape[2:]
+                    low_res_mask = cv2.resize(mask_binary.astype(np.float32), (low_res_size[1], low_res_size[0])) > 0.5
+                    low_res_masks[i,0] = torch.from_numpy(low_res_mask).to(low_res_masks.device)
 
         keep_tokens = (
             object_score_logits_dict["post_div"][:,0] > self.obj_score_thresh
@@ -446,18 +521,26 @@ class SAM2AutomaticCellTracker:
         removed_indices = torch.nonzero(keep_tokens)[~torch.isin(torch.arange(keep_tokens.sum(), device=keep_tokens.device), keep_by_nms)]
         keep_tokens[removed_indices] = False
 
-        if obj_ids is None: # only in first frame
+        if heatmap_input:
+            obj_ids = torch.arange(inference_state["max_obj_id"]+1, inference_state["max_obj_id"]+1+data["masks"].shape[0], device=self.device)
+            prev_obj_ids = obj_ids.clone()
+            inference_state["obj_ids"][frame_idx] = torch.cat([inference_state["obj_ids"][frame_idx], obj_ids])
+            inference_state["max_obj_id"] = max(obj_ids.tolist() + [inference_state["max_obj_id"]])
+            mother_ids = []
+            daughter_ids_list = []
+            parent_ids = torch.zeros(len(obj_ids), device=self.device, dtype=torch.int32)
+            inference_state["parent_ids"][frame_idx] = torch.cat([inference_state["parent_ids"][frame_idx], parent_ids])
 
-
+        elif obj_ids is None: # only in first frame
             num_cells = data["masks"].shape[0]
             obj_ids = torch.arange(num_cells) + 1
             prev_obj_ids = obj_ids.clone()
-            inference_state["obj_ids"] = {frame_idx: obj_ids}
+            inference_state["obj_ids"] = {frame_idx:obj_ids}
             inference_state["max_obj_id"] = max(obj_ids)
             mother_ids = []
             daughter_ids_list = []
             parent_ids = torch.zeros(len(obj_ids), device=self.device, dtype=torch.int32)
-            inference_state["parent_ids"][frame_idx] = parent_ids
+            inference_state["parent_ids"] = {frame_idx:parent_ids}
         else:
 
             # Get all potential mother cells before NMS
@@ -495,16 +578,17 @@ class SAM2AutomaticCellTracker:
             inference_state["max_obj_id"] = max(obj_ids.tolist() + [inference_state["max_obj_id"]])
             inference_state["parent_ids"][frame_idx] = parent_ids
 
+
         if data["masks"].shape[0] == 0: 
             track_mask = np.zeros((inference_state["video_height"], inference_state["video_width"]), dtype=np.uint16)
             return inference_state, track_mask
-
 
         current_out["pred_masks_high_res"] = data["masks"]
         current_out["pred_object_score_logits"] = data["obj_scores"]
         current_out["obj_ptr"] = data["obj_ptr"]
 
-        assert current_out["pred_masks_high_res"].shape[0] == len(obj_ids)
+        if not heatmap_input:
+            assert current_out["pred_masks_high_res"].shape[0] == len(obj_ids)
 
         # Retrieve image features (only need to compute once for all objects)
         (
@@ -560,6 +644,56 @@ class SAM2AutomaticCellTracker:
             masks = masks.transpose(2,0,1)
 
         return masks
+    
+    def get_input_points_from_heatmap(self, inference_state, frame_idx):
+        (
+            _,
+            _,
+            current_vision_feats,
+            current_vision_pos_embeds,
+            feat_sizes,
+        ) = self._get_image_feature(inference_state, frame_idx, 1)
+                        
+        heatmap_predictions = self.model.get_heatmap_predictions(current_vision_feats, feat_sizes)[0,0]
+        input_points = self.extract_peak_points(heatmap_predictions)
+        point_labels = torch.ones((input_points.shape[0], 1), dtype=torch.int, device=self.device)
+
+        return input_points, point_labels
+    
+    def extract_peak_points(self, heatmap: torch.Tensor, max_points=20, min_dist=2, threshold=0.1):
+        """
+        Extract up to max_points from heatmap using local max suppression.
+        
+        Args:
+            heatmap: (H, W) float tensor on GPU
+            max_points: max number of points to return
+            min_dist: radius (in pixels) for local suppression
+            threshold: min confidence to consider a valid point
+
+        Returns:
+            points: (N, 2) float tensor of (x, y)
+        """
+        # Apply max pooling to find local maxima
+        heatmap = heatmap.sigmoid()
+        pooled = F.max_pool2d(heatmap.unsqueeze(0).unsqueeze(0), kernel_size=min_dist*2+1, stride=1, padding=min_dist)
+        is_peak = (heatmap == pooled[0, 0]) & (heatmap > threshold)
+
+        ys, xs = torch.nonzero(is_peak, as_tuple=True)
+        if len(xs) == 0:
+            return torch.empty((0, 2), device=heatmap.device)
+
+        scores = heatmap[ys, xs]
+        sorted_idx = torch.argsort(scores, descending=True)
+
+        # Take top max_points
+        xs = xs[sorted_idx][:max_points]
+        ys = ys[sorted_idx][:max_points]
+
+        points = torch.stack([xs, ys], dim=1).float()  # (N, 2)
+        points = points.unsqueeze(1) # (N, 1, 2)
+        assert heatmap.shape[0] == heatmap.shape[1] and self.model.image_size % heatmap.shape[0] == 0
+        points = points * (self.model.image_size // heatmap.shape[0])
+        return points
 
 
     def save_ctc(self, track_mask, frame_idx, inference_state):
@@ -582,9 +716,9 @@ class SAM2AutomaticCellTracker:
             for cell_id, parent_id in zip(cell_ids, parent_ids):
                 if cell_id not in res_track[:,0]:
                     res_track = np.concatenate([res_track, np.array([[cell_id, frame_idx, frame_idx, parent_id]])], axis=0)
-            else:
-                assert res_track[res_track[:,0] == cell_id,2] == frame_idx-1, "cell_id must be continuous"
-                res_track[res_track[:,0] == cell_id,2] = frame_idx
+                else:
+                    assert res_track[res_track[:,0] == cell_id,2] == frame_idx-1, "cell_id must be continuous"
+                    res_track[res_track[:,0] == cell_id,2] = frame_idx
 
             np.savetxt(res_path / 'res_track.txt',res_track,fmt='%d')
 
