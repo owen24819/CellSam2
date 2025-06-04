@@ -396,11 +396,10 @@ class SAM2AutomaticCellTracker:
                     inference_state, detected_mask = self.update_cell_tracks(inference_state, frame_idx, sam_outputs, current_out, tracking_object_ids, heatmap_input=True)
 
                     if detected_mask.sum() > 0:
-
                         detected_cells = np.unique(detected_mask)
                         detected_cells = detected_cells[detected_cells != 0]
-
-                        if  len(inference_state["lost_obj_ids"][frame_idx]) > 0:
+                        
+                        if len(inference_state["lost_obj_ids"][frame_idx]) > 0:
                             lost_obj_ids = inference_state["lost_obj_ids"][frame_idx]
                             lost_high_res_masks = inference_state["lost_high_res_masks"][frame_idx]
 
@@ -415,26 +414,35 @@ class SAM2AutomaticCellTracker:
 
                             # Find the lost cell with the highest IoU for each detected cell
                             max_ious = np.max(ious, axis=1)
-                            lost_cell_ids = np.argmax(ious, axis=1)
+                            lost_cell_indices = np.argmax(ious, axis=1)
+                            
+                            # Process each detected cell in order of IoU
+                            sorted_indices = np.argsort(-max_ious)  # Sort by descending IoU
+                            processed_lost_cells = set()
+                            
+                            for idx in sorted_indices:
+                                if max_ious[idx] > 0.05:  # IoU threshold
+                                    detected_cell_id = int(detected_cells[idx])
+                                    lost_idx = lost_cell_indices[idx]
+                                    lost_cell_id = int(lost_obj_ids[lost_idx])
+                                    
+                                    # Skip if this lost cell was already matched
+                                    if lost_cell_id in processed_lost_cells:
+                                        continue
+                                        
+                                    if frame_idx - 1 in inference_state["memory_dict"][lost_cell_id]['frame_idx']:
+                                        detected_mask[detected_mask == detected_cell_id] = lost_cell_id
+                                        inference_state["memory_dict"][lost_cell_id]['mask_mem_features'] = torch.cat((inference_state["memory_dict"][lost_cell_id]['mask_mem_features'], inference_state["memory_dict"][detected_cell_id]['mask_mem_features']), dim=0)
+                                        inference_state["memory_dict"][lost_cell_id]['obj_ptr'] = torch.cat((inference_state["memory_dict"][lost_cell_id]['obj_ptr'], inference_state["memory_dict"][detected_cell_id]['obj_ptr']), dim=0)
+                                        inference_state["memory_dict"][lost_cell_id]['frame_idx'].append(frame_idx)
+                                        inference_state["obj_ids"][frame_idx][inference_state["obj_ids"][frame_idx] == detected_cell_id] = lost_cell_id
+                                        
+                                        detected_cells = detected_cells[detected_cells != detected_cell_id]
+                                        processed_lost_cells.add(lost_cell_id)
+                                        
+                                        del inference_state["memory_dict"][detected_cell_id]
 
-                            # Replace detected cells with track cells if IoU is above threshold
-                            for i, (max_iou, lost_idx) in enumerate(zip(max_ious, lost_cell_ids)):
-                                lost_cell_id = int(lost_obj_ids[lost_idx])
-                                if max_iou > 0.05 and frame_idx - 1 in inference_state["memory_dict"][lost_cell_id]['frame_idx']:  # IoU threshold and lost cell was in previous frame
-                                    detected_cell_id = int(detected_cells[i])
-                                    # Replace the detected cell ID with the lost cell ID in the mask
-                                    detected_mask[detected_mask == detected_cell_id] = lost_cell_id
-
-                                    # update memory_dict
-                                    inference_state["memory_dict"][lost_cell_id]['mask_mem_features'] = torch.cat((inference_state["memory_dict"][lost_cell_id]['mask_mem_features'], inference_state["memory_dict"][detected_cell_id]['mask_mem_features']), dim=0)
-                                    inference_state["memory_dict"][lost_cell_id]['obj_ptr'] = torch.cat((inference_state["memory_dict"][lost_cell_id]['obj_ptr'], inference_state["memory_dict"][detected_cell_id]['obj_ptr']), dim=0)
-                                    inference_state["memory_dict"][lost_cell_id]['frame_idx'].append(frame_idx)
-                                    inference_state["obj_ids"][frame_idx][inference_state["obj_ids"][frame_idx] == detected_cell_id] = lost_cell_id
-
-                                    detected_cells = detected_cells[detected_cells != detected_cell_id]
-
-                                    del inference_state["memory_dict"][detected_cell_id]
-
+                        # Handle remaining detected cells
                         for detected_cell_id in detected_cells:
                             # Get binary mask for current detected cell
                             detected_mask_binary = detected_mask == detected_cell_id
@@ -465,7 +473,7 @@ class SAM2AutomaticCellTracker:
                                     inference_state["memory_dict"][best_track_id]['obj_ptr'][-1] = inference_state["memory_dict"][detected_cell_id]['obj_ptr'][0]
                                     inference_state["parent_ids"][frame_idx] = inference_state["parent_ids"][frame_idx][inference_state["obj_ids"][frame_idx] != detected_cell_id]
                                     inference_state["obj_ids"][frame_idx] = inference_state["obj_ids"][frame_idx][inference_state["obj_ids"][frame_idx] != detected_cell_id]
-
+                                    
                                     del inference_state["memory_dict"][detected_cell_id]
                             
                         track_mask[(detected_mask > 0) * (track_mask == 0)] = detected_mask[(detected_mask > 0) * (track_mask == 0)]
