@@ -128,6 +128,7 @@ class SAM2AutomaticCellTracker:
         offload_video_to_cpu=False,
         offload_state_to_cpu=False,
         async_loading_frames=False,
+        max_frame_num_to_track=None,
     ):
         """Initialize an inference state."""
         compute_device = self.model.device  # device of the model
@@ -149,6 +150,7 @@ class SAM2AutomaticCellTracker:
         inference_state["images"] = images
         inference_state["num_frames"] = len(images)
         inference_state["parent_ids"] = {}
+        inference_state["max_frame_num_to_track"] = max_frame_num_to_track
         # whether to offload the video frames to CPU memory
         # turning on this option saves the GPU memory with only a very small overhead
         inference_state["offload_video_to_cpu"] = offload_video_to_cpu
@@ -186,7 +188,7 @@ class SAM2AutomaticCellTracker:
 
         return inference_state
 
-    def predict(self, video_path, res_path, offload_video_to_cpu=True, offload_state_to_cpu=False):
+    def predict(self, video_path, res_path, offload_video_to_cpu=True, offload_state_to_cpu=False, max_frame_num_to_track=None):
         """
         Predict and track cells throughout a video.
         
@@ -203,7 +205,8 @@ class SAM2AutomaticCellTracker:
             video_path=video_path,
             res_path=res_path,
             offload_video_to_cpu=offload_video_to_cpu,
-            offload_state_to_cpu=offload_state_to_cpu
+            offload_state_to_cpu=offload_state_to_cpu,
+            max_frame_num_to_track=max_frame_num_to_track
         )
         
         if not self.use_heatmap:
@@ -304,10 +307,10 @@ class SAM2AutomaticCellTracker:
         self,
         inference_state,
         start_frame_idx=0,
-        max_frame_num_to_track=None,
     ):
         """Propagate the input points across frames to track in the entire video."""
         num_frames = inference_state["num_frames"]
+        max_frame_num_to_track = inference_state["max_frame_num_to_track"]
         
         if max_frame_num_to_track is None:
             # default: track all the frames in the video

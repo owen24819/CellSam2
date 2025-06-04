@@ -66,6 +66,7 @@ def main(config_name):
         res_path,
         offload_video_to_cpu=True,
         offload_state_to_cpu=True,
+        max_frame_num_to_track=None,
     )
     
 
