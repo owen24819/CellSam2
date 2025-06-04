@@ -33,9 +33,6 @@ class SAM2AutomaticCellTracker:
         stability_score_thresh: float = 0,
         stability_score_offset: float = 1.0,
         box_nms_thresh: float = 0.7,
-        min_mask_region_area: int = 10,
-        output_mode: str = "binary_mask",
-        use_m2m: bool = False,
         max_hole_area: int = 0,
         max_sprinkle_area: int = 0,
         mask_threshold: float = 0.0,
@@ -67,26 +64,9 @@ class SAM2AutomaticCellTracker:
           min_mask_region_area (int): If >0, postprocessing will be applied
             to remove disconnected regions and holes in masks with area smaller
             than min_mask_region_area. Requires opencv.
-          output_mode (str): The form masks are returned in. Can be 'binary_mask',
-            'uncompressed_rle', or 'coco_rle'. 'coco_rle' requires pycocotools.
-            For large resolutions, 'binary_mask' may consume large amounts of
-            memory.
-          use_m2m (bool): Whether to add a one step refinement using previous mask predictions.
-          multimask_output (bool): Whether to output multimask at each point of the grid.
           segment (bool): Whether to segment or track.
         """
 
-        assert output_mode in [
-            "binary_mask",
-            "uncompressed_rle",
-            "coco_rle",
-        ], f"Unknown output_mode {output_mode}."
-        if output_mode == "coco_rle":
-            try:
-                from pycocotools import mask as mask_utils  # type: ignore  # noqa: F401
-            except ImportError as e:
-                print("Please install pycocotools")
-                raise e
             
         self.model = model
         self.model.sam_mask_decoder.pred_iou_thresh = pred_iou_thresh
@@ -103,8 +83,6 @@ class SAM2AutomaticCellTracker:
         self.stability_score_offset = stability_score_offset
         self.mask_threshold = mask_threshold
         self.box_nms_thresh = box_nms_thresh
-        self.output_mode = output_mode
-        self.use_m2m = use_m2m
         self.obj_score_thresh = obj_score_thresh
 
         self.pred_iou_thresh = pred_iou_thresh
@@ -784,7 +762,7 @@ class SAM2AutomaticCellTracker:
                               inference_state["video_width"], 3), dtype=np.uint8)
 
         for frame_idx, track_mask in enumerate(tracking_results):
-            img = cv2.imread(inference_state["video_path"] + f'/t{frame_idx:03d}.tif')
+            img = cv2.imread(str(inference_state["video_path"] / f't{frame_idx:03d}.tif'))
 
             # Create a colored overlay image
             overlay = np.zeros_like(img)

@@ -1,120 +1,155 @@
+# Standard library imports
+import sys
+import argparse
+from pathlib import Path
+
 # Third-party imports
-import cv2
 import hydra
 from hydra.core.global_hydra import GlobalHydra
-import tkinter as tk
-from tkinter import filedialog
-import sys
-from pathlib import Path
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-import matplotlib.patches as patches
 
 # Local imports
 from sam2.build_sam import build_sam2
 from cell_tracker import SAM2AutomaticCellTracker
-from inference_utils import get_device
+from inference_utils import (
+    get_device, 
+    get_tif_directories, 
+    get_result_path, 
+    get_video_path
+)
 
-sys.path.append(str(Path(__file__).parent.parent))
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Cell tracking with SAM2')
+    parser.add_argument(
+        '--video_path', 
+        type=str, 
+        default=None,
+        help='Path to video file or image sequence directory'
+    )
+    parser.add_argument(
+        '--res_path', 
+        type=str, 
+        default=None,
+        help='Path to save tracking results'
+    )
+    parser.add_argument(
+        '--model_name', 
+        type=str, 
+        default="SAM2-tracking-LoRA-heatmap",
+        help='Name of the model to use'
+    )
+    return parser.parse_args()
 
-model_name = "SAM2-tracking-LoRA"  
-sam2_checkpoint = f"sam2_logs/{model_name}/checkpoints/checkpoint.pt"
+def setup_hydra(model_name: str):
+    """Setup Hydra configuration.
+    
+    Args:
+        model_name: Name of the model to use
+    """
+    config_path = f"../sam2_logs/{model_name}"
+    
+    # Clear any existing Hydra instance
+    if GlobalHydra().is_initialized():
+        GlobalHydra.instance().clear()
+    
+    # Global initialization
+    hydra.initialize(version_base=None, config_path=config_path)
+    return f"../sam2_logs/{model_name}", "config_resolved"
 
-config_path = f"../sam2_logs/{model_name}"
-config_name = "config_resolved"
+def process_directory(
+    tracker: SAM2AutomaticCellTracker,
+    dir_path: Path,
+    base_dir: Path,
+    model_name: str,
+    input_path: Path,
+    res_path: Path,
+    idx: int,
+    total_dirs: int
+):
+    """Process a single directory with the cell tracker.
+    
+    Args:
+        tracker: The cell tracker instance
+        dir_path: Directory to process
+        base_dir: Base directory for results
+        model_name: Name of the model
+        input_path: Input path being processed
+        res_path: Path to save results
+        idx: Index of current directory
+        total_dirs: Total number of directories
+    """
+    print(f"Processing directory {idx+1}/{total_dirs}: {dir_path}")
+    
+    # Generate result path
+    result_path = get_result_path(
+        base_dir=base_dir,
+        model_name=model_name,
+        input_path=input_path,
+        dir_name=dir_path.stem,
+        res_path=res_path,
+        idx=idx
+    )
+    result_path.mkdir(parents=True, exist_ok=True)
+    
+    # Track cells in the video or image sequence
+    tracker.predict(
+        dir_path, 
+        result_path,
+        offload_video_to_cpu=True,
+        offload_state_to_cpu=True,
+        max_frame_num_to_track=None,
+    )
+    print(f"Finished processing: {dir_path}")
 
-# Clear any existing Hydra instance
-if GlobalHydra().is_initialized():
-    GlobalHydra.instance().clear()
-
-# global initialization
-hydra.initialize(version_base=None, config_path=config_path)
-
-device = get_device()
-
-def main(config_name):
-    # Build the SAM2 model
+def main():
+    """Main function for cell tracking."""
+    # Parse arguments and setup paths
+    args = parse_args()
+    model_name = args.model_name
+    config_path, config_name = setup_hydra(model_name)
+    
+    # Setup model and device
+    device = get_device()
+    sam2_checkpoint = f"sam2_logs/{model_name}/checkpoints/checkpoint.pt"
     sam2_model = build_sam2(config_name, sam2_checkpoint, device=device)
     
     # Create the cell tracker
     tracker = SAM2AutomaticCellTracker(
         sam2_model,
-        points_per_side=16,  # Fewer points for faster processing
         pred_iou_thresh=0.7,
         obj_score_thresh=0,
         div_obj_score_thresh=0,
         stability_score_thresh=0.7,
         box_nms_thresh=0.7,
-        min_mask_region_area=30,
-        use_m2m=True,  # Use mask-to-mask refinement
         segment=False,
         use_heatmap=True,
     )
 
-    video_path = 'C:/Users/17742/Documents/DeepLearning/datasets/moma/CTC/test/29'
-    res_path = Path(__file__).parents[1] / 'sam2_logs' / model_name / 'results' / 'CTC' / Path(video_path).stem
-    res_path.mkdir(parents=True, exist_ok=True)
+    # Get input path
+    video_path = Path(args.video_path) if args.video_path else get_video_path()
 
-    if video_path is None:
-        # Ask user to select video or image folder
-        video_path = get_video_path()
-
-    # Track cells in the video or image sequence
-    tracker.predict(
-        video_path, 
-        res_path,
-        offload_video_to_cpu=True,
-        offload_state_to_cpu=True,
-        max_frame_num_to_track=None,
-    )
-    
-
-def get_video_path():
-    # Create and hide the root window
-    root = tk.Tk()
-    root.withdraw()
-    
-    # Ask user if they want to select a video or a folder of images
-    selection_window = tk.Toplevel(root)
-    selection_window.title("Select Input Type")
-    selection_window.geometry("300x150")
-    selection_window.resizable(False, False)
-    
-    selected_option = tk.StringVar(value="video")
-    
-    tk.Label(selection_window, text="Choose input type:").pack(pady=10)
-    tk.Radiobutton(selection_window, text="Video file", variable=selected_option, value="video").pack(anchor=tk.W, padx=20)
-    tk.Radiobutton(selection_window, text="Folder of images", variable=selected_option, value="images").pack(anchor=tk.W, padx=20)
-    
-    path_result = [None]  # Use list to store result from callback
-    
-    def on_confirm():
-        option = selected_option.get()
-        if option == "video":
-            path_result[0] = filedialog.askopenfilename(
-                title="Select a video file",
-                filetypes=[
-                    ("Video files", "*.mp4 *.avi *.mov *.mkv"),
-                    ("All files", "*.*")
-                ]
+    try:
+        # Get directories containing .tif files
+        directories = get_tif_directories(video_path)
+        
+        # Process each directory
+        base_dir = Path(__file__).parents[1]
+        for idx, dir_path in enumerate(directories):
+            process_directory(
+                tracker=tracker,
+                dir_path=dir_path,
+                base_dir=base_dir,
+                model_name=model_name,
+                input_path=video_path,
+                res_path=args.res_path,
+                idx=idx,
+                total_dirs=len(directories)
             )
-        else:  # images
-            path_result[0] = filedialog.askdirectory(
-                title="Select folder containing image sequence"
-            )
-        selection_window.destroy()
-    
-    tk.Button(selection_window, text="Confirm", command=on_confirm).pack(pady=20)
-    
-    # Wait for the window to be closed
-    selection_window.wait_window()
-    
-    if not path_result[0]:
-        print("No input selected. Exiting...")
-        exit()
-
-    return Path(path_result[0])
+            
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    main(config_name) 
+    sys.path.append(str(Path(__file__).parent.parent))
+    main() 
