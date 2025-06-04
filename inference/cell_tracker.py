@@ -417,6 +417,42 @@ class SAM2AutomaticCellTracker:
 
                     inference_state, detected_mask = self.update_cell_tracks(inference_state, frame_idx, sam_outputs, current_out, tracking_object_ids, heatmap_input=True)
 
+                    if detected_mask.sum() > 0 and len(inference_state["lost_obj_ids"][frame_idx]) > 0:
+                        lost_obj_ids = inference_state["lost_obj_ids"][frame_idx]
+                        lost_high_res_masks = inference_state["lost_high_res_masks"][frame_idx]
+
+                        detected_cells = np.unique(detected_mask)
+                        detected_cells = detected_cells[detected_cells != 0]
+
+                        # Calculate IoU between each detected cell and lost cell
+                        ious = np.zeros((len(detected_cells), len(lost_obj_ids)))
+                        for i, detected_id in enumerate(detected_cells):
+                            detected_mask_binary = detected_mask == detected_id
+                            for j, lost_id in enumerate(lost_obj_ids):
+                                intersection = np.logical_and(detected_mask_binary, lost_high_res_masks[j]).sum()
+                                union = np.logical_or(detected_mask_binary, lost_high_res_masks[j]).sum()
+                                ious[i,j] = intersection / union if union > 0 else 0
+
+                        # Find the lost cell with the highest IoU for each detected cell
+                        max_ious = np.max(ious, axis=1)
+                        lost_cell_ids = np.argmax(ious, axis=1)
+
+                        # Replace detected cells with track cells if IoU is above threshold
+                        for i, (max_iou, lost_idx) in enumerate(zip(max_ious, lost_cell_ids)):
+                            lost_cell_id = int(lost_obj_ids[lost_idx])
+                            if max_iou > 0.05 and frame_idx - 1 in inference_state["memory_dict"][lost_cell_id]['frame_idx']:  # IoU threshold and lost cell was in previous frame
+                                detected_cell_id = int(detected_cells[i])
+                                # Replace the detected cell ID with the lost cell ID in the mask
+                                detected_mask[detected_mask == detected_cell_id] = lost_cell_id
+
+                                # update memory_dict
+                                inference_state["memory_dict"][lost_cell_id]['mask_mem_features'] = torch.cat((inference_state["memory_dict"][lost_cell_id]['mask_mem_features'], inference_state["memory_dict"][detected_cell_id]['mask_mem_features']), dim=0)
+                                inference_state["memory_dict"][lost_cell_id]['obj_ptr'] = torch.cat((inference_state["memory_dict"][lost_cell_id]['obj_ptr'], inference_state["memory_dict"][detected_cell_id]['obj_ptr']), dim=0)
+                                inference_state["memory_dict"][lost_cell_id]['frame_idx'].append(frame_idx)
+                                inference_state["obj_ids"][frame_idx][inference_state["obj_ids"][frame_idx] == detected_cell_id] = lost_cell_id
+
+                                del inference_state["memory_dict"][detected_cell_id]
+
                     track_mask[(detected_mask > 0) * (track_mask == 0)] = detected_mask[(detected_mask > 0) * (track_mask == 0)]
 
             yield frame_idx, inference_state, track_mask
@@ -524,6 +560,9 @@ class SAM2AutomaticCellTracker:
         removed_indices = torch.nonzero(keep_tokens)[~torch.isin(torch.arange(keep_tokens.sum(), device=keep_tokens.device), keep_by_nms)]
         keep_tokens[removed_indices] = False
 
+        # Store which cells are predicted to be objects but are not kept by NMS or iou score or mask threshold
+        valid_next_frame_mask = object_score_logits_dict["post_div"][:,0] > self.obj_score_thresh
+
         if heatmap_input:
             obj_ids = torch.arange(inference_state["max_obj_id"]+1, inference_state["max_obj_id"]+1+data["masks"].shape[0], device=self.device)
             prev_obj_ids = obj_ids.clone()
@@ -544,8 +583,9 @@ class SAM2AutomaticCellTracker:
             daughter_ids_list = []
             parent_ids = torch.zeros(len(obj_ids), device=self.device, dtype=torch.int32)
             inference_state["parent_ids"] = {frame_idx:parent_ids}
+            inference_state["lost_obj_ids"] = {frame_idx:torch.zeros(0, device=self.device, dtype=torch.int32)}
+            inference_state["lost_high_res_masks"] = {}
         else:
-
             # Get all potential mother cells before NMS
             mother_ids = obj_ids[is_dividing]
             daughter_ids = torch.arange(inference_state["max_obj_id"]+1, inference_state["max_obj_id"]+1+len(mother_ids)*2, device=self.device)
@@ -558,6 +598,12 @@ class SAM2AutomaticCellTracker:
             obj_ids = torch.cat([obj_ids[~is_dividing], daughter_ids])
             
             # Now filter based on NMS results
+            lost_obj_ids = obj_ids[valid_next_frame_mask * (~keep_tokens)]
+            inference_state["lost_obj_ids"][frame_idx] = lost_obj_ids
+            if len(lost_obj_ids) > 0:
+                lost_high_res_masks = self.postprocess_mask(high_res_masks[valid_next_frame_mask * (~keep_tokens)].flatten(0,1), inference_state)
+                inference_state["lost_high_res_masks"][frame_idx] = lost_high_res_masks > self.mask_threshold
+
             obj_ids = obj_ids[keep_tokens]
 
             parent_ids = torch.zeros(len(obj_ids), device=self.device, dtype=torch.int32)
@@ -580,11 +626,6 @@ class SAM2AutomaticCellTracker:
             inference_state["obj_ids"][frame_idx] = obj_ids
             inference_state["max_obj_id"] = max(obj_ids.tolist() + [inference_state["max_obj_id"]])
             inference_state["parent_ids"][frame_idx] = parent_ids
-
-
-        if data["masks"].shape[0] == 0: 
-            track_mask = np.zeros((inference_state["video_height"], inference_state["video_width"]), dtype=np.uint16)
-            return inference_state, track_mask
 
         current_out["pred_masks_high_res"] = data["masks"]
         current_out["pred_object_score_logits"] = data["obj_scores"]
@@ -616,6 +657,10 @@ class SAM2AutomaticCellTracker:
                 prev_tracking_object_ids=prev_obj_ids,
                 daughter_ids_list=daughter_ids_list,
             )
+
+        if data["masks"].shape[0] == 0: 
+            track_mask = np.zeros((inference_state["video_height"], inference_state["video_width"]), dtype=np.uint16)
+            return inference_state, track_mask
 
         track_mask = self.postprocess_mask(data["masks"], inference_state)
 
