@@ -395,43 +395,80 @@ class SAM2AutomaticCellTracker:
 
                     inference_state, detected_mask = self.update_cell_tracks(inference_state, frame_idx, sam_outputs, current_out, tracking_object_ids, heatmap_input=True)
 
-                    if detected_mask.sum() > 0 and len(inference_state["lost_obj_ids"][frame_idx]) > 0:
-                        lost_obj_ids = inference_state["lost_obj_ids"][frame_idx]
-                        lost_high_res_masks = inference_state["lost_high_res_masks"][frame_idx]
+                    if detected_mask.sum() > 0:
 
                         detected_cells = np.unique(detected_mask)
                         detected_cells = detected_cells[detected_cells != 0]
 
-                        # Calculate IoU between each detected cell and lost cell
-                        ious = np.zeros((len(detected_cells), len(lost_obj_ids)))
-                        for i, detected_id in enumerate(detected_cells):
-                            detected_mask_binary = detected_mask == detected_id
-                            for j, lost_id in enumerate(lost_obj_ids):
-                                intersection = np.logical_and(detected_mask_binary, lost_high_res_masks[j]).sum()
-                                union = np.logical_or(detected_mask_binary, lost_high_res_masks[j]).sum()
-                                ious[i,j] = intersection / union if union > 0 else 0
+                        if  len(inference_state["lost_obj_ids"][frame_idx]) > 0:
+                            lost_obj_ids = inference_state["lost_obj_ids"][frame_idx]
+                            lost_high_res_masks = inference_state["lost_high_res_masks"][frame_idx]
 
-                        # Find the lost cell with the highest IoU for each detected cell
-                        max_ious = np.max(ious, axis=1)
-                        lost_cell_ids = np.argmax(ious, axis=1)
+                            # Calculate IoU between each detected cell and lost cell
+                            ious = np.zeros((len(detected_cells), len(lost_obj_ids)))
+                            for i, detected_id in enumerate(detected_cells):
+                                detected_mask_binary = detected_mask == detected_id
+                                for j, lost_id in enumerate(lost_obj_ids):
+                                    intersection = np.logical_and(detected_mask_binary, lost_high_res_masks[j]).sum()
+                                    union = np.logical_or(detected_mask_binary, lost_high_res_masks[j]).sum()
+                                    ious[i,j] = intersection / union if union > 0 else 0
 
-                        # Replace detected cells with track cells if IoU is above threshold
-                        for i, (max_iou, lost_idx) in enumerate(zip(max_ious, lost_cell_ids)):
-                            lost_cell_id = int(lost_obj_ids[lost_idx])
-                            if max_iou > 0.05 and frame_idx - 1 in inference_state["memory_dict"][lost_cell_id]['frame_idx']:  # IoU threshold and lost cell was in previous frame
-                                detected_cell_id = int(detected_cells[i])
-                                # Replace the detected cell ID with the lost cell ID in the mask
-                                detected_mask[detected_mask == detected_cell_id] = lost_cell_id
+                            # Find the lost cell with the highest IoU for each detected cell
+                            max_ious = np.max(ious, axis=1)
+                            lost_cell_ids = np.argmax(ious, axis=1)
 
-                                # update memory_dict
-                                inference_state["memory_dict"][lost_cell_id]['mask_mem_features'] = torch.cat((inference_state["memory_dict"][lost_cell_id]['mask_mem_features'], inference_state["memory_dict"][detected_cell_id]['mask_mem_features']), dim=0)
-                                inference_state["memory_dict"][lost_cell_id]['obj_ptr'] = torch.cat((inference_state["memory_dict"][lost_cell_id]['obj_ptr'], inference_state["memory_dict"][detected_cell_id]['obj_ptr']), dim=0)
-                                inference_state["memory_dict"][lost_cell_id]['frame_idx'].append(frame_idx)
-                                inference_state["obj_ids"][frame_idx][inference_state["obj_ids"][frame_idx] == detected_cell_id] = lost_cell_id
+                            # Replace detected cells with track cells if IoU is above threshold
+                            for i, (max_iou, lost_idx) in enumerate(zip(max_ious, lost_cell_ids)):
+                                lost_cell_id = int(lost_obj_ids[lost_idx])
+                                if max_iou > 0.05 and frame_idx - 1 in inference_state["memory_dict"][lost_cell_id]['frame_idx']:  # IoU threshold and lost cell was in previous frame
+                                    detected_cell_id = int(detected_cells[i])
+                                    # Replace the detected cell ID with the lost cell ID in the mask
+                                    detected_mask[detected_mask == detected_cell_id] = lost_cell_id
 
-                                del inference_state["memory_dict"][detected_cell_id]
+                                    # update memory_dict
+                                    inference_state["memory_dict"][lost_cell_id]['mask_mem_features'] = torch.cat((inference_state["memory_dict"][lost_cell_id]['mask_mem_features'], inference_state["memory_dict"][detected_cell_id]['mask_mem_features']), dim=0)
+                                    inference_state["memory_dict"][lost_cell_id]['obj_ptr'] = torch.cat((inference_state["memory_dict"][lost_cell_id]['obj_ptr'], inference_state["memory_dict"][detected_cell_id]['obj_ptr']), dim=0)
+                                    inference_state["memory_dict"][lost_cell_id]['frame_idx'].append(frame_idx)
+                                    inference_state["obj_ids"][frame_idx][inference_state["obj_ids"][frame_idx] == detected_cell_id] = lost_cell_id
 
-                    track_mask[(detected_mask > 0) * (track_mask == 0)] = detected_mask[(detected_mask > 0) * (track_mask == 0)]
+                                    detected_cells = detected_cells[detected_cells != detected_cell_id]
+
+                                    del inference_state["memory_dict"][detected_cell_id]
+
+                        for detected_cell_id in detected_cells:
+                            # Get binary mask for current detected cell
+                            detected_mask_binary = detected_mask == detected_cell_id
+                            
+                            # Get all unique track IDs that overlap with this detected cell
+                            overlapping_track_ids = np.unique(track_mask[detected_mask_binary])
+                            overlapping_track_ids = overlapping_track_ids[overlapping_track_ids > 0]  # Remove background (0)
+                            
+                            if len(overlapping_track_ids) > 0:
+                                # Calculate IoU with each overlapping track
+                                best_iou = 0
+                                best_track_id = None
+                                
+                                for track_id in overlapping_track_ids:
+                                    track_mask_binary = track_mask == track_id
+                                    intersection = np.logical_and(detected_mask_binary, track_mask_binary).sum()
+                                    union = np.logical_or(detected_mask_binary, track_mask_binary).sum()
+                                    iou = intersection / union if union > 0 else 0
+                                    
+                                    if iou > best_iou:
+                                        best_iou = iou
+                                        best_track_id = track_id
+                                
+                                if best_iou > 0.3:  # If there's significant overlap
+                                    # Update the detected mask to use the best matching track ID
+                                    detected_mask[detected_mask_binary] = best_track_id
+                                    inference_state["memory_dict"][best_track_id]['mask_mem_features'][-1] = inference_state["memory_dict"][detected_cell_id]['mask_mem_features'][0]
+                                    inference_state["memory_dict"][best_track_id]['obj_ptr'][-1] = inference_state["memory_dict"][detected_cell_id]['obj_ptr'][0]
+                                    inference_state["parent_ids"][frame_idx] = inference_state["parent_ids"][frame_idx][inference_state["obj_ids"][frame_idx] != detected_cell_id]
+                                    inference_state["obj_ids"][frame_idx] = inference_state["obj_ids"][frame_idx][inference_state["obj_ids"][frame_idx] != detected_cell_id]
+
+                                    del inference_state["memory_dict"][detected_cell_id]
+                            
+                        track_mask[(detected_mask > 0) * (track_mask == 0)] = detected_mask[(detected_mask > 0) * (track_mask == 0)]
 
             yield frame_idx, inference_state, track_mask
 
