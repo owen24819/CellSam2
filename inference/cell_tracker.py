@@ -356,9 +356,9 @@ class SAM2AutomaticCellTracker:
                 input_points[:,0,0] = (input_points[:,0,0] * (inference_state["video_width"] / inference_state["resized_image_size"][1]))
                 input_points[:,0,1] = (input_points[:,0,1] * (inference_state["video_height"] / inference_state["resized_image_size"][0]))
 
-                input_points = input_points.long()
-
-                track_cell_ids = track_mask[input_points[:,0,1], input_points[:,0,0]]
+                # Convert to numpy and int
+                input_points_np = input_points.cpu().numpy().astype(np.int32)
+                track_cell_ids = track_mask[input_points_np[:,0,1], input_points_np[:,0,0]]
 
                 # Find indices where track_cell_ids is 0 (background)
                 background_point_indices = np.where(track_cell_ids == 0)[0]
@@ -542,7 +542,7 @@ class SAM2AutomaticCellTracker:
         valid_next_frame_mask = object_score_logits_dict["post_div"][:,0] > self.obj_score_thresh
 
         if heatmap_input:
-            obj_ids = torch.arange(inference_state["max_obj_id"]+1, inference_state["max_obj_id"]+1+data["masks"].shape[0], device=self.device)
+            obj_ids = torch.arange(inference_state["max_obj_id"]+1, inference_state["max_obj_id"]+1+data["masks"].shape[0], device=self.device, dtype=torch.int32)
             prev_obj_ids = obj_ids.clone()
             inference_state["obj_ids"][frame_idx] = torch.cat([inference_state["obj_ids"][frame_idx], obj_ids])
             inference_state["max_obj_id"] = max(obj_ids.tolist() + [inference_state["max_obj_id"]])
@@ -553,10 +553,10 @@ class SAM2AutomaticCellTracker:
 
         elif obj_ids is None: # only in first frame
             num_cells = data["masks"].shape[0]
-            obj_ids = torch.arange(num_cells) + 1
+            obj_ids = torch.arange(num_cells, device=self.device, dtype=torch.int32) + 1
             prev_obj_ids = obj_ids.clone()
             inference_state["obj_ids"] = {frame_idx:obj_ids}
-            inference_state["max_obj_id"] = max(obj_ids)
+            inference_state["max_obj_id"] = max(obj_ids.tolist())
             mother_ids = []
             daughter_ids_list = []
             parent_ids = torch.zeros(len(obj_ids), device=self.device, dtype=torch.int32)
@@ -566,8 +566,8 @@ class SAM2AutomaticCellTracker:
         else:
             # Get all potential mother cells before NMS
             mother_ids = obj_ids[is_dividing]
-            daughter_ids = torch.arange(inference_state["max_obj_id"]+1, inference_state["max_obj_id"]+1+len(mother_ids)*2, device=self.device)
-            daughter_ids_list = daughter_ids.new_zeros((len(obj_ids),2))
+            daughter_ids = torch.arange(inference_state["max_obj_id"]+1, inference_state["max_obj_id"]+1+len(mother_ids)*2, device=self.device, dtype=torch.int32)
+            daughter_ids_list = daughter_ids.new_zeros((len(obj_ids),2), dtype=torch.int32)
             daughter_ids_list[is_dividing] = daughter_ids.reshape(-1,2)
 
             prev_obj_ids = obj_ids.clone()
@@ -651,7 +651,8 @@ class SAM2AutomaticCellTracker:
         
         # For pixels above threshold, assign the corresponding object ID
         valid_pixels = max_values > self.mask_threshold
-        track_mask[valid_pixels] = obj_ids[arg_max[valid_pixels]]
+        obj_ids_np = obj_ids.cpu().numpy()
+        track_mask[valid_pixels] = obj_ids_np[arg_max[valid_pixels]]
 
         return inference_state, track_mask
     
@@ -736,7 +737,7 @@ class SAM2AutomaticCellTracker:
 
         if not self.segment:
 
-            parent_ids = inference_state["parent_ids"][frame_idx]
+            parent_ids = inference_state["parent_ids"][frame_idx].cpu().numpy()
             res_track = inference_state["res_track"]
 
             for cell_id, parent_id in zip(cell_ids, parent_ids):
@@ -802,7 +803,7 @@ class SAM2AutomaticCellTracker:
                 parent_ids_unique = parent_ids_unique[parent_ids_unique != 0]
 
                 for parent_id in parent_ids_unique:
-                    dau_cell_ids = inference_state["obj_ids"][frame_idx][parent_ids == parent_id]
+                    dau_cell_ids = inference_state["obj_ids"][frame_idx][parent_ids == parent_id].cpu().numpy()
 
                     # Draw line between daughter cells
                     if len(dau_cell_ids) == 2:
