@@ -972,8 +972,9 @@ class SAM2Base(torch.nn.Module):
         if maskmem_features is None or maskmem_pos_enc is None:
             return
             
-        # Store position encoding
-        memory_dict["mask_mem_pos_enc"] = maskmem_pos_enc[0]
+        if memory_dict["mask_mem_pos_enc"] is None:
+            # Store position encoding
+            memory_dict["mask_mem_pos_enc"] = maskmem_pos_enc[0]
         
         # Update memory features for each tracked object
         for i, object_id in enumerate(tracking_object_ids):

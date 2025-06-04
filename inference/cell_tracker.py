@@ -180,7 +180,7 @@ class SAM2AutomaticCellTracker:
         # (we directly use their consolidated outputs during tracking)
         # metadata for each tracking frame (e.g. which direction it's tracked)
         inference_state["frames_tracked_per_obj"] = {}
-        inference_state["memory_dict"] = {}
+        inference_state["memory_dict"] = {"mask_mem_pos_enc": None}
         # Warm up the visual backbone and cache the image feature on frame 0
         self._get_image_feature(inference_state, frame_idx=0, batch_size=1)
 

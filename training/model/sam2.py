@@ -287,7 +287,7 @@ class SAM2Train(SAM2Base):
         processing_order = init_cond_frames + backbone_out["frames_not_in_init_cond"]
 
         tracking_object_ids = input.metadata.unique_objects_identifier[0][:,1]
-        memory_dict = {}
+        memory_dict = {'mask_mem_pos_enc': None}
         all_frame_outputs = {}
 
         for stage_id in processing_order:
