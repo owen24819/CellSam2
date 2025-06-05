@@ -66,7 +66,7 @@ def get_video_path() -> Path:
 
     return Path(path_result[0])
 
-def get_result_path(base_dir: Path, model_name: str, input_path: Path, dir_name: str, res_path: Path = None, idx: int = None) -> Path:
+def get_result_path(base_dir: Path, model_name: str, input_path: Path, dir_name: str, res_path: Path = None) -> Path:
     """Generate the result path based on input path structure.
     
     Args:
@@ -80,7 +80,7 @@ def get_result_path(base_dir: Path, model_name: str, input_path: Path, dir_name:
         Path: Result directory path
     """
     if res_path is not None:
-        return res_path / f'res_{idx}'
+        return Path(res_path) / dir_name
     
     # Start with common base path
     result_path = base_dir / 'sam2_logs' / model_name / 'results'

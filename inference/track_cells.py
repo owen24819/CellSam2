@@ -63,8 +63,8 @@ def process_directory(
     model_name: str,
     input_path: Path,
     res_path: Path,
-    idx: int,
-    total_dirs: int
+    total_dirs: int,
+    idx: int
 ):
     """Process a single directory with the cell tracker.
     
@@ -87,7 +87,6 @@ def process_directory(
         input_path=input_path,
         dir_name=dir_path.stem,
         res_path=res_path,
-        idx=idx
     )
     result_path.mkdir(parents=True, exist_ok=True)
     
@@ -142,8 +141,8 @@ def main():
                 model_name=model_name,
                 input_path=video_path,
                 res_path=args.res_path,
-                idx=idx,
-                total_dirs=len(directories)
+                total_dirs=len(directories),
+                idx=idx
             )
             
     except ValueError as e:
