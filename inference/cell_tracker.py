@@ -38,6 +38,7 @@ class SAM2AutomaticCellTracker:
         mask_threshold: float = 0.0,
         segment: bool = False,
         use_heatmap: bool = False,
+        min_mask_area: int = 30,
     ) -> None:
         """
         Using a SAM 2 model, generates and tracks masks for an entire video.
@@ -90,6 +91,7 @@ class SAM2AutomaticCellTracker:
         self.div_obj_score_thresh = div_obj_score_thresh
         self.segment = segment
         self.use_heatmap = use_heatmap
+        self.min_mask_area = min_mask_area  
 
         self._transforms = SAM2Transforms(
             resolution=self.model.image_size,
@@ -531,6 +533,9 @@ class SAM2AutomaticCellTracker:
             is_dividing,
         ) = sam_outputs
 
+        # 
+        save_masks = torch.zeros_like(high_res_masks)
+
         # Keep only largest connected component for each mask
         for i in range(high_res_masks.shape[0]):
             mask = high_res_masks[i,0].cpu().numpy()
@@ -545,26 +550,31 @@ class SAM2AutomaticCellTracker:
                     largest_label = unique_labels[1:][np.argmax(counts[1:])]
                     # Keep only largest component
                     mask_binary = (labels == largest_label)
-                    high_res_masks[i,0] = torch.from_numpy(mask_binary).to(high_res_masks.device)
-                    # Resize high_res_mask to low_res_mask size and replace
-                    low_res_size = low_res_masks.shape[2:]
-                    low_res_mask = cv2.resize(mask_binary.astype(np.float32), (low_res_size[1], low_res_size[0])) > 0.5
-                    low_res_masks[i,0] = torch.from_numpy(low_res_mask).to(low_res_masks.device)
+                    save_masks[i,0][torch.from_numpy(mask_binary).to(high_res_masks.device)] = high_res_masks[i,0][torch.from_numpy(mask_binary).to(high_res_masks.device)]
+                else:
+                    save_masks[i,0][high_res_masks[i,0] > self.mask_threshold] = high_res_masks[i,0][high_res_masks[i,0] > self.mask_threshold]
+
+        
+                 # Get max scores across all masks for each pixel
+        argmax_scores = torch.max(save_masks[:,0], dim=0)[1]  # shape: (H, W)
+        # Count pixels for each mask index (excluding background)
+        valid_mask = save_masks[:,0].sum(0) > 0
+        valid_indices = argmax_scores[valid_mask]
+        max_mask_area = torch.bincount(valid_indices.flatten(), minlength=len(save_masks))
 
         keep_tokens = (
             object_score_logits_dict["post_div"][:,0] > self.obj_score_thresh
             ) * (
                 ious[:,0] > self.pred_iou_thresh
             ) * (
-                high_res_masks > self.mask_threshold
-            ).sum((1,2,3)) > 0
-
-        
+                max_mask_area > self.min_mask_area
+            )
+            
         # Serialize predictions and store in MaskData
         data = MaskData(
             masks=high_res_masks[keep_tokens].flatten(0, 1),
+            save_masks=save_masks[keep_tokens].flatten(0, 1),
             iou_preds=ious[keep_tokens].flatten(0, 1),
-            low_res_masks=low_res_masks[keep_tokens].flatten(0, 1),
             obj_scores=object_score_logits_dict["post_div"][keep_tokens].flatten(0,1),
             obj_ptr=obj_ptr[keep_tokens]
         )
@@ -624,7 +634,7 @@ class SAM2AutomaticCellTracker:
             lost_obj_ids = obj_ids[valid_next_frame_mask * (~keep_tokens)]
             inference_state["lost_obj_ids"][frame_idx] = lost_obj_ids
             if len(lost_obj_ids) > 0:
-                lost_high_res_masks = self.postprocess_mask(high_res_masks[valid_next_frame_mask * (~keep_tokens)].flatten(0,1), inference_state)
+                lost_high_res_masks = self.postprocess_mask(save_masks[valid_next_frame_mask * (~keep_tokens)].flatten(0,1), inference_state)
                 inference_state["lost_high_res_masks"][frame_idx] = lost_high_res_masks > self.mask_threshold
 
             obj_ids = obj_ids[keep_tokens]
@@ -681,11 +691,14 @@ class SAM2AutomaticCellTracker:
                 daughter_ids_list=daughter_ids_list,
             )
 
+        assert data["save_masks"].shape[0] == data["masks"].shape[0]
+
+        # If no masks are predicted, return an empty track mask 
         if data["masks"].shape[0] == 0: 
             track_mask = np.zeros((inference_state["video_height"], inference_state["video_width"]), dtype=np.uint16)
             return inference_state, track_mask
 
-        track_mask = self.postprocess_mask(data["masks"], inference_state)
+        track_mask = self.postprocess_mask(data["save_masks"], inference_state)
 
         # Get the maximum value and index across all masks at each pixel position
         max_values = np.max(track_mask, axis=0)  # returns max values
