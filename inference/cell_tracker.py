@@ -421,6 +421,7 @@ class SAM2AutomaticCellTracker:
                             # Process each detected cell in order of IoU
                             sorted_indices = np.argsort(-max_ious)  # Sort by descending IoU
                             processed_lost_cells = set()
+                            cells_to_remove = set()  # Track which cells to remove
                             
                             for idx in sorted_indices:
                                 if max_ious[idx] > 0.05:  # IoU threshold
@@ -439,10 +440,13 @@ class SAM2AutomaticCellTracker:
                                         inference_state["memory_dict"][lost_cell_id]['frame_idx'].append(frame_idx)
                                         inference_state["obj_ids"][frame_idx][inference_state["obj_ids"][frame_idx] == detected_cell_id] = lost_cell_id
                                         
-                                        detected_cells = detected_cells[detected_cells != detected_cell_id]
+                                        cells_to_remove.add(detected_cell_id)  # Mark for removal
                                         processed_lost_cells.add(lost_cell_id)
                                         
                                         del inference_state["memory_dict"][detected_cell_id]
+
+                            # Remove the cells after processing all matches
+                            detected_cells = detected_cells[~np.isin(detected_cells, list(cells_to_remove))]
 
                         # Handle remaining detected cells
                         for detected_cell_id in detected_cells:
