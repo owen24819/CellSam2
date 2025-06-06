@@ -393,7 +393,7 @@ class SAM2AutomaticCellTracker:
                         memory_dict=inference_state["memory_dict"],
                     )
 
-                    inference_state, detected_mask = self.update_cell_tracks(inference_state, frame_idx, sam_outputs, current_out, tracking_object_ids, heatmap_input=True)
+                    inference_state, detected_mask = self.update_cell_tracks(inference_state, frame_idx, sam_outputs, current_out, heatmap_input=True)
 
                     if detected_mask.sum() > 0:
                         detected_cells = np.unique(detected_mask)
@@ -516,7 +516,7 @@ class SAM2AutomaticCellTracker:
         features = (expanded_image,) + features
         return features
 
-    def update_cell_tracks(self, inference_state, frame_idx, sam_outputs, current_out, tracking_object_ids, heatmap_input=False):
+    def update_cell_tracks(self, inference_state, frame_idx, sam_outputs, current_out, tracking_object_ids=None, heatmap_input=False):
         """Update the cell tracks based on the current output and SAM outputs."""
         obj_ids = tracking_object_ids
         
