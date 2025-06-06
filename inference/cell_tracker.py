@@ -772,8 +772,12 @@ class SAM2AutomaticCellTracker:
 
         res_path = inference_state["res_path"]
 
-        cell_ids = np.unique(track_mask)
-        cell_ids = cell_ids[cell_ids != 0]
+        cell_ids_track_mask = np.unique(track_mask)
+        cell_ids_track_mask = cell_ids_track_mask[cell_ids_track_mask != 0]
+
+        cell_ids = inference_state["obj_ids"][frame_idx].cpu().numpy()
+
+        assert sorted(cell_ids_track_mask) == sorted(cell_ids), "cell_ids_track_mask and cell_ids must be the same"
 
         if len(cell_ids) > 0:
             assert max(cell_ids) < 65536, "cell_id must be less than 65536"
