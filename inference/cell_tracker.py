@@ -30,8 +30,6 @@ class SAM2AutomaticCellTracker:
         obj_score_thresh: float = 0,
         pred_iou_thresh: float = 0.7,
         div_obj_score_thresh: float = 0,
-        stability_score_thresh: float = 0,
-        stability_score_offset: float = 1.0,
         box_nms_thresh: float = 0.5,
         max_hole_area: int = 0,
         max_sprinkle_area: int = 0,
@@ -80,8 +78,6 @@ class SAM2AutomaticCellTracker:
 
         self.points_per_side = points_per_side
         self.points_per_batch = points_per_batch
-        self.stability_score_thresh = stability_score_thresh
-        self.stability_score_offset = stability_score_offset
         self.mask_threshold = mask_threshold
         self.box_nms_thresh = box_nms_thresh
         self.obj_score_thresh = obj_score_thresh
@@ -587,7 +583,7 @@ class SAM2AutomaticCellTracker:
             obj_ptr=obj_ptr[keep_tokens]
         )
 
-        data["boxes"] = batched_mask_to_box(data["masks"] > self.mask_threshold)
+        data["boxes"] = batched_mask_to_box(data["save_masks"] > self.mask_threshold)
         
         keep_by_nms = batched_nms(
             data["boxes"].float(),
@@ -640,6 +636,8 @@ class SAM2AutomaticCellTracker:
             
             # Now filter based on NMS results
             lost_obj_ids = obj_ids[valid_next_frame_mask * (~keep_tokens)]
+            # If cell divided but is lost through NMS, we remove from error correction as this gets overly complicated
+            lost_obj_ids = [obj_id for obj_id in lost_obj_ids if obj_id in prev_obj_ids]
             inference_state["lost_obj_ids"][frame_idx] = lost_obj_ids
             if len(lost_obj_ids) > 0:
                 lost_high_res_masks = save_masks[valid_next_frame_mask * (~keep_tokens)].flatten(0,1)

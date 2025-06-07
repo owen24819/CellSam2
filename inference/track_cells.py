@@ -38,6 +38,29 @@ def parse_args():
         default="SAM2-tracking-LoRA-heatmap",
         help='Name of the model to use'
     )
+    parser.add_argument(
+        '--box_nms_thresh',
+        type=float,
+        default=0.5,
+        help='Non-maximum suppression threshold for bounding boxes'
+    )
+    parser.add_argument(
+        '--pred_iou_thresh',
+        type=float,
+        default=0.7,
+        help='IoU threshold for predictions'
+    )
+    parser.add_argument(
+        '--segment',
+        action='store_true',
+        help='Whether to perform segmentation (default: False)'
+    )
+    parser.add_argument(
+        '--use_heatmap',
+        type=bool,
+        default=True,
+        help='Whether to use heatmap'
+    )
     return parser.parse_args()
 
 def setup_hydra(model_name: str):
@@ -115,13 +138,12 @@ def main():
     # Create the cell tracker
     tracker = SAM2AutomaticCellTracker(
         sam2_model,
-        pred_iou_thresh=0.7,
+        pred_iou_thresh=args.pred_iou_thresh,
         obj_score_thresh=0,
         div_obj_score_thresh=0,
-        stability_score_thresh=0.7,
-        box_nms_thresh=0.7,
-        segment=False,
-        use_heatmap=True,
+        box_nms_thresh=args.box_nms_thresh,
+        segment=args.segment,
+        use_heatmap=args.use_heatmap,
     )
 
     # Get input path
