@@ -17,7 +17,7 @@ scratch:
 
 dataset:
   # PATHS to Dataset
-  data_dir: ../datasets/moma/CTC # PATH to MOSE JPEGImages folder
+  data_dir: ../data/moma
   file_list_txt: # Optional PATH to filelist containing a subset of videos to be used for training
   multiplier: 1
 
@@ -55,6 +55,15 @@ vos:
           contrast: 0.05
           saturation: 0.05
           hue: null
+        - _target_: training.dataset.transforms.RandomGaussianBlur
+          p: 0.4
+          sigma: [0.1,1.5]
+        - _target_: training.dataset.transforms.RandomGaussianNoise
+          p: 0.4
+          sigma: 0.05
+        - _target_: training.dataset.transforms.RandomIlluminationVoodoo
+          p: 0.4
+          num_control_points: 5
         - _target_: training.dataset.transforms.ToTensorAPI
         - _target_: training.dataset.transforms.NormalizeAPI
           mean: [0.485, 0.456, 0.406]
@@ -239,7 +248,7 @@ trainer:
           transforms: ${vos.train_transforms}
           video_dataset:
             _target_: training.dataset.vos_raw_dataset.CTCRawDataset
-            train_dir: ${dataset.data_dir}/train
+            train_dir: ${dataset.data_dir}/train/CTC
             num_frames: ${scratch.num_frames}
             file_list_txt: ${dataset.file_list_txt}  # optional
           sampler:
@@ -266,7 +275,7 @@ trainer:
           transforms: ${vos.train_transforms}
           video_dataset:
             _target_: training.dataset.vos_raw_dataset.CTCRawDataset
-            train_dir: ${dataset.data_dir}/val
+            train_dir: ${dataset.data_dir}/val/CTC
             num_frames: ${scratch.num_frames}
             file_list_txt: ${dataset.file_list_txt}  # optional
           sampler:

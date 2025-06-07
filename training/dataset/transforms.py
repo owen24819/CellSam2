@@ -10,13 +10,14 @@ Transforms and data augmentation for both image + bbox.
 
 import random
 from typing import Iterable
-
+import numpy as np
 import torch
 import torchvision.transforms as T
 import torchvision.transforms.functional as F
 import torchvision.transforms.v2.functional as Fv2
 from PIL import Image as PILImage
-
+from PIL import ImageFilter
+from scipy import interpolate
 from torchvision.transforms import InterpolationMode
 
 from training.utils.data_utils import VideoDatapoint
@@ -521,7 +522,6 @@ class RandomMosaicVideoAPI:
 
         return datapoint
 
-
 class PadToSquareAPI:
     def __init__(self, size):
         self.size = size
@@ -545,3 +545,117 @@ class PadToSquareAPI:
             datapoint = pad(datapoint, i, padding)
             
         return datapoint
+class RandomGaussianBlur:
+    def __init__(self, p=0.4, sigma=[0.1,1.5]):
+        self.p = p
+        self.sigma = sigma
+
+    def __call__(self, datapoint: VideoDatapoint, **kwargs):
+        for img in datapoint.frames:
+            if random.random() < self.p:
+                radius = random.uniform(self.sigma[0],self.sigma[1])
+                img.data = self.gaussian_blur(img.data, radius)
+        return datapoint
+
+    def gaussian_blur(self, img, radius):
+        img = img.filter(ImageFilter.GaussianBlur(radius=radius))
+        return img
+
+
+
+class RandomGaussianNoise:
+    def __init__(self, p=0.4, sigma=0.05):
+        self.p = p
+        self.sigma = sigma
+
+    def __call__(self, datapoint: VideoDatapoint, **kwargs):
+        for img in datapoint.frames:
+            if random.random() < self.p:
+                sigma = random.random() * self.sigma
+                img.data = self.gaussian_noise(img.data, sigma)
+        return datapoint
+
+    def gaussian_noise(self, img: PILImage.Image, sigma: float) -> PILImage.Image:
+        """Apply Gaussian noise to a PIL Image.
+        
+        Args:
+            img: Input PIL Image
+            sigma: Standard deviation of the Gaussian noise (0-1 range)
+            
+        Returns:
+            PIL Image with added noise
+        """
+        # Convert to numpy array preserving all channels
+        img_array = np.array(img)
+        
+        # Generate noise for each channel
+        noise = np.random.normal(0, sigma * 255, img_array.shape).astype(np.float32)
+        
+        # Add noise and clip to valid range
+        noisy_img = img_array.astype(np.float32) + noise
+        noisy_img = np.clip(noisy_img, 0, 255).astype(np.uint8)
+        
+        # Convert back to PIL
+        return PILImage.fromarray(noisy_img)
+    
+
+
+class RandomIlluminationVoodoo:
+    def __init__(self, p=0.4, num_control_points=5):
+        self.p = p
+        self.num_control_points = num_control_points
+
+    def __call__(self, datapoint: VideoDatapoint, **kwargs):
+        for img in datapoint.frames:
+            if random.random() < self.p:
+                img.data = self.illumination_voodoo(img.data)
+        return datapoint
+    
+    def illumination_voodoo(self, img: PILImage.Image) -> PILImage.Image:
+        """Apply random illumination variation to a PIL Image.
+        
+        Args:
+            img: Input PIL Image
+            num_control_points: Number of control points for the illumination curve
+            
+        Returns:
+            PIL Image with varied illumination
+        """
+        # Convert to numpy array
+        img_array = np.array(img).astype(np.float32)
+        
+        # Create a random curve along the length of the image
+        control_points = np.linspace(0, img_array.shape[0] - 1, num=self.num_control_points)
+        random_points = np.random.uniform(low=0.1, high=0.9, size=self.num_control_points)
+        mapping = interpolate.PchipInterpolator(control_points, random_points)
+        curve = mapping(np.linspace(0, img_array.shape[0] - 1, img_array.shape[0]))
+        
+        # Reshape curve for multiplication with all channels
+        curve_reshaped = np.reshape(curve, (-1, 1, 1) if len(img_array.shape) == 3 else (-1, 1))
+        
+        # Apply illumination variation to all channels at once
+        modified = np.multiply(img_array, curve_reshaped)
+        
+        # Handle each channel separately for rescaling
+        if len(modified.shape) == 3:
+            # For RGB images
+            result = np.zeros_like(modified)
+            for c in range(modified.shape[2]):
+                min_val = img_array[:,:,c].min()
+                max_val = img_array[:,:,c].max()
+                result[:,:,c] = np.interp(modified[:,:,c], 
+                                        (modified[:,:,c].min(), modified[:,:,c].max()), 
+                                        (min_val, max_val))
+        else:
+            # For grayscale images
+            min_val = img_array.min()
+            max_val = img_array.max()
+            result = np.interp(modified, (modified.min(), modified.max()), (min_val, max_val))
+        
+        # Ensure proper range and type
+        result = np.clip(result, 0, 255).astype(np.uint8)
+        
+        # Convert back to PIL, handling both RGB and grayscale
+        if len(result.shape) == 2:
+            result = np.repeat(result[..., None], 3, axis=2)
+        return PILImage.fromarray(result)
