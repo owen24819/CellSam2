@@ -640,7 +640,9 @@ class SAM2AutomaticCellTracker:
             lost_obj_ids = obj_ids[valid_next_frame_mask * (~keep_tokens)]
             inference_state["lost_obj_ids"][frame_idx] = lost_obj_ids
             if len(lost_obj_ids) > 0:
-                lost_high_res_masks = self.postprocess_mask(save_masks[valid_next_frame_mask * (~keep_tokens)].flatten(0,1), inference_state)
+                lost_high_res_masks = save_masks[valid_next_frame_mask * (~keep_tokens)].flatten(0,1)
+                lost_high_res_masks[:,(data["masks"] > self.mask_threshold).sum(0) > 0] = -torch.inf
+                lost_high_res_masks = self.postprocess_mask(lost_high_res_masks, inference_state)
                 inference_state["lost_high_res_masks"][frame_idx] = lost_high_res_masks > self.mask_threshold
 
             obj_ids = obj_ids[keep_tokens]
