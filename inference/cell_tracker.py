@@ -424,7 +424,7 @@ class SAM2AutomaticCellTracker:
                             cells_to_remove = set()  # Track which cells to remove
                             
                             for idx in sorted_indices:
-                                if max_ious[idx] > 0.05:  # IoU threshold
+                                if max_ious[idx] > 0:  # If cell has positive object score, it is assumed to be match if there is any overlap
                                     detected_cell_id = int(detected_cells[idx])
                                     lost_idx = lost_cell_indices[idx]
                                     lost_cell_id = int(lost_obj_ids[lost_idx])
@@ -472,7 +472,7 @@ class SAM2AutomaticCellTracker:
                                         best_iou = iou
                                         best_track_id = track_id
                                 
-                                if best_iou > 0.3:  # If there's significant overlap
+                                if best_iou > 0.05:  # If there's any overlap, assume it's the same cell
                                     # Update the detected mask to use the best matching track ID
                                     detected_mask[detected_mask_binary] = best_track_id
                                     inference_state["memory_dict"][best_track_id]['mask_mem_features'][-1] = inference_state["memory_dict"][detected_cell_id]['mask_mem_features'][0]
