@@ -32,7 +32,7 @@ class SAM2AutomaticCellTracker:
         div_obj_score_thresh: float = 0,
         stability_score_thresh: float = 0,
         stability_score_offset: float = 1.0,
-        box_nms_thresh: float = 0.7,
+        box_nms_thresh: float = 0.5,
         max_hole_area: int = 0,
         max_sprinkle_area: int = 0,
         mask_threshold: float = 0.0,
