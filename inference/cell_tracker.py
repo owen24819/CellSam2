@@ -584,10 +584,11 @@ class SAM2AutomaticCellTracker:
         )
 
         data["boxes"] = batched_mask_to_box(data["save_masks"] > self.mask_threshold)
+        data["conf"] = data["obj_scores"].sigmoid() * data["iou_preds"]
         
         keep_by_nms = batched_nms(
             data["boxes"].float(),
-            data["iou_preds"],
+            data["conf"],
             torch.zeros_like(data["boxes"][:, 0]),  # categories
             iou_threshold=self.box_nms_thresh,
         ).sort()[0]
@@ -633,14 +634,14 @@ class SAM2AutomaticCellTracker:
             
             # Update obj_ids to include all potential daughters, even if they might be removed by NMS
             obj_ids = torch.cat([obj_ids[~is_dividing], daughter_ids])
-            
+
             # Now filter based on NMS results
             lost_obj_ids = obj_ids[valid_next_frame_mask * (~keep_tokens)]
             # If cell divided but is lost through NMS, we remove from error correction as this gets overly complicated
             lost_obj_ids = [obj_id for obj_id in lost_obj_ids if obj_id in prev_obj_ids]
             inference_state["lost_obj_ids"][frame_idx] = lost_obj_ids
             if len(lost_obj_ids) > 0:
-                lost_high_res_masks = save_masks[valid_next_frame_mask * (~keep_tokens)].flatten(0,1)
+                lost_high_res_masks = high_res_masks[valid_next_frame_mask * (~keep_tokens)].flatten(0,1)
                 lost_high_res_masks[:,(data["masks"] > self.mask_threshold).sum(0) > 0] = -torch.inf
                 lost_high_res_masks = self.postprocess_mask(lost_high_res_masks, inference_state)
                 inference_state["lost_high_res_masks"][frame_idx] = lost_high_res_masks > self.mask_threshold
