@@ -3,9 +3,7 @@
 
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-
-import logging
-import random
+ 
 from copy import deepcopy
 
 import numpy as np
@@ -20,10 +18,6 @@ from training.dataset.vos_sampler import VOSSampler
 from training.dataset.vos_segment_loader import JSONSegmentLoader
 
 from training.utils.data_utils import Frame, Object, VideoDatapoint
-
-MAX_RETRIES = 100
-
-
 class VOSDataset(VisionDataset):
     def __init__(
         self,
@@ -33,7 +27,6 @@ class VOSDataset(VisionDataset):
         sampler: VOSSampler,
         multiplier: int,
         always_target=True,
-        target_segments_available=True,
     ):
         self._transforms = transforms
         self.training = training
@@ -46,7 +39,6 @@ class VOSDataset(VisionDataset):
 
         self.curr_epoch = 0  # Used in case data loader behavior changes across epochs
         self.always_target = always_target
-        self.target_segments_available = target_segments_available
 
     def _get_datapoint(self, idx):
 

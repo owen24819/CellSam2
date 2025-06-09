@@ -2,13 +2,13 @@
 
 scratch:
   resolution: 512
+  batch_size: 1
   num_train_workers: 2
   num_frames: 4
   max_num_objects: 30
   max_num_bkgd_objects: 8
   base_lr: 5.0e-6
   vision_lr: 3.0e-06
-  phases_per_epoch: 1
   num_epochs: 20
   use_lora: True 
   lora_lr: 1.0e-3
@@ -68,11 +68,25 @@ vos:
         - _target_: training.dataset.transforms.NormalizeAPI
           mean: [0.485, 0.456, 0.406]
           std: [0.229, 0.224, 0.225]
+  val_transforms:
+    - _target_: training.dataset.transforms.ComposeAPI
+      transforms:
+        - _target_: training.dataset.transforms.RandomResizeAPI
+          sizes: ${scratch.resolution}
+          square: false
+          max_size: ${scratch.resolution}
+          consistent_transform: True
+        - _target_: training.dataset.transforms.PadToSquareAPI
+          size: ${scratch.resolution}
+        - _target_: training.dataset.transforms.ToTensorAPI
+        - _target_: training.dataset.transforms.NormalizeAPI
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
 
 trainer:
   _target_: training.trainer.Trainer
   mode: train
-  max_epochs: ${times:${scratch.num_epochs},${scratch.phases_per_epoch}}
+  max_epochs: ${scratch.num_epochs}
   accelerator: cuda
   seed_value: 123
   freeze_encoder: ${scratch.freeze_encoder}
@@ -239,11 +253,10 @@ trainer:
 
   data:
     train:
-      _target_: training.dataset.sam2_datasets.TorchTrainMixedDataset
-      phases_per_epoch: 1
-      batch_sizes: [1]
-      datasets:
-        - _target_: training.dataset.vos_dataset.VOSDataset
+      _target_: training.dataset.sam2_datasets.SingleDataLoader
+      batch_size: ${scratch.batch_size}
+      dataset:
+          _target_: training.dataset.vos_dataset.VOSDataset
           training: true
           transforms: ${vos.train_transforms}
           video_dataset:
@@ -252,10 +265,10 @@ trainer:
             num_frames: ${scratch.num_frames}
             file_list_txt: ${dataset.file_list_txt}  # optional
           sampler:
-            _target_: training.dataset.vos_sampler.RandomUniformSampler
-            num_frames: ${scratch.num_frames}
+            _target_: training.dataset.vos_sampler.FrameIndexSampler
             max_num_objects: ${scratch.max_num_objects}
             max_num_bkgd_objects: ${scratch.max_num_bkgd_objects}
+            is_training: true
           multiplier: ${dataset.multiplier}
       shuffle: True
       num_workers: ${scratch.num_train_workers}
@@ -266,25 +279,24 @@ trainer:
         _partial_: true
         dict_key: all
     val:
-      _target_: training.dataset.sam2_datasets.TorchTrainMixedDataset
-      phases_per_epoch: 1
-      batch_sizes: [1]
-      datasets:
-        - _target_: training.dataset.vos_dataset.VOSDataset
+      _target_: training.dataset.sam2_datasets.SingleDataLoader
+      batch_size: ${scratch.batch_size}
+      dataset:
+          _target_: training.dataset.vos_dataset.VOSDataset
           training: false
-          transforms: ${vos.train_transforms}
+          transforms: ${vos.val_transforms}
           video_dataset:
             _target_: training.dataset.vos_raw_dataset.CTCRawDataset
             train_dir: ${dataset.data_dir}/val/CTC
             num_frames: ${scratch.num_frames}
             file_list_txt: ${dataset.file_list_txt}  # optional
           sampler:
-            _target_: training.dataset.vos_sampler.RandomUniformSampler
-            num_frames: ${scratch.num_frames}
+            _target_: training.dataset.vos_sampler.FrameIndexSampler
             max_num_objects: ${scratch.max_num_objects}
             max_num_bkgd_objects: ${scratch.max_num_bkgd_objects}
+            is_training: false
           multiplier: ${dataset.multiplier}
-      shuffle: True
+      shuffle: False
       num_workers: ${scratch.num_train_workers}
       pin_memory: True
       drop_last: True
