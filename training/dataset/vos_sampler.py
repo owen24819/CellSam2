@@ -113,19 +113,18 @@ class FrameIndexSampler(VOSSampler):
             object_ids_list.extend([object_ids] * (len(frames) - 1))
 
         # Add background points for training
-        if self.is_training:
-            max_num_bkgd_points = min(
-                max(0, self.max_num_objects - len(object_ids_list[0])), 
-                self.max_num_bkgd_objects
-            )
-            min_num_bkgd_points = int(len(object_ids_list[0]) == 0)
-            num_bkgd_points = random.randint(min_num_bkgd_points, max_num_bkgd_points)
+        max_num_bkgd_points = min(
+            max(0, self.max_num_objects - len(object_ids_list[0])), 
+            self.max_num_bkgd_objects
+        )
+        min_num_bkgd_points = int(len(object_ids_list[0]) == 0)
+        num_bkgd_points = random.randint(min_num_bkgd_points, max_num_bkgd_points)
 
-            # Generate background object IDs using negative integers
-            bkgd_object_ids = list(range(-1, -1 - num_bkgd_points, -1))
+        # Generate background object IDs using negative integers
+        bkgd_object_ids = list(range(-1, -1 - num_bkgd_points, -1))
 
-            # Add background objects to frames within tracking window
-            for j in range(0, min(len(object_ids_list), self.num_frames_track_lost_objects + 1)):
-                object_ids_list[j] = object_ids_list[j] + bkgd_object_ids
+        # Add background objects to frames within tracking window
+        for j in range(0, min(len(object_ids_list), self.num_frames_track_lost_objects + 1)):
+            object_ids_list[j] = object_ids_list[j] + bkgd_object_ids
 
         return SampledFramesAndObjects(frames=frames, object_ids_list=object_ids_list)
