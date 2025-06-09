@@ -333,13 +333,12 @@ class Trainer:
     def save_checkpoint(self, epoch, checkpoint_names=None):
         checkpoint_folder = self.checkpoint_conf.save_dir
         makedir(checkpoint_folder)
-        if checkpoint_names is None:
-            checkpoint_names = ["checkpoint"]
-            if (
-                self.checkpoint_conf.save_freq > 0
-                and (int(epoch) % self.checkpoint_conf.save_freq == 0)
-            ) or int(epoch) in self.checkpoint_conf.save_list:
-                checkpoint_names.append(f"checkpoint_{int(epoch)}")
+        checkpoint_names = ["checkpoint"]
+        if (
+            self.checkpoint_conf.save_freq > 0
+            and (int(epoch) % self.checkpoint_conf.save_freq == 0)
+        ) or int(epoch) in self.checkpoint_conf.save_list:
+            checkpoint_names.append(f"checkpoint_{int(epoch)}")
 
         checkpoint_paths = []
         for ckpt_name in checkpoint_names:
