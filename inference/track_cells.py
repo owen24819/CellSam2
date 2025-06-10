@@ -61,6 +61,12 @@ def parse_args():
         default=True,
         help='Whether to use heatmap'
     )
+    parser.add_argument(
+        '--checkpoint_num',
+        type=int,
+        default=None,
+        help='Checkpoint number to use'
+    )
     return parser.parse_args()
 
 def setup_hydra(model_name: str):
@@ -132,7 +138,10 @@ def main():
     
     # Setup model and device
     device = get_device()
-    sam2_checkpoint = f"sam2_logs/{model_name}/checkpoints/checkpoint.pt"
+    if args.checkpoint_num is None:
+        sam2_checkpoint = f"sam2_logs/{model_name}/checkpoints/checkpoint.pt"
+    else:
+        sam2_checkpoint = f"sam2_logs/{model_name}/checkpoints/checkpoint_{args.checkpoint_num}.pt"
     sam2_model = build_sam2(config_name, sam2_checkpoint, device=device)
     
     # Create the cell tracker
