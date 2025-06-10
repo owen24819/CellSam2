@@ -804,7 +804,7 @@ class SAM2AutomaticCellTracker:
         if len(cell_ids) > 0:
             assert max(cell_ids) < 65536, "cell_id must be less than 65536"
 
-        cv2.imwrite(str(res_path / f'mask_{frame_idx:03d}.tif'), track_mask.astype(np.uint16))
+        cv2.imwrite(str(res_path / f'mask{frame_idx:03d}.tif'), track_mask.astype(np.uint16))
 
         if not self.segment:
 
