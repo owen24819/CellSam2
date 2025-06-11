@@ -12,3 +12,4 @@ demo/backend/checkpoints/*.pt
 events.out.tfevents.*
 SAM2_logs/*
 wandb/*
+*.docx
