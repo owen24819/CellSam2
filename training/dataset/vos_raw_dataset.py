@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Optional
 import re
 import torch
+import numpy as np
 
 from iopath.common.file_io import g_pathmgr
 
@@ -39,6 +40,7 @@ class VOSVideo:
     video_name: str
     video_id: int
     frames: List[VOSFrame]
+    man_track: Optional[str] = None
 
     def __len__(self):
         return len(self.frames)
@@ -61,12 +63,10 @@ class CTCRawDataset(VOSRawDataset):
                  sample_rate=1):
         
         self.train_dir = Path(train_dir)
-
         self.img_folders = list(self.train_dir.glob("[0-9][0-9]"))
-
+        self.num_frames = num_frames
         self.truncate_video = truncate_video
         self.sample_rate = sample_rate
-        self.num_frames = num_frames
 
         # Read the subset defined in file_list_txt
         if file_list_txt is not None:
@@ -87,38 +87,57 @@ class CTCRawDataset(VOSRawDataset):
             [video_name for video_name in subset if video_name not in excluded_files]
         )
 
-        if self.num_frames == 1:
-            self.frame_index = []
-            for video_name in self.video_names:
-                all_frames = sorted((self.train_dir / video_name).glob("*.tif"))
-                for fpath in all_frames[::self.sample_rate]:
-                    self.frame_index.append((video_name, fpath))
+        # Build index of (video_name, start_frame) pairs
+        self.frame_index = []
+        for video_name in self.video_names:
+            # For initialization, we need all frames to know how many starting points we have
+            all_frames = self.get_all_frames(video_name)
+            
+            # For each possible start frame that allows num_frames sequence
+            max_start_idx = len(all_frames) - self.num_frames + 1 if self.num_frames > 1 else len(all_frames)
+            for i in range(0, max_start_idx):
+                self.frame_index.append((video_name, i))
 
     def __len__(self):
-        if self.num_frames == 1:
-            return len(self.frame_index)
-        else:
-            return len(self.video_names)
+        return len(self.frame_index)
+
+    def get_all_frames(self, video_name):
+        """Get a sampled subset of frames from a video.
+        Args:
+            video_name: Name of the video
+            start_idx: Starting frame index in the sampled sequence
+        """
+        all_frames = sorted((self.train_dir / video_name).glob("*.tif"))
+        # Apply sampling first since it reduces video size
+        all_frames = all_frames[::self.sample_rate]
+        # Then truncate if needed
+        if self.truncate_video > 0:
+            all_frames = all_frames[:self.truncate_video]            
+                        
+        return all_frames
+
     def get_video(self, idx):
-
-        if self.num_frames == 1:
-            # SEGMENTATION mode
-            video_name, frame_path = self.frame_index[idx]
-            fid = int(re.findall(r'\d+', frame_path.stem)[0])
-            frame = VOSFrame(fid, image_path=frame_path)
-            video = VOSVideo(video_name, int(video_name), [frame])
-        else:
-            # TRACKING mode
-            video_name = self.video_names[idx]
-            all_frames = sorted((self.train_dir / video_name).glob("*.tif"))
-            if self.truncate_video > 0:
-                all_frames = all_frames[:self.truncate_video]
-            frames = []
-            for fpath in all_frames[::self.sample_rate]:
-                fid = int(re.findall(r'\d+', fpath.stem)[0])
-                frames.append(VOSFrame(fid, image_path=fpath))
-            video = VOSVideo(video_name, int(video_name), frames)
-
+        """Get a video starting from the specified frame index"""
+        video_name, start_idx = self.frame_index[idx]
+        
+        # Get just the frames we need
+        all_frames = self.get_all_frames(video_name)
+        selected_frames = all_frames[start_idx:start_idx + self.num_frames]
+        
+        # Create frames list
+        frames = []
+        for fpath in selected_frames:
+            fid = int(re.findall(r'\d+', fpath.stem)[0])
+            frames.append(VOSFrame(fid, image_path=fpath))
+            
+        # Load man_track if available
+        try:
+            man_track = np.loadtxt(self.train_dir / (video_name + "_GT") / "TRA" / "man_track.txt", dtype=np.int16)
+        except:
+            man_track = None
+            
+        video = VOSVideo(video_name, int(video_name), frames, man_track)
+        
         video_mask_root = self.train_dir / (video_name + "_GT") / "TRA"
         segment_loader = CTCSegmentLoader(video_mask_root)
 

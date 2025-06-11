@@ -8,8 +8,9 @@ from typing import List, Optional, Tuple, Type
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
-from sam2.modeling.sam2_utils import LayerNorm2d, MLP
+from sam2.modeling.sam2_utils import LayerNorm2d, MLP, compute_iou
 
 
 class MaskDecoder(nn.Module):
@@ -30,6 +31,11 @@ class MaskDecoder(nn.Module):
         pred_obj_scores: bool = False,
         pred_obj_scores_mlp: bool = False,
         use_multimask_token_for_obj_ptr: bool = False,
+        pred_div_scores: bool = False,
+        pred_div_scores_mlp: bool = False,
+        pred_iou_thresh: float = None,
+        obj_score_thresh: float = None,
+        div_obj_score_thresh: float = None,
     ) -> None:
         """
         Predicts masks given an image and prompt embeddings, using a
@@ -60,6 +66,11 @@ class MaskDecoder(nn.Module):
         self.pred_obj_scores = pred_obj_scores
         if self.pred_obj_scores:
             self.obj_score_token = nn.Embedding(1, transformer_dim)
+
+        self.pred_div_scores = pred_div_scores
+        if self.pred_div_scores:
+            self.div_score_token = nn.Embedding(1, transformer_dim)
+
         self.use_multimask_token_for_obj_ptr = use_multimask_token_for_obj_ptr
 
         self.output_upscaling = nn.Sequential(
@@ -101,11 +112,20 @@ class MaskDecoder(nn.Module):
             if pred_obj_scores_mlp:
                 self.pred_obj_score_head = MLP(transformer_dim, transformer_dim, 1, 3)
 
+        if self.pred_div_scores:
+            self.pred_div_score_head = nn.Linear(transformer_dim, 1)
+            if pred_div_scores_mlp:
+                self.pred_div_score_head = MLP(transformer_dim, transformer_dim, 1, 3)
+
         # When outputting a single mask, optionally we can dynamically fall back to the best
         # multimask output token if the single mask output token gives low stability scores.
         self.dynamic_multimask_via_stability = dynamic_multimask_via_stability
         self.dynamic_multimask_stability_delta = dynamic_multimask_stability_delta
         self.dynamic_multimask_stability_thresh = dynamic_multimask_stability_thresh
+
+        self.pred_iou_thresh = pred_iou_thresh
+        self.obj_score_thresh = obj_score_thresh
+        self.div_obj_score_thresh = div_obj_score_thresh
 
     def forward(
         self,
@@ -113,10 +133,11 @@ class MaskDecoder(nn.Module):
         image_pe: torch.Tensor,
         sparse_prompt_embeddings: torch.Tensor,
         dense_prompt_embeddings: torch.Tensor,
-        multimask_output: bool,
         repeat_image: bool,
         high_res_features: Optional[List[torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        is_dividing: Optional[torch.Tensor] = None,
+        gt_masks: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Predict masks given image and prompt embeddings.
 
@@ -125,15 +146,21 @@ class MaskDecoder(nn.Module):
           image_pe (torch.Tensor): positional encoding with the shape of image_embeddings
           sparse_prompt_embeddings (torch.Tensor): the embeddings of the points and boxes
           dense_prompt_embeddings (torch.Tensor): the embeddings of the mask inputs
-          multimask_output (bool): Whether to return multiple masks or a single
-            mask.
+          repeat_image (bool): whether to repeat the image embeddings for each prompt
+          high_res_features (Optional[List[torch.Tensor]]): optional high resolution features
+          is_dividing (Optional[torch.Tensor]): optional tensor indicating dividing cells for training
+          gt_masks (Optional[torch.Tensor]): ground truth masks for training
 
         Returns:
           torch.Tensor: batched predicted masks
           torch.Tensor: batched predictions of mask quality
           torch.Tensor: batched SAM token for mask output
+          torch.Tensor: batched object score logits
+          torch.Tensor: batched division score logits
+          torch.Tensor: batched post-split object score logits
+          torch.Tensor: batched is_dividing
         """
-        masks, iou_pred, mask_tokens_out, object_score_logits = self.predict_masks(
+        masks, iou_pred, mask_tokens_out, object_score_logits, div_score_logits = self.predict_masks(
             image_embeddings=image_embeddings,
             image_pe=image_pe,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
@@ -142,28 +169,66 @@ class MaskDecoder(nn.Module):
             high_res_features=high_res_features,
         )
 
-        # Select the correct mask or masks for output
-        if multimask_output:
-            masks = masks[:, 1:, :, :]
-            iou_pred = iou_pred[:, 1:]
-        elif self.dynamic_multimask_via_stability and not self.training:
-            masks, iou_pred = self._dynamic_multimask_via_stability(masks, iou_pred)
-        else:
-            masks = masks[:, 0:1, :, :]
-            iou_pred = iou_pred[:, 0:1]
+        # Determine which cells are dividing
+        if is_dividing is None:
+            is_dividing = (div_score_logits[:,0] > self.div_obj_score_thresh) & (object_score_logits[:,0] > self.obj_score_thresh) & (iou_pred[:,1:3] > self.pred_iou_thresh).all(1)
+        
+        # Ensure is_dividing is a flat boolean tensor
+        is_dividing = is_dividing.view(-1)
+        
+        # Create masks for dividing and non-dividing cells
+        div_mask = is_dividing  # [B] bool
+        no_div_mask = ~div_mask
 
-        if multimask_output and self.use_multimask_token_for_obj_ptr:
-            sam_tokens_out = mask_tokens_out[:, 1:]  # [b, 3, c] shape
-        else:
-            # Take the mask output token. Here we *always* use the token for single mask output.
-            # At test time, even if we track after 1-click (and using multimask_output=True),
-            # we still take the single mask token here. The rationale is that we always track
-            # after multiple clicks during training, so the past tokens seen during training
-            # are always the single mask token (and we'll let it be the object-memory token).
-            sam_tokens_out = mask_tokens_out[:, 0:1]  # [b, 1, c] shape
+        # Handle non-dividing cells (single mask per cell)
+        pred_masks = masks[no_div_mask, 0:1]  # Keep dim for proper shape
+        pred_ious = iou_pred[no_div_mask, 0:1]
+        pred_tokens = mask_tokens_out[no_div_mask, 0:1]
 
-        # Prepare output
-        return masks, iou_pred, sam_tokens_out, object_score_logits
+        # Process dividing cells if any exist
+        if div_mask.sum() > 0:
+            # During training with GT masks, match daughter masks to ground truth
+            if self.training and gt_masks is not None:
+                pred_div_masks, pred_div_ious, pred_div_tokens = self._match_daughter_masks_to_gt(
+                    gt_masks, masks, iou_pred, mask_tokens_out, div_mask
+                )
+            else:
+                # For inference or when GT masks aren't provided
+                # Extract masks 1 and 2 for dividing cells and reshape
+                pred_div_masks = masks[div_mask][:, 1:3]  # [N, 2, H, W]
+                pred_div_ious = iou_pred[div_mask][:, 1:3]  # [N, 2]
+                pred_div_tokens = mask_tokens_out[div_mask][:, 1:3]  # [N, 2, C]
+                
+                # Reshape to have each mask as a separate item in batch
+                pred_div_masks = pred_div_masks.flatten(0, 1).unsqueeze(1)  # [N*2, 1, H, W]
+                pred_div_ious = pred_div_ious.flatten(0, 1).unsqueeze(1)  # [N*2, 1]
+                pred_div_tokens = pred_div_tokens.flatten(0, 1).unsqueeze(1)  # [N*2, 1, C]
+
+            # Combine results from non-dividing and dividing cells
+            pred_masks = torch.cat([pred_masks, pred_div_masks], dim=0)
+            pred_ious = torch.cat([pred_ious, pred_div_ious], dim=0)
+            pred_tokens = torch.cat([pred_tokens, pred_div_tokens], dim=0)
+
+        # Update object_score_logits to match the new output structure
+        post_split_object_score_logits = None
+        if object_score_logits is not None:
+            # For non-dividing cells, keep single score
+            pred_scores = object_score_logits[no_div_mask]
+            
+            # Handle dividing cells if any exist
+            if div_mask.any():
+                # For dividing cells, duplicate scores for both daughter cells
+                pred_div_scores = object_score_logits[div_mask].repeat_interleave(2, dim=0)
+                # Combine scores
+                post_split_object_score_logits = torch.cat([pred_scores, pred_div_scores], dim=0)
+            else:
+                # If no dividing cells, just use the non-dividing scores
+                post_split_object_score_logits = pred_scores
+
+        object_score_logits_dict = {"pre_div" : object_score_logits, "post_div" : post_split_object_score_logits}
+
+        # Return all outputs
+        return pred_masks, pred_ious, pred_tokens, object_score_logits_dict, div_score_logits, is_dividing
 
     def predict_masks(
         self,
@@ -191,6 +256,12 @@ class MaskDecoder(nn.Module):
             output_tokens = torch.cat(
                 [self.iou_token.weight, self.mask_tokens.weight], dim=0
             )
+
+        if self.pred_div_scores:
+            output_tokens = torch.cat(
+                [output_tokens, self.div_score_token.weight], dim=0
+            )
+
         output_tokens = output_tokens.unsqueeze(0).expand(
             sparse_prompt_embeddings.size(0), -1, -1
         )
@@ -242,7 +313,12 @@ class MaskDecoder(nn.Module):
             # Obj scores logits - default to 10.0, i.e. assuming the object is present, sigmoid(10)=1
             object_score_logits = 10.0 * iou_pred.new_ones(iou_pred.shape[0], 1)
 
-        return masks, iou_pred, mask_tokens_out, object_score_logits
+        if self.pred_div_scores:
+            div_score_logits = self.pred_div_score_head(hs[:, -1, :])
+        else:
+            div_score_logits = -float('inf') * iou_pred.new_ones(iou_pred.shape[0], 1)
+
+        return masks, iou_pred, mask_tokens_out, object_score_logits, div_score_logits
 
     def _get_stability_scores(self, mask_logits):
         """
@@ -293,3 +369,65 @@ class MaskDecoder(nn.Module):
             best_multimask_iou_scores,
         )
         return mask_logits_out, iou_scores_out
+
+    def _match_daughter_masks_to_gt(self, gt_masks, masks, iou_pred, mask_tokens_out, div_mask):
+        """
+        Match predicted daughter cell masks to ground truth masks by computing IoUs
+        and reordering them to maximize the match.
+        
+        For dividing cells, this ensures the predicted daughter masks are correctly
+        aligned with their corresponding ground truth masks by comparing IoUs in
+        both possible orderings and selecting the ordering with the highest total IoU.
+        
+        Args:
+            gt_masks: Ground truth masks
+            masks: Predicted masks
+            iou_pred: Predicted IoU scores
+            mask_tokens_out: Mask tokens output from transformer
+            div_mask: Boolean mask indicating which cells are dividing
+            
+        Returns:
+            Tuple of reordered masks, IoU predictions, and mask tokens
+        """
+        
+        assert self.training
+        pred_div_masks = masks[div_mask][:, 1:3]
+        pred_div_masks_sigmoid = pred_div_masks.sigmoid()  # Take masks 1 and 2
+        pred_div_ious = iou_pred[div_mask][:, 1:3]
+        pred_div_tokens = mask_tokens_out[div_mask][:, 1:3]
+
+        # Daughter masks are alwaays added last
+        gts = gt_masks[-div_mask.sum()*2:].reshape(-1, 2, *gt_masks.shape[-2:])      # [N, 2, H, W]
+        # Resize GT masks to match prediction size
+        gts = F.interpolate(
+            gts.flatten(0, 1).unsqueeze(1).float(),  # [N*2, 1, H, W]
+            size=pred_div_masks.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(1).reshape(-1, 2, *pred_div_masks.shape[-2:])  # [N, 2, h, w]
+        
+        # First ordering: pred[0] with gt[0], pred[1] with gt[1]
+        iou_00 = compute_iou(pred_div_masks_sigmoid[:,0], gts[:,0])
+        iou_11 = compute_iou(pred_div_masks_sigmoid[:,1], gts[:,1])
+        sum_iou_01 = iou_00 + iou_11
+
+        # Swapped ordering: pred[0] with gt[1], pred[1] with gt[0]
+        iou_01 = compute_iou(pred_div_masks_sigmoid[:,0], gts[:,1])
+        iou_10 = compute_iou(pred_div_masks_sigmoid[:,1], gts[:,0])
+        sum_iou_10 = iou_01 + iou_10
+
+        # Choose better match
+        swap = sum_iou_10 > sum_iou_01  # [N] bool
+
+        # Create index tensor [N, 2] where each row is [0,1] or [1,0]
+        order = torch.stack([
+            torch.where(swap, torch.tensor(1, device=pred_div_masks.device), torch.tensor(0, device=pred_div_masks.device)),
+            torch.where(swap, torch.tensor(0, device=pred_div_masks.device), torch.tensor(1, device=pred_div_masks.device))
+        ], dim=1)  # [N, 2]
+
+        # Reorder predictions accordingly
+        pred_div_masks = torch.gather(pred_div_masks, dim=1, index=order.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, pred_div_masks.size(2), pred_div_masks.size(3))).flatten(1).reshape(-1, 1, *pred_div_masks.shape[-2:])
+        pred_div_ious = torch.gather(pred_div_ious, dim=1, index=order).flatten(1).reshape(-1, 1)
+        pred_div_tokens = torch.gather(pred_div_tokens, dim=1, index=order.unsqueeze(-1).expand(-1, -1, pred_div_tokens.size(2))).flatten(1).reshape(-1, 1, pred_div_tokens.shape[-1])
+
+        return pred_div_masks, pred_div_ious, pred_div_tokens

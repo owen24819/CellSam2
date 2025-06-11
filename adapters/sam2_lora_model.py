@@ -19,6 +19,7 @@ class SAM2LoRAModel:
         adapt_mlp=True,
         trainable_iou_pred_heads=True,
         trainable_obj_score_heads=True,
+        mode='train',
     ):
         self.model = model
         self.lora_rank = lora_rank
@@ -31,7 +32,7 @@ class SAM2LoRAModel:
         self.adapt_mlp = adapt_mlp
         self.trainable_iou_pred_heads = trainable_iou_pred_heads
         self.trainable_obj_score_heads = trainable_obj_score_heads
-
+        self.mode = mode
         self.inject()
 
     def create_adapter(self, blk, dim):
@@ -122,29 +123,31 @@ class SAM2LoRAModel:
             adapter_name = 'lora/sam_mask_decoder/transformer/final_attn_token_to_image'
             self.model.sam_mask_decoder.transformer.final_attn_token_to_image = self.inject_lora_to_rope_attention(self.model.sam_mask_decoder.transformer.final_attn_token_to_image, adapter_name)
 
-        # Freeze all parameters by default
-        for param in self.model.parameters():
-            param.requires_grad = False
+        if self.mode == 'train':
+            # Freeze all parameters by default
+            for param in self.model.parameters():
+                param.requires_grad = False
 
-        # Unfreeze LoRA parameters and optionally prediction heads
-        trainable_patterns = ['lora']
-        if self.trainable_iou_pred_heads:
-            trainable_patterns.append('iou_prediction_head')
-        if self.trainable_obj_score_heads:
-            trainable_patterns.append('pred_obj_score_head')
+            # Unfreeze LoRA parameters and optionally prediction heads
+            trainable_patterns = ['lora', 'div', 'no_mem_', 'no_obj_', ' maskmem_tpos_enc', 'feature_dim_reducers', 'heatmap_predictor']
 
-        if not self.adapt_encoder:
-            trainable_patterns.append('image_encoder')
-        if not self.adapt_memory:
-            trainable_patterns.append('memory_encoder')
-        if not self.adapt_decoder:
-            trainable_patterns.append('sam_mask_decoder')
+            if self.trainable_iou_pred_heads:
+                trainable_patterns.append('iou_prediction_head')
+            if self.trainable_obj_score_heads:
+                trainable_patterns.append('pred_obj_score_head')
 
-        for name, param in self.model.named_parameters():
-            if any(pattern in name.lower() for pattern in trainable_patterns):
-                param.requires_grad = True
+            if not self.adapt_encoder:
+                trainable_patterns.append('image_encoder')
+            if not self.adapt_memory:
+                trainable_patterns.append('memory_encoder')
+            if not self.adapt_decoder:
+                trainable_patterns.append('sam_mask_decoder')
 
-        self.print_trainable()
+            for name, param in self.model.named_parameters():
+                if any(pattern in name.lower() for pattern in trainable_patterns):
+                    param.requires_grad = True
+
+            self.print_trainable()
 
     def save_adapters(self, save_dir):
 

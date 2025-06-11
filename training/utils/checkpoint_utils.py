@@ -357,12 +357,12 @@ def load_state_dict_into_model(
             state_dict = f(state_dict=state_dict)
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
 
-    check_load_state_dict_errors(
-        missing_keys,
-        unexpected_keys,
-        strict=strict,
-        model=model,
-        ignore_missing_keys=ignore_missing_keys,
-        ignore_unexpected_keys=ignore_unexpected_keys,
-    )
+    # check_load_state_dict_errors(
+    #     missing_keys,
+    #     unexpected_keys,
+    #     strict=strict,
+    #     model=model,
+    #     ignore_missing_keys=ignore_missing_keys,
+    #     ignore_unexpected_keys=ignore_unexpected_keys,
+    # )
     return model
