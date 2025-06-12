@@ -44,12 +44,24 @@ def main(cfg: DictConfig) -> None:
             print("WandB logging requested but wandb package is not installed. "
                   "Install with 'pip install wandb' to enable logging.")
         else:
-            wandb.init(
+            wandb_run_id = None
+            run_id_path = os.path.join(cfg.launcher.experiment_log_dir, "wandb_run_id.txt")
+            if os.path.exists(run_id_path):
+                with open(run_id_path, "r") as f:
+                    wandb_run_id = f.read().strip()
+
+            wandb_run = wandb.init(
                 project=wandb_config.get('project', 'CellSAM2'),
                 name=model_name,
                 group=wandb_config.get('group', None),
                 config=OmegaConf.to_container(cfg, resolve=True),
+                id=wandb_run_id,
+                resume="allow" if wandb_run_id else None,
             )
+            
+            # Save run ID for future resuming
+            with open(run_id_path, "w") as f:
+                f.write(wandb_run.id)
 
             # 🛠️ Define how different metrics are tracked
             wandb.define_metric("train/*", step_metric="train_step")
