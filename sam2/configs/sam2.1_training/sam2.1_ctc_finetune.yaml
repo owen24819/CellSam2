@@ -14,10 +14,11 @@ scratch:
   lora_lr: 1.0e-3
   use_wandb: False
   freeze_encoder: False
+  dataset_name: "moma"
 
 dataset:
   # PATHS to Dataset
-  data_dir: ../data/moma
+  data_dir: ../data/${scratch.dataset_name}
   file_list_txt: # Optional PATH to filelist containing a subset of videos to be used for training
   multiplier: 1
 
