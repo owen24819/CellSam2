@@ -113,12 +113,8 @@ class FrameIndexSampler(VOSSampler):
             object_ids_list.extend([object_ids] * (len(frames) - 1))
 
         # Add background points for training
-        max_num_bkgd_points = min(
-            max(0, self.max_num_objects - len(object_ids_list[0])), 
-            self.max_num_bkgd_objects
-        )
         min_num_bkgd_points = int(len(object_ids_list[0]) == 0)
-        num_bkgd_points = random.randint(min_num_bkgd_points, max_num_bkgd_points)
+        num_bkgd_points = random.randint(min_num_bkgd_points, self.max_num_bkgd_objects)
 
         # Generate background object IDs using negative integers
         bkgd_object_ids = list(range(-1, -1 - num_bkgd_points, -1))
