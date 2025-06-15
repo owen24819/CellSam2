@@ -60,6 +60,7 @@ def main(cfg: DictConfig) -> None:
             )
             
             # Save run ID for future resuming
+            makedir(os.path.dirname(run_id_path))
             with open(run_id_path, "w") as f:
                 f.write(wandb_run.id)
 
