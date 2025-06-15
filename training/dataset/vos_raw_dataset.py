@@ -133,6 +133,15 @@ class CTCRawDataset(VOSRawDataset):
         # Load man_track if available
         try:
             man_track = np.loadtxt(self.train_dir / (video_name + "_GT") / "TRA" / "man_track.txt", dtype=np.int16)
+            # Get unique parent IDs and their counts in one operation
+            parent_ids, counts = np.unique(man_track[:, -1], return_counts=True)
+            # Find parent IDs that appear only once and are positive
+            single_parents = parent_ids[(counts == 1) & (parent_ids > 0)]
+            # Set these single parents to 0 in one operation
+            if len(single_parents) > 0:
+                mask = np.isin(man_track[:, -1], single_parents)
+                man_track[mask, -1] = 0
+
         except:
             man_track = None
             
