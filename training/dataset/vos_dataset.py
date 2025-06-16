@@ -18,6 +18,8 @@ from training.dataset.vos_sampler import VOSSampler
 from training.dataset.vos_segment_loader import JSONSegmentLoader
 
 from training.utils.data_utils import Frame, Object, VideoDatapoint
+from sam2.utils.misc import read_image
+
 class VOSDataset(VisionDataset):
     def __init__(
         self,
@@ -178,30 +180,7 @@ def load_images(frames):
                 all_images.append(deepcopy(all_images[cache[path]]))
                 continue
             with g_pathmgr.open(path, "rb") as fopen:
-                image = PILImage.open(fopen)
-
-                if image.mode == "RGB":
-                    pass
-                elif image.mode == "I;16":
-                    # Convert to NumPy array
-                    arr = np.array(image)
-
-                    # Get 1st and 99th percentiles for robust scaling
-                    p1, p99 = np.percentile(arr, [1, 99])
-                    
-                    # Handle case where all values are identical (including all zeros)
-                    if p1 == p99:
-                        arr_8bit = np.zeros_like(arr, dtype=np.uint8)
-                    else:
-                        # Clip values to percentiles and scale to 0-255
-                        arr_clipped = np.clip(arr, p1, p99)
-                        arr_8bit = ((arr_clipped - p1) * (255.0 / (p99 - p1))).astype(np.uint8)
-
-                    # Convert to RGB by stacking
-                    image = PILImage.fromarray(arr_8bit).convert("RGB")
-                else:
-                    raise ValueError(f"Unexpected image mode: {image.mode}. Please inspect and handle this mode manually.")
-
+                image = read_image(fopen)
                 all_images.append(image)
             cache[path] = len(all_images) - 1
         else:

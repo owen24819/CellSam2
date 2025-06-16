@@ -273,13 +273,14 @@ def load_video_frames_from_jpg_images(
         )
         return lazy_images, lazy_images.video_height, lazy_images.video_width
 
-    image = Image.open(img_paths[0]).convert("RGB")
+    image = read_image(img_paths[0])
+
     resized_image_size, padding = transforms._set_hw_params(image, image_size)
 
     images = torch.zeros(num_frames, 3, image_size, image_size, dtype=torch.float32)
     for n, img_path in enumerate(tqdm(img_paths, desc="frame loading (image)")):
 
-        image = Image.open(img_path).convert("RGB")
+        image = read_image(img_path)
         video_width, video_height = image.size
         image = transforms(image)
         images[n] = image.to(compute_device)
@@ -289,6 +290,32 @@ def load_video_frames_from_jpg_images(
 
     return images, video_height, video_width, resized_image_size, padding
 
+def read_image(img_path):
+
+    image = Image.open(img_path)
+    if image.mode == "RGB":
+        pass
+    elif image.mode == "I;16":
+        # Convert to NumPy array
+        arr = np.array(image)
+
+        # Get 1st and 99th percentiles for robust scaling
+        p1, p99 = np.percentile(arr, [1, 99])
+        
+        # Handle case where all values are identical (including all zeros)
+        if p1 == p99:
+            arr_8bit = np.zeros_like(arr, dtype=np.uint8)
+        else:
+            # Clip values to percentiles and scale to 0-255
+            arr_clipped = np.clip(arr, p1, p99)
+            arr_8bit = ((arr_clipped - p1) * (255.0 / (p99 - p1))).astype(np.uint8)
+
+        # Convert to RGB by stacking
+        image = Image.fromarray(arr_8bit).convert("RGB")
+    else:
+        raise ValueError(f"Unexpected image mode: {image.mode}. Please inspect and handle this mode manually.")
+    
+    return image
 
 def load_video_frames_from_video_file(
     video_path,
