@@ -1,10 +1,20 @@
 import numpy as np
 import torch
-from torchvision.ops import batched_nms, box_area
+from torchvision.ops import batched_nms
 
 from sam2.modeling.sam2_base import SAM2Base
 from sam2.sam2_image_predictor import SAM2ImagePredictor
-from sam2.utils.amg import batch_iterator, batched_mask_to_box, calculate_stability_score, MaskData, area_from_rle, box_xyxy_to_xywh, mask_to_rle_pytorch, coco_encode_rle, rle_to_mask, area_from_rle, box_xyxy_to_xywh
+from sam2.utils.amg import (
+    MaskData,
+    area_from_rle,
+    batch_iterator,
+    batched_mask_to_box,
+    box_xyxy_to_xywh,
+    calculate_stability_score,
+    coco_encode_rle,
+    mask_to_rle_pytorch,
+    rle_to_mask,
+)
 
 
 class SAM2AutomaticCellSegmenter:
@@ -15,7 +25,7 @@ class SAM2AutomaticCellSegmenter:
         points_per_batch: int = 32,
         obj_score_thresh: float = 0.5,
         pred_iou_thresh: float = 0.7,
-        stability_score_thresh: float = 0,# 0.95,
+        stability_score_thresh: float = 0,  # 0.95,
         stability_score_offset: float = 1.0,
         mask_threshold: float = 0.0,
         box_nms_thresh: float = 0.7,
@@ -25,8 +35,7 @@ class SAM2AutomaticCellSegmenter:
         multimask_output: bool = False,
         **kwargs,
     ) -> None:
-        """
-        Using a SAM 2 model, generates masks for the entire image.
+        """Using a SAM 2 model, generates masks for the entire image.
         Generates a grid of point prompts over the image, then filters
         low quality and duplicate masks. The default settings are chosen
         for SAM 2 with a HieraL backbone.
@@ -60,8 +69,8 @@ class SAM2AutomaticCellSegmenter:
             memory.
           use_m2m (bool): Whether to add a one step refinement using previous mask predictions.
           multimask_output (bool): Whether to output multimask at each point of the grid.
-        """
 
+        """
         assert output_mode in [
             "binary_mask",
             "uncompressed_rle",
@@ -73,11 +82,11 @@ class SAM2AutomaticCellSegmenter:
             except ImportError as e:
                 print("Please install pycocotools")
                 raise e
-            
+
         self.model = model
         self.device = model.device
 
-        if self.device.type == 'cpu':
+        if self.device.type == "cpu":
             min_mask_region_area = 0
 
         self.predictor = SAM2ImagePredictor(
@@ -97,9 +106,7 @@ class SAM2AutomaticCellSegmenter:
         self.use_m2m = use_m2m
         self.multimask_output = multimask_output
 
-
     def predict(self, image):
-
         self.predictor.set_image(image)
 
         input_points, input_labels = self.generate_proportional_point_grid()
@@ -133,23 +140,24 @@ class SAM2AutomaticCellSegmenter:
         return curr_anns
 
     def predict_in_batches(self, input_points, input_labels):
-        """
-        Predicts masks in batches to manage memory usage efficiently.
-        
+        """Predicts masks in batches to manage memory usage efficiently.
+
         Args:
             input_points: Point coordinates to predict masks for
             input_labels: Labels corresponding to the points
-            
+
         Returns:
             masks: Concatenated mask predictions
             scores: Prediction scores for each mask
             logits: Raw logits for each mask
+
         """
-                # Generate masks for this crop in batches
+        # Generate masks for this crop in batches
         data = MaskData()
 
-        for (batched_points, batched_labels) in batch_iterator(self.points_per_batch, input_points, input_labels):
-
+        for batched_points, batched_labels in batch_iterator(
+            self.points_per_batch, input_points, input_labels
+        ):
             batched_data = self._process_batch(
                 points=batched_points,
                 labels=batched_labels,
@@ -179,7 +187,6 @@ class SAM2AutomaticCellSegmenter:
         labels: np.ndarray,
         normalize=False,
     ) -> MaskData:
-
         masks, iou_preds, low_res_masks, obj_scores = self.predictor._predict(
             points,
             labels,
@@ -244,7 +251,7 @@ class SAM2AutomaticCellSegmenter:
         del data["masks"]
 
         return data
-    
+
     def refine_with_m2m(self, points, point_labels, low_res_masks, points_per_batch):
         new_masks = []
         new_iou_preds = []
@@ -271,23 +278,23 @@ class SAM2AutomaticCellSegmenter:
         return masks, iou_preds, obj_scores
 
     def generate_proportional_point_grid(self):
-        """
-        Generate a grid of (x, y) points with density proportional to the image size.
-        
+        """Generate a grid of (x, y) points with density proportional to the image size.
+
         Args:
             image_shape (tuple): (H, W)
             base_density (int): Number of total points if image were 512x512
-        
+
         Returns:
             points: torch.Tensor of shape [B, N, 2] where each row is (x, y)
             labels: torch.Tensor of shape [B, N]
+
         """
         H, W = self.predictor.resized_image_size
-        scale_factor_y = (H / self.model.image_size)  # preserve relative density
-        scale_factor_x = (W / self.model.image_size)  # preserve relative density
+        scale_factor_y = H / self.model.image_size  # preserve relative density
+        scale_factor_x = W / self.model.image_size  # preserve relative density
 
         # Estimate number of points in each dimension
-        points_y = int(self.points_per_side * scale_factor_y) 
+        points_y = int(self.points_per_side * scale_factor_y)
         points_x = int(self.points_per_side * scale_factor_x)
 
         # Avoid zero division or very few points
@@ -305,9 +312,10 @@ class SAM2AutomaticCellSegmenter:
         # Convert points to tensor and add batch dimension
         points = torch.tensor(points, device=self.device, dtype=torch.float32)  # [N, 2]
         points = points.unsqueeze(1)  # [N, 1, 2]
-        
+
         # Create corresponding labels tensor
-        labels = torch.ones(len(points), 1, device=self.device, dtype=torch.int)  # [N, 1]
-        
+        labels = torch.ones(
+            len(points), 1, device=self.device, dtype=torch.int
+        )  # [N, 1]
+
         return points, labels
-    
