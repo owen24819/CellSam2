@@ -5,15 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import re
 import warnings
+from pathlib import Path
 from threading import Thread
 
 import numpy as np
 import torch
 from PIL import Image
 from tqdm import tqdm
-import re
-from pathlib import Path
+
 
 def get_sdpa_settings():
     if torch.cuda.is_available():
@@ -290,7 +291,7 @@ def load_video_frames_from_jpg_images(
 
     return images, video_height, video_width, resized_image_size, padding
 
-def read_image(img_path):
+def read_image(img_path, return_np=False):
 
     image = Image.open(img_path)
     if image.mode == "RGB":
@@ -314,6 +315,9 @@ def read_image(img_path):
         image = Image.fromarray(arr_8bit).convert("RGB")
     else:
         raise ValueError(f"Unexpected image mode: {image.mode}. Please inspect and handle this mode manually.")
+    
+    if return_np:
+        return np.array(image)
     
     return image
 

@@ -10,7 +10,7 @@ from sam2.utils.amg import (
     MaskData,
     batched_mask_to_box,
 )
-from sam2.utils.misc import load_video_frames
+from sam2.utils.misc import load_video_frames, read_image
 from sam2.utils.transforms import SAM2Transforms
 
 
@@ -1104,9 +1104,7 @@ class SAM2AutomaticCellTracker:
         )
 
         for frame_idx, track_mask in enumerate(tracking_results):
-            img = cv2.imread(
-                str(inference_state["video_path"] / f"t{frame_idx:03d}.tif")
-            )
+            img = read_image(str(inference_state["video_path"] / f"t{frame_idx:03d}.tif"), return_np=True)
 
             # Create a colored overlay image
             overlay = np.zeros_like(img)
