@@ -52,9 +52,10 @@ EXTRA_PACKAGES = {
         "strawberry-graphql>=0.243.0",
     ],
     "dev": [
-        "black==24.2.0",
-        "usort==1.0.2",
-        "ufmt==2.0.0b2",
+        # Code formatting and quality tools
+        "ruff>=0.3.0",
+        "pre-commit>=3.6.0",
+        # Development dependencies
         "fvcore>=0.1.5.post20221221",
         "pandas>=2.2.2",
         "scikit-image>=0.24.0",
