@@ -997,9 +997,9 @@ class SAM2AutomaticCellTracker:
         return input_points, point_labels
 
     def extract_peak_points(
-        self, heatmap: torch.Tensor, max_points=20, min_dist=2, threshold=0.1
+        self, heatmap: torch.Tensor, min_dist=2, threshold=0.1
     ):
-        """Extract up to max_points from heatmap using local max suppression.
+        """Extract up to points from heatmap using local max suppression.
 
         Args:
             heatmap: (H, W) float tensor on GPU
@@ -1029,8 +1029,8 @@ class SAM2AutomaticCellTracker:
         sorted_idx = torch.argsort(scores, descending=True)
 
         # Take top max_points
-        xs = xs[sorted_idx][:max_points]
-        ys = ys[sorted_idx][:max_points]
+        xs = xs[sorted_idx]
+        ys = ys[sorted_idx]
 
         points = torch.stack([xs, ys], dim=1).float()  # (N, 2)
         points = points.unsqueeze(1)  # (N, 1, 2)
