@@ -4,16 +4,17 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
+
 import torch
 import torch.distributed
 import torch.nn.functional as F
-
 from torch.nn.init import trunc_normal_
 
 from sam2.modeling.sam.mask_decoder import MaskDecoder
 from sam2.modeling.sam.prompt_encoder import PromptEncoder
 from sam2.modeling.sam.transformer import TwoWayTransformer
-from sam2.modeling.sam2_utils import get_1d_sine_pe, MLP, select_closest_cond_frames
+from sam2.modeling.sam2_utils import MLP, get_1d_sine_pe
 
 # a large negative value as a placeholder score for missing objects
 NO_OBJ_SCORE = -1024.0
@@ -1081,5 +1082,48 @@ class SAM2Base(torch.nn.Module):
         heatmap = self.heatmap_predictor(fused_features)
         
         return heatmap
-        
+
+    def extract_peak_points(
+        self, heatmap: torch.Tensor, min_dist=2, threshold=0.1
+    ):
+        """Extract up to points from heatmap using local max suppression.
+
+        Args:
+            heatmap: (H, W) float tensor on GPU
+            min_dist: radius (in pixels) for local suppression
+            threshold: min confidence to consider a valid point
+
+        Returns:
+            points: (N, 2) float tensor of (x, y)
+
+        """
+        # Apply max pooling to find local maxima
+        heatmap = heatmap.sigmoid()
+        pooled = F.max_pool2d(
+            heatmap.unsqueeze(0).unsqueeze(0),
+            kernel_size=min_dist * 2 + 1,
+            stride=1,
+            padding=min_dist,
+        )
+        is_peak = (heatmap == pooled[0, 0]) & (heatmap > threshold)
+
+        ys, xs = torch.nonzero(is_peak, as_tuple=True)
+        if len(xs) == 0:
+            return torch.empty((0, 2), device=heatmap.device)
+
+        scores = heatmap[ys, xs]
+        sorted_idx = torch.argsort(scores, descending=True)
+
+        # Sort points
+        xs = xs[sorted_idx]
+        ys = ys[sorted_idx]
+
+        points = torch.stack([xs, ys], dim=1).float()  # (N, 2)
+        points = points.unsqueeze(1)  # (N, 1, 2)
+        assert (
+            heatmap.shape[0] == heatmap.shape[1]
+            and self.image_size % heatmap.shape[0] == 0
+        )
+        points = points * (self.image_size // heatmap.shape[0])
+        return points
     
