@@ -7,18 +7,16 @@
 from copy import deepcopy
 
 import numpy as np
-
 import torch
-from iopath.common.file_io import g_pathmgr
 from PIL import Image as PILImage
 from torchvision.datasets.vision import VisionDataset
 
+from sam2.utils.misc import read_image
 from training.dataset.vos_raw_dataset import VOSRawDataset
 from training.dataset.vos_sampler import VOSSampler
 from training.dataset.vos_segment_loader import JSONSegmentLoader
-
 from training.utils.data_utils import Frame, Object, VideoDatapoint
-from sam2.utils.misc import read_image
+
 
 class VOSDataset(VisionDataset):
     def __init__(
@@ -179,9 +177,8 @@ def load_images(frames):
             if path in cache:
                 all_images.append(deepcopy(all_images[cache[path]]))
                 continue
-            with g_pathmgr.open(path, "rb") as fopen:
-                image = read_image(fopen)
-                all_images.append(image)
+            image = read_image(path)
+            all_images.append(image)
             cache[path] = len(all_images) - 1
         else:
             # The frame rgb data has already been loaded
