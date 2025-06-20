@@ -9,7 +9,7 @@ scratch:
   max_num_bkgd_objects: 8
   base_lr: 5.0e-6
   vision_lr: 3.0e-06
-  num_epochs: 20
+  num_epochs: 5
   use_lora: True 
   lora_lr: 1.0e-3
   use_wandb: False

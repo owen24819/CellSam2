@@ -29,15 +29,14 @@ REQUIRED_PACKAGES = [
     "hydra-core>=1.3.2",
     "iopath>=0.1.10",
     "pillow>=9.4.0",
-    "wandb>=0.19.9",
     "imagecodecs>=2025.3.30",
+    "opencv-python>=4.7.0",
 ]
 
 EXTRA_PACKAGES = {
     "notebooks": [
         "matplotlib>=3.9.1",
         "jupyter>=1.0.0",
-        "opencv-python>=4.7.0",
         "eva-decord>=0.6.1",
     ],
     "interactive-demo": [
@@ -62,8 +61,8 @@ EXTRA_PACKAGES = {
         "tensorboard>=2.17.0",
         "pycocotools>=2.0.8",
         "tensordict>=0.6.0",
-        "opencv-python>=4.7.0",
         "submitit>=1.5.1",
+        "wandb>=0.19.9",
     ],
 }
 
