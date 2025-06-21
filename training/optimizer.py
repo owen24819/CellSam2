@@ -8,7 +8,6 @@ import fnmatch
 import inspect
 import itertools
 import logging
-import types
 from typing import (
     Any,
     Callable,
@@ -24,7 +23,6 @@ from typing import (
 )
 
 import hydra
-import omegaconf
 import torch
 import torch.nn as nn
 from omegaconf import DictConfig
@@ -200,7 +198,7 @@ def validate_param_group_params(param_groups: List[Dict], model: nn.Module):
         # Get parameter names for better debugging
         missing_param_names = [param_to_name[param] for param in missing_params]
         
-        print(f"Warning: Not all trainable parameters are included in optimization.")
+        print("Warning: Not all trainable parameters are included in optimization.")
         print(f"Total trainable parameters: {len(model_parameters)}")
         print(f"Parameters in optimizer: {len(covered_params)}")
         print(f"Missing parameters: {len(missing_params)}")

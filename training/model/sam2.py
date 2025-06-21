@@ -8,11 +8,14 @@ import logging
 
 import numpy as np
 import torch
+
 from sam2.modeling.sam2_base import SAM2Base
-from sam2.modeling.sam2_utils import get_next_point, sample_box_points, get_background_masks
-
+from sam2.modeling.sam2_utils import (
+    get_background_masks,
+    get_next_point,
+    sample_box_points,
+)
 from sam2.utils.misc import concat_points
-
 from training.utils.data_utils import BatchedVideoDatapoint
 
 
@@ -533,7 +536,6 @@ class SAM2Train(SAM2Base):
         tracking_object_ids = torch.cat((tracking_object_ids[~is_dividing], new_daughter_ids))
         
         # Filter out objects that are no longer tracked
-        exit_object_ids = tracking_object_ids[~keep_tokens_mask]
         tracking_object_ids = tracking_object_ids[keep_tokens_mask]
         
         # if frame_idx % 10 == 0:  # Reduce logging frequency

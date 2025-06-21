@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 from training.trainer import CORE_LOSS_KEY
 
+
 def dice_loss(inputs, targets, num_objects):
     """
     Compute the DICE loss, similar to generalized IOU for masks

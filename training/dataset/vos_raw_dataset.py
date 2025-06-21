@@ -6,24 +6,22 @@
 
 import glob
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
-
 from typing import List, Optional
-import re
-import torch
+
 import numpy as np
-
+import torch
 from iopath.common.file_io import g_pathmgr
-
 from omegaconf.listconfig import ListConfig
 
 from training.dataset.vos_segment_loader import (
+    CTCSegmentLoader,
     JSONSegmentLoader,
     MultiplePNGSegmentLoader,
     PalettisedPNGSegmentLoader,
     SA1BSegmentLoader,
-    CTCSegmentLoader
 )
 
 
@@ -131,7 +129,7 @@ class CTCRawDataset(VOSRawDataset):
             frames.append(VOSFrame(fid, image_path=fpath))
             
         # Load man_track if available
-        try:
+        if (self.train_dir / (video_name + "_GT") / "TRA" / "man_track.txt").exists():
             man_track = np.loadtxt(self.train_dir / (video_name + "_GT") / "TRA" / "man_track.txt", dtype=np.int16)
             # Step 1: Remove parent IDs that appear only once and are positive
             parent_ids, counts = np.unique(man_track[:, -1], return_counts=True)
@@ -157,7 +155,7 @@ class CTCRawDataset(VOSRawDataset):
                 if dau_entry_frame != parent_exit_frame + 1:
                     man_track[man_track[:, -1] == parent_id, -1] = 0
 
-        except:
+        else:
             man_track = None
             
         video = VOSVideo(video_name, int(video_name), frames, man_track)

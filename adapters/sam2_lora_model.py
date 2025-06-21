@@ -1,9 +1,10 @@
 from pathlib import Path
-import torch
 
+import torch
 from peft.tuners.lora import Linear as LoRALinear
 
 from adapters.adapter_modules import ImageEncoderLoRAAdapter, RoPELoRAAdapter
+
 
 class SAM2LoRAModel:
     def __init__(

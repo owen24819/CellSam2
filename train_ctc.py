@@ -1,10 +1,13 @@
-from hydra.utils import instantiate
-import hydra
 import os
+
+import hydra
 import torch
-from omegaconf import OmegaConf, DictConfig
+from hydra.utils import instantiate
 from iopath.common.file_io import g_pathmgr
+from omegaconf import DictConfig, OmegaConf
+
 from training.utils.train_utils import makedir, register_omegaconf_resolvers
+
 try:
     import wandb
     WANDB_AVAILABLE = True

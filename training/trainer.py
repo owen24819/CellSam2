@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
-
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -23,7 +22,6 @@ from hydra.utils import instantiate
 from iopath.common.file_io import g_pathmgr
 
 from training.optimizer import construct_optimizer
-
 from training.utils.checkpoint_utils import (
     assert_skipped_parameters_are_frozen,
     exclude_params_matching_unix_pattern,
@@ -32,13 +30,14 @@ from training.utils.checkpoint_utils import (
 )
 from training.utils.data_utils import BatchedVideoDatapoint
 from training.utils.distributed import all_reduce_max, barrier, get_rank
-
 from training.utils.logger import Logger, setup_logging
-
 from training.utils.train_utils import (
     AverageMeter,
-    collect_dict_keys,
     DurationMeter,
+    MemMeter,
+    Phase,
+    ProgressMeter,
+    collect_dict_keys,
     get_amp_type,
     get_machine_local_and_dist_rank,
     get_resume_checkpoint,
@@ -46,13 +45,9 @@ from training.utils.train_utils import (
     is_dist_avail_and_initialized,
     log_env_variables,
     makedir,
-    MemMeter,
-    Phase,
-    ProgressMeter,
     set_seeds,
     setup_distributed_backend,
 )
-
 
 CORE_LOSS_KEY = "core_loss"
 

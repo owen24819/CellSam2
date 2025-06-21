@@ -7,10 +7,10 @@
 from typing import Optional
 
 import torch
-from torch import nn, Tensor
+from torch import Tensor, nn
 
-from sam2.modeling.sam.transformer import RoPEAttention
 from adapters.adapter_modules import RoPELoRAAdapter
+from sam2.modeling.sam.transformer import RoPEAttention
 from sam2.modeling.sam2_utils import get_activation_fn, get_clones
 
 

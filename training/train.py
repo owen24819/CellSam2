@@ -13,10 +13,8 @@ from argparse import ArgumentParser
 
 import submitit
 import torch
-
 from hydra import compose, initialize_config_module
 from hydra.utils import instantiate
-
 from iopath.common.file_io import g_pathmgr
 from omegaconf import OmegaConf
 

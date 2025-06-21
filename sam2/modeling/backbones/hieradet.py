@@ -18,8 +18,7 @@ from sam2.modeling.backbones.utils import (
     window_partition,
     window_unpartition,
 )
-
-from sam2.modeling.sam2_utils import DropPath, MLP
+from sam2.modeling.sam2_utils import MLP, DropPath
 
 
 def do_pool(x: torch.Tensor, pool: nn.Module, norm: nn.Module = None) -> torch.Tensor:

@@ -15,7 +15,6 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
-
 from PIL import Image as PILImage
 from tensordict import tensorclass
 

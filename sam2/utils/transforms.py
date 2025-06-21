@@ -5,12 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 import warnings
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.transforms import Normalize, ToTensor
 from PIL import Image
+from torchvision.transforms import Normalize, ToTensor
 
 
 class SAM2Transforms(nn.Module):

@@ -8,17 +8,13 @@ import glob
 import json
 import os
 
+import cv2
 import numpy as np
 import pandas as pd
-import torch
 import tifffile
+import torch
 from PIL import Image as PILImage
-import cv2
 
-try:
-    from pycocotools import mask as mask_utils
-except:
-    pass
 
 class CTCSegmentLoader:
     def __init__(self, video_mask_path):
@@ -51,6 +47,13 @@ class JSONSegmentLoader:
         self.ann_every = ann_every
         # Ids of the objects to consider when sampling this video
         self.valid_obj_ids = valid_obj_ids
+        
+        try:
+            from pycocotools import mask as mask_utils
+            self.mask_utils = mask_utils
+        except ImportError:
+            raise ImportError("pycocotools is required for JSONSegmentLoader")
+            
         with open(video_json_path, "r") as f:
             data = json.load(f)
             if isinstance(data, list):
@@ -92,7 +95,7 @@ class JSONSegmentLoader:
                 id_2_idx[obj_id] = None
 
         # Decode the masks
-        raw_segments = torch.from_numpy(mask_utils.decode(rle_mask_filtered)).permute(
+        raw_segments = torch.from_numpy(self.mask_utils.decode(rle_mask_filtered)).permute(
             2, 0, 1
         )  # （num_obj, h, w）
         segments = {}
@@ -269,6 +272,10 @@ class LazySegments:
         if key in self.cache:
             return self.cache[key]
         rle = self.segments[key]
+        try:
+            from pycocotools import mask as mask_utils
+        except ImportError:
+            raise ImportError("pycocotools is required for LazySegments")
         mask = torch.from_numpy(mask_utils.decode([rle])).permute(2, 0, 1)[0]
         self.cache[key] = mask
         return mask

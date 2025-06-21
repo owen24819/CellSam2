@@ -4,14 +4,11 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
 import math
-from typing import Callable, Iterable, List, Optional, Sequence
+from typing import Callable, Optional
 
 import torch
-
-from torch.utils.data import BatchSampler, DataLoader, Dataset, IterableDataset, Subset
-
+from torch.utils.data import BatchSampler, DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
 

@@ -7,18 +7,17 @@
 from copy import deepcopy
 
 import numpy as np
-
 import torch
 from iopath.common.file_io import g_pathmgr
 from PIL import Image as PILImage
 from torchvision.datasets.vision import VisionDataset
 
+from sam2.utils.misc import read_image
 from training.dataset.vos_raw_dataset import VOSRawDataset
 from training.dataset.vos_sampler import VOSSampler
 from training.dataset.vos_segment_loader import JSONSegmentLoader
-
 from training.utils.data_utils import Frame, Object, VideoDatapoint
-from sam2.utils.misc import read_image
+
 
 class VOSDataset(VisionDataset):
     def __init__(

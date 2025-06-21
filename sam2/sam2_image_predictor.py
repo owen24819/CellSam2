@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
@@ -13,7 +12,6 @@ import torch
 from PIL.Image import Image
 
 from sam2.modeling.sam2_base import SAM2Base
-
 from sam2.utils.transforms import SAM2Transforms, get_resize_longest_side
 
 

@@ -14,6 +14,7 @@ from torchvision.ops.boxes import batched_nms, box_area  # type: ignore
 from sam2.modeling.sam2_base import SAM2Base
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.utils.amg import (
+    MaskData,
     area_from_rle,
     batch_iterator,
     batched_mask_to_box,
@@ -24,7 +25,6 @@ from sam2.utils.amg import (
     generate_crop_boxes,
     is_box_near_crop_edge,
     mask_to_rle_pytorch,
-    MaskData,
     remove_small_regions,
     rle_to_mask,
     uncrop_boxes_xyxy,

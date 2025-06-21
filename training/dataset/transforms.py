@@ -10,13 +10,16 @@ Transforms and data augmentation for both image + bbox.
 
 import random
 from typing import Iterable
+
 import numpy as np
 import torch
 import torchvision.transforms as T
 import torchvision.transforms.functional as F
 import torchvision.transforms.v2.functional as Fv2
-from PIL import Image as PILImage
-from PIL import ImageFilter
+from PIL import (
+    Image as PILImage,
+    ImageFilter,
+)
 from scipy import interpolate
 from torchvision.transforms import InterpolationMode
 
@@ -73,23 +76,12 @@ def resize(datapoint, index, size, max_size=None, square=False, v2=False):
         )
         size = get_size(cur_size, size, max_size)
 
-    old_size = (
-        datapoint.frames[index].data.size()[-2:][::-1]
-        if v2
-        else datapoint.frames[index].data.size
-    )
     if v2:
         datapoint.frames[index].data = Fv2.resize(
             datapoint.frames[index].data, size, antialias=True
         )
     else:
         datapoint.frames[index].data = F.resize(datapoint.frames[index].data, size)
-
-    new_size = (
-        datapoint.frames[index].data.size()[-2:][::-1]
-        if v2
-        else datapoint.frames[index].data.size
-    )
 
     for obj in datapoint.frames[index].objects:
         if obj.segment is not None:
