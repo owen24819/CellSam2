@@ -591,6 +591,11 @@ class SAM2Train(SAM2Base):
         heatmap_predictions = self.get_heatmap_predictions(current_vision_feats, feat_sizes)[0,0]
         points = self.extract_peak_points(heatmap_predictions)
 
+        # Handle edge case: no points extracted from heatmap
+        if points.shape[0] == 0:
+            # Return empty tensor with correct shape [0, 1, 2]
+            return torch.empty((0, 1, 2), device=heatmap_predictions.device, dtype=torch.long)
+
         # Convert input_points to integer indices
         points = points.long()  # Shape: [212, 1, 2]
 
@@ -598,8 +603,15 @@ class SAM2Train(SAM2Base):
         bkgd_point_values = bkgd_masks[points[:,0,1], points[:,0,0]]  # Shape: [212]
 
         # Get the first num_bkgd_pts indices where mask is False
-        top_bkgd_pt_indices = bkgd_point_values.nonzero()[:num_bkgd_pts].squeeze()
+        top_bkgd_pt_indices = bkgd_point_values.nonzero()[:num_bkgd_pts]
 
+        # Handle edge case: no background points found
+        if top_bkgd_pt_indices.numel() == 0:
+            # Return empty tensor with correct shape [0, 1, 2]
+            return torch.empty((0, 1, 2), device=heatmap_predictions.device, dtype=torch.long)
+
+        top_bkgd_pt_indices = top_bkgd_pt_indices.squeeze(-1)
+        
         # Get the corresponding points
         bkgd_points = points[top_bkgd_pt_indices]  # Shape: [num_bkgd_pts, 1, 2]
 
