@@ -242,6 +242,14 @@ class SAM2Train(SAM2Base):
                         bkgd_mask=bkgd_masks,
                         )
 
+                    num_bkgd_pts = step_t_is_bkgd_mask.sum()
+
+                    if num_bkgd_pts > 0:# and self.rng.random() > 0.1:
+                        assert bkgd_masks.shape[1] == 1, "Needs updating for a batch size greater than 1"
+                        bkgd_points = self.get_input_points_from_heatmap(input, num_bkgd_pts, bkgd_masks[0,0])
+                        if bkgd_points.shape[0] > 0:
+                            points[-bkgd_points.shape[0]:] = bkgd_points
+
                 point_inputs = {"point_coords": points, "point_labels": labels}
                 backbone_out["point_inputs_per_frame"][t] = point_inputs
 
@@ -537,10 +545,7 @@ class SAM2Train(SAM2Base):
         
         # Filter out objects that are no longer tracked
         tracking_object_ids = tracking_object_ids[keep_tokens_mask]
-        
-        # if frame_idx % 10 == 0:  # Reduce logging frequency
-        #     logging.debug(f'Frame: {frame_idx} | Tracking IDs: {tracking_object_ids} | Exit IDs: {exit_object_ids}')
-        
+
         # Update object pointers
         obj_ptrs = obj_ptr[keep_tokens_mask]
         current_out["obj_ptr"] = obj_ptrs
@@ -567,6 +572,50 @@ class SAM2Train(SAM2Base):
                 for feat in current_vision_feats
             ]
         return current_vision_feats
+
+
+    def get_input_points_from_heatmap(self, input, num_bkgd_pts, bkgd_masks):
+
+        img_ids = input.flat_obj_to_img_idx[0]
+
+        (
+            _,
+            current_vision_feats,
+            current_vision_pos_embeds,
+            feat_sizes,
+        ) = self._prepare_backbone_features_per_frame(
+            input.flat_img_batch, img_ids
+        )
+
+
+        heatmap_predictions = self.get_heatmap_predictions(current_vision_feats, feat_sizes)[0,0]
+        points = self.extract_peak_points(heatmap_predictions)
+
+        # Handle edge case: no points extracted from heatmap
+        if points.shape[0] == 0:
+            # Return empty tensor with correct shape [0, 1, 2]
+            return torch.empty((0, 1, 2), device=heatmap_predictions.device, dtype=torch.long)
+
+        # Convert input_points to integer indices
+        points = points.long()  # Shape: [212, 1, 2]
+
+        # Get the values from bkgd_masks[0,0] at each point
+        bkgd_point_values = bkgd_masks[points[:,0,1], points[:,0,0]]  # Shape: [212]
+
+        # Get the first num_bkgd_pts indices where mask is False
+        top_bkgd_pt_indices = bkgd_point_values.nonzero()[:num_bkgd_pts]
+
+        # Handle edge case: no background points found
+        if top_bkgd_pt_indices.numel() == 0:
+            # Return empty tensor with correct shape [0, 1, 2]
+            return torch.empty((0, 1, 2), device=heatmap_predictions.device, dtype=torch.long)
+
+        top_bkgd_pt_indices = top_bkgd_pt_indices.squeeze(-1)
+        
+        # Get the corresponding points
+        bkgd_points = points[top_bkgd_pt_indices]  # Shape: [num_bkgd_pts, 1, 2]
+
+        return bkgd_points
 
     def _iter_correct_pt_sampling(
         self,

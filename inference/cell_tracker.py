@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torchvision.ops import batched_nms
 from tqdm import tqdm
 
@@ -989,58 +988,13 @@ class SAM2AutomaticCellTracker:
         heatmap_predictions = self.model.get_heatmap_predictions(
             current_vision_feats, feat_sizes
         )[0, 0]
-        input_points = self.extract_peak_points(heatmap_predictions)
+        input_points = self.model.extract_peak_points(heatmap_predictions)
         point_labels = torch.ones(
             (input_points.shape[0], 1), dtype=torch.int, device=self.device
         )
 
         return input_points, point_labels
-
-    def extract_peak_points(
-        self, heatmap: torch.Tensor, min_dist=2, threshold=0.1
-    ):
-        """Extract up to points from heatmap using local max suppression.
-
-        Args:
-            heatmap: (H, W) float tensor on GPU
-            max_points: max number of points to return
-            min_dist: radius (in pixels) for local suppression
-            threshold: min confidence to consider a valid point
-
-        Returns:
-            points: (N, 2) float tensor of (x, y)
-
-        """
-        # Apply max pooling to find local maxima
-        heatmap = heatmap.sigmoid()
-        pooled = F.max_pool2d(
-            heatmap.unsqueeze(0).unsqueeze(0),
-            kernel_size=min_dist * 2 + 1,
-            stride=1,
-            padding=min_dist,
-        )
-        is_peak = (heatmap == pooled[0, 0]) & (heatmap > threshold)
-
-        ys, xs = torch.nonzero(is_peak, as_tuple=True)
-        if len(xs) == 0:
-            return torch.empty((0, 2), device=heatmap.device)
-
-        scores = heatmap[ys, xs]
-        sorted_idx = torch.argsort(scores, descending=True)
-
-        # Take top max_points
-        xs = xs[sorted_idx]
-        ys = ys[sorted_idx]
-
-        points = torch.stack([xs, ys], dim=1).float()  # (N, 2)
-        points = points.unsqueeze(1)  # (N, 1, 2)
-        assert (
-            heatmap.shape[0] == heatmap.shape[1]
-            and self.model.image_size % heatmap.shape[0] == 0
-        )
-        points = points * (self.model.image_size // heatmap.shape[0])
-        return points
-
+    
     def save_ctc(self, track_mask, frame_idx, inference_state):
         res_path = inference_state["res_path"]
 

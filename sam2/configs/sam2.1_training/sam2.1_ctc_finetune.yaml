@@ -4,12 +4,12 @@ scratch:
   resolution: 512
   batch_size: 1
   num_train_workers: 2
-  num_frames: 4
-  max_num_objects: 30
-  max_num_bkgd_objects: 8
+  num_frames: 3
+  max_num_objects: 40
+  max_num_bkgd_objects: 10
   base_lr: 5.0e-6
   vision_lr: 3.0e-06
-  num_epochs: 5
+  num_epochs: 10
   use_lora: True 
   lora_lr: 1.0e-3
   use_wandb: False
