@@ -11,8 +11,6 @@ CellSAM2 is memory constrained to work on larger images. Future work will entail
 - [ ] Run inference Colab notebook in full
 
 ### Training Experiments
-- [ ] Train MOMA on tracking (with finalized code)
-- [ ] Train DynamicNuclearNet on tracking
 - [ ] Save MOMA and DynamicNuclearNet model checkpoints on Zenodo
 - [ ] Train segmentation model on moma as proof of concept
 
@@ -26,16 +24,17 @@ CellSAM2 leverages the powerful foundation of SAM 2 and adapts it specifically f
 
 It currently supports CTC-formatted data for training and CTC-formatted data or TIFF files for inference.
 
-## Results
+## 🏆 Results
 
-CellSAM2 achieves state-of-the-art performance on the moma dataset, outperforming 3 other leading cell tracking models across multiple metrics:
+CellSAM2 achieves **state-of-the-art performance** on the Moma and DynamicNuclearNet dataset.
 
-### Performance Metrics
-- **Cell-HOTA**: Outperforms competing models on the Cell-HOTA metric for cell tracking accuracy
-- **CTC Score**: CellSAM2 achieves superior performance on the Cell Tracking Challenge (CTC) evaluation metrics
+![MoMA Dataset Performance](examples/moma-metrics.png)
 
+*CellSAM2 performance metrics on the MoMA dataset*
 
-![Example results showing cell segmentation and tracking metrics on the MOMA dataset](examples/moma-metrics.png)
+![DynamicNuclearNet Dataset Performance](examples/DynamicNuclearNet-metrics.png)
+
+*CellSAM2 performance metrics on the DynamicNuclearNet dataset*
 
 ## 🚀 Getting Started
 
