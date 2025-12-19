@@ -147,13 +147,11 @@ class SAM2Train(SAM2Base):
         """
         # Load the ground-truth masks on all frames (so that we can later
         # sample correction points from them)
-        # gt_masks_per_frame = {
-        #     stage_id: targets.segments.unsqueeze(1)  # [B, 1, H_im, W_im]
-        #     for stage_id, targets in enumerate(input.find_targets)
-        # }
+        # input.masks is now a tensor with shape [T, max_objects, H, W]
+        # Filter out padded entries using is_real and convert to lists per time step
         gt_masks_per_frame = {
-            stage_id: masks.unsqueeze(1)  # [B, 1, H_im, W_im]
-            for stage_id, masks in enumerate(input.masks)
+            stage_id: input.masks[stage_id][input.is_real_masks[stage_id]].unsqueeze(1)  # [num_real_masks, 1, H_im, W_im]
+            for stage_id in range(input.num_frames)
         }
         # gt_masks_per_frame = input.masks.unsqueeze(2) # [T,B,1,H_im,W_im] keep everything in tensor form
         backbone_out["gt_masks_per_frame"] = gt_masks_per_frame
@@ -297,7 +295,9 @@ class SAM2Train(SAM2Base):
         # and then conditioning on them to track the remaining frames
         processing_order = init_cond_frames + backbone_out["frames_not_in_init_cond"]
 
-        tracking_object_ids = input.metadata.unique_objects_identifier[0][:,1]
+        # input.metadata.unique_objects_identifier is now a tensor [T, max_objects, 3]
+        # Filter out padded entries and get object IDs from first frame
+        tracking_object_ids = input.metadata.unique_objects_identifier[0][input.is_real[0]][:, 1]
         memory_dict = {'mask_mem_pos_enc': None}
         all_frame_outputs = {}
 
@@ -384,8 +384,8 @@ class SAM2Train(SAM2Base):
         if "frame_idx" not in memory_dict:
             memory_dict["frame_idx"] = []
             
-        # Get cell division information for current frame
-        is_dividing = input.cell_divides[frame_idx]
+        # Get cell division information for current frame (filter out padded entries)
+        is_dividing = input.cell_divides[frame_idx][input.is_real[frame_idx]]
         
         # Set default for frames_to_add_correction_pt if None
         if frames_to_add_correction_pt is None:
@@ -464,7 +464,8 @@ class SAM2Train(SAM2Base):
 
         # Update memory with new features
         if current_out["pred_masks"].shape[0] > 0:
-            daughter_ids_list = input.daughter_ids[frame_idx]
+            # Filter out padded entries
+            daughter_ids_list = input.daughter_ids[frame_idx][input.is_real[frame_idx]]
             memory_dict = self._update_memory_features(
                 current_vision_feats,
                 feat_sizes,
@@ -511,11 +512,11 @@ class SAM2Train(SAM2Base):
         obj_ptr
     ):
         """Handle cell tracking and division events."""
-        # Get cell tracking mask for current frame
-        cell_tracks_mask = input.cell_tracks_mask[frame_idx]
+        # Get cell tracking mask for current frame (filter out padded entries)
+        cell_tracks_mask = input.cell_tracks_mask[frame_idx][input.is_real[frame_idx]]
         
-        # Store pre-division target objects
-        pre_div_target_obj = input.target_obj_mask[frame_idx].float()[:,None]
+        # Store pre-division target objects (filter out padded entries)
+        pre_div_target_obj = input.target_obj_mask[frame_idx][input.is_real[frame_idx]].float()[:,None]
         current_out["pre_div_target_obj"] = [pre_div_target_obj]
 
         # Create mask for tokens to keep after division
@@ -536,8 +537,8 @@ class SAM2Train(SAM2Base):
         prev_tracking_object_ids = tracking_object_ids.clone()
         mother_ids = tracking_object_ids[is_dividing]
         
-        # Get new daughter cell IDs
-        new_daughter_ids = input.daughter_ids[frame_idx].flatten()
+        # Get new daughter cell IDs (filter out padded entries)
+        new_daughter_ids = input.daughter_ids[frame_idx][input.is_real[frame_idx]].flatten()
         new_daughter_ids = new_daughter_ids[new_daughter_ids > 0]
         
         # Update tracking object IDs - swap out mother ID with daughter IDs

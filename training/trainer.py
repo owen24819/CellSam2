@@ -474,7 +474,17 @@ class Trainer:
         phase: str,
     ):
         outputs = model(batch)
-        targets, target_divide, target_heatmaps = batch.masks, batch.cell_divides, batch.heatmaps
+        
+        # Convert tensors to lists per time step, filtering out padded entries
+        # batch.masks, batch.cell_divides are now tensors with shape [T, max_objects, ...]
+        is_real = batch.is_real  # [T, max_objects]
+        is_real_masks = batch.is_real_masks  # [T, max_objects_masks]
+        T = is_real.shape[0]
+        
+        targets = [batch.masks[t][is_real_masks[t]] for t in range(T)]
+        target_divide = [batch.cell_divides[t][is_real[t]] for t in range(T)]
+        target_heatmaps = [batch.heatmaps[t] for t in range(T)]  # heatmaps are per frame, not per object
+        
         batch_size = len(batch.img_batch)
         targets = [target for target, no_inputs in zip(targets, batch.no_inputs) if not no_inputs]
         target_divide = [target_divide for target_divide, no_inputs in zip(target_divide, batch.no_inputs) if not no_inputs]
@@ -642,17 +652,6 @@ class Trainer:
             data_time.update(time.time() - end)
 
             batch = batch.to(self.device, non_blocking=True)
-            
-            # These are tensors within lists so the general .to(self.device) only works for the img_batch
-            batch.masks = [masks.to(self.device) for masks in batch.masks]
-            batch.bkgd_masks = [bkgd_masks.to(self.device) for bkgd_masks in batch.bkgd_masks]
-            batch.cell_divides = [cell_divides.to(self.device) for cell_divides in batch.cell_divides]
-            batch.cell_tracks_mask = [cell_tracks_mask.to(self.device) for cell_tracks_mask in batch.cell_tracks_mask]
-            batch.daughter_ids = [daughter_ids.to(self.device) for daughter_ids in batch.daughter_ids]
-            batch.obj_to_frame_idx = [obj_to_frame_idx.to(self.device) for obj_to_frame_idx in batch.obj_to_frame_idx]
-            batch.target_obj_mask = [target_obj_mask.to(self.device) for target_obj_mask in batch.target_obj_mask]
-            batch.metadata.unique_objects_identifier = [unique_objects_identifier.to(self.device) for unique_objects_identifier in batch.metadata.unique_objects_identifier]
-            batch.heatmaps = [heatmaps.to(self.device) for heatmaps in batch.heatmaps]
 
             # compute output
             with torch.no_grad():
@@ -798,17 +797,6 @@ class Trainer:
             batch = batch.to(
                 self.device, non_blocking=True
             )  # move tensors in a tensorclass
-
-            # These are tensors within lists so the general .to(self.device) only works for the img_batch
-            batch.masks = [masks.to(self.device) for masks in batch.masks]
-            batch.bkgd_masks = [bkgd_masks.to(self.device) for bkgd_masks in batch.bkgd_masks]
-            batch.cell_divides = [cell_divides.to(self.device) for cell_divides in batch.cell_divides]
-            batch.cell_tracks_mask = [cell_tracks_mask.to(self.device) for cell_tracks_mask in batch.cell_tracks_mask]
-            batch.daughter_ids = [daughter_ids.to(self.device) for daughter_ids in batch.daughter_ids]
-            batch.obj_to_frame_idx = [obj_to_frame_idx.to(self.device) for obj_to_frame_idx in batch.obj_to_frame_idx]
-            batch.target_obj_mask = [target_obj_mask.to(self.device) for target_obj_mask in batch.target_obj_mask]
-            batch.metadata.unique_objects_identifier = [unique_objects_identifier.to(self.device) for unique_objects_identifier in batch.metadata.unique_objects_identifier]
-            batch.heatmaps = [heatmaps.to(self.device) for heatmaps in batch.heatmaps]
 
             try:
                 self._run_step(batch, phase, loss_mts, extra_loss_mts)

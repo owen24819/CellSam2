@@ -56,6 +56,8 @@ class BatchedVideoDatapoint:
     daughter_ids: torch.IntTensor
     no_inputs: torch.BoolTensor
     target_obj_mask: torch.BoolTensor
+    is_real: torch.BoolTensor  # True for real objects, False for padded objects
+    is_real_masks: torch.BoolTensor  # True for real masks, False for padded masks
 
     def pin_memory(self, device=None):
         return self.apply(torch.Tensor.pin_memory, device=device)
@@ -65,7 +67,7 @@ class BatchedVideoDatapoint:
         """
         Returns the number of frames per video.
         """
-        return self.batch_size[0]
+        return len(self.is_real)
 
     @property
     def num_videos(self) -> int:
@@ -79,12 +81,14 @@ class BatchedVideoDatapoint:
         """
         Returns a flattened tensor containing the object to img index.
         The flat index can be used to access a flattened img_batch of shape [(T*B)xCxHxW]
+        Now handles tensor format [T, max_objects, 2] and filters out padded entries.
         """
 
         flat_idx = []
 
-        for i in range(len(self.obj_to_frame_idx)):
-            batch = self.obj_to_frame_idx[i]
+        for i in range(self.obj_to_frame_idx.shape[0]):
+            # Filter out padded entries using is_real
+            batch = self.obj_to_frame_idx[i][self.is_real[i]]
             frame_idx = batch[:,0]
             video_idx = batch[:,1]
             flat_idx.append(video_idx * self.num_frames + frame_idx)
@@ -127,6 +131,36 @@ class VideoDatapoint:
     video_id: int
     size: Tuple[int, int]
     man_track: torch.IntTensor
+
+def pad_and_stack(tensor_list, max_objects, pad_value=0):
+    """
+    Pad tensors in list to same size (max_objects) and stack them along time dimension.
+    
+    Args:
+        tensor_list: List of tensors, each with shape [num_objects, ...]
+        max_objects: Maximum number of objects to pad to
+        pad_value: Value to use for padding (default: 0)
+    
+    Returns:
+        Stacked tensor with shape [T, max_objects, ...] where T is len(tensor_list)
+    """
+    padded = []
+    for t in tensor_list:
+        if t.shape[0] < max_objects:
+            pad_size = max_objects - t.shape[0]
+            device = t.device if hasattr(t, 'device') else torch.device('cpu')
+            # Create padding tensor matching the shape
+            if len(t.shape) == 1:
+                padding = torch.full((pad_size,), pad_value, dtype=t.dtype, device=device)
+            elif len(t.shape) == 2:
+                padding = torch.full((pad_size, t.shape[1]), pad_value, dtype=t.dtype, device=device)
+            elif len(t.shape) == 3:
+                padding = torch.full((pad_size, t.shape[1], t.shape[2]), pad_value, dtype=t.dtype, device=device)
+            else:
+                padding = torch.full((pad_size,) + t.shape[1:], pad_value, dtype=t.dtype, device=device)
+            t = torch.cat([t, padding], dim=0)
+        padded.append(t)
+    return torch.stack(padded, dim=0)  # Shape: [T, max_objects, ...]
 
 def collate_fn(
     batch: List[VideoDatapoint],
@@ -234,18 +268,57 @@ def collate_fn(
             step_t_daughter_ids[t].append(torch.zeros((2), dtype=torch.int32))
             step_t_centroids[t].append(torch.zeros((2), dtype=torch.float32))
 
-    obj_to_frame_idx = [torch.stack(obj_to_frame_idx, dim=0) for obj_to_frame_idx in step_t_obj_to_frame_idx]
-    masks = [torch.stack(masks, dim=0) for masks in step_t_masks]
-    objects_identifier = [torch.stack(id, dim=0) for id in step_t_objects_identifier]
-    frame_orig_size = [torch.stack(id, dim=0) for id in step_t_frame_orig_size]
-    cell_divides = [torch.stack(id, dim=0) for id in step_t_cell_divides]
-    cell_tracks_mask = [torch.tensor(id, dtype=torch.bool) for id in step_t_cell_tracks_mask] # whether the object is being tracked to the next frame regardless if it exists in the current frame
-    target_obj_mask = [torch.stack(id, dim=0) for id in step_t_target_obj_mask] # whether the cell exists in the frame
-    daughter_ids = [torch.stack(id, dim=0) for id in step_t_daughter_ids]
+    # Stack tensors for each time step
+    obj_to_frame_idx_per_t = [torch.stack(obj_to_frame_idx, dim=0) for obj_to_frame_idx in step_t_obj_to_frame_idx]
+    masks_per_t = [torch.stack(masks, dim=0) for masks in step_t_masks]
+    objects_identifier_per_t = [torch.stack(id, dim=0) for id in step_t_objects_identifier]
+    frame_orig_size_per_t = [torch.stack(id, dim=0) for id in step_t_frame_orig_size]
+    cell_divides_per_t = [torch.stack(id, dim=0) for id in step_t_cell_divides]
+    cell_tracks_mask_per_t = [torch.tensor(id, dtype=torch.bool) for id in step_t_cell_tracks_mask]
+    target_obj_mask_per_t = [torch.stack(id, dim=0) for id in step_t_target_obj_mask]
+    daughter_ids_per_t = [torch.stack(id, dim=0) for id in step_t_daughter_ids]
+    centroids_per_t = [torch.stack(id, dim=0) for id in step_t_centroids]
+    
     no_inputs = torch.stack(step_t_no_inputs, dim=0) # whether a frame any inputs, foreground or background
     
-    centroids = [torch.stack(id, dim=0) for id in step_t_centroids]
-    heatmaps = [make_gaussian_heatmap(H//4, W//4, centroid/4, mask) for centroid,mask in zip(centroids,masks)]
+    # Create heatmaps - these are per time step (not per object), so use original non-padded data
+    heatmaps = []
+    for t in range(T):
+        # Use the actual (non-padded) masks and centroids for this time step
+        heatmap = make_gaussian_heatmap(H//4, W//4, centroids_per_t[t]/4, masks_per_t[t])
+        heatmaps.append(heatmap)
+    heatmaps = torch.stack(heatmaps, dim=0)  # Shape: [T, H//4, W//4]
+    
+    # Find maximum number of objects across all time steps
+    max_objects = max([t.shape[0] for t in obj_to_frame_idx_per_t]) if obj_to_frame_idx_per_t else 1
+    max_objects_masks = max([t.shape[0] for t in masks_per_t]) if masks_per_t else 1
+    
+    # Create padding mask: True for real objects, False for padded objects
+    is_real_per_t = []
+    is_real_per_t_masks = []
+    for t in range(T):
+
+        is_real_per_t.append(torch.cat([
+            torch.ones(obj_to_frame_idx_per_t[t].shape[0], dtype=torch.bool, device=obj_to_frame_idx_per_t[t].device),
+            torch.zeros(max_objects - obj_to_frame_idx_per_t[t].shape[0], dtype=torch.bool, device=obj_to_frame_idx_per_t[t].device)
+        ]))
+        is_real_per_t_masks.append(torch.cat([
+            torch.ones(masks_per_t[t].shape[0], dtype=torch.bool, device=masks_per_t[t].device),
+            torch.zeros(max_objects_masks - masks_per_t[t].shape[0], dtype=torch.bool, device=masks_per_t[t].device)
+        ]))
+
+    is_real = torch.stack(is_real_per_t, dim=0)  # Shape: [T, max_objects]
+    is_real_masks = torch.stack(is_real_per_t_masks, dim=0)  # Shape: [T, max_objects_masks]
+
+    # Pad and stack all object-level tensors
+    obj_to_frame_idx = pad_and_stack(obj_to_frame_idx_per_t, max_objects, pad_value=0)
+    masks = pad_and_stack(masks_per_t, max_objects_masks, pad_value=False)
+    objects_identifier = pad_and_stack(objects_identifier_per_t, max_objects, pad_value=0)
+    frame_orig_size = pad_and_stack(frame_orig_size_per_t, max_objects, pad_value=0)
+    cell_divides = pad_and_stack(cell_divides_per_t, max_objects, pad_value=False)
+    cell_tracks_mask = pad_and_stack(cell_tracks_mask_per_t, max_objects, pad_value=False)
+    target_obj_mask = pad_and_stack(target_obj_mask_per_t, max_objects, pad_value=False)
+    daughter_ids = pad_and_stack(daughter_ids_per_t, max_objects, pad_value=0)
 
     return BatchedVideoDatapoint(
         img_batch=img_batch,
@@ -263,6 +336,8 @@ def collate_fn(
         daughter_ids=daughter_ids,
         no_inputs=no_inputs,
         dict_key=dict_key,
+        is_real=is_real,
+        is_real_masks=is_real_masks,
         batch_size=[T],
     )
 
