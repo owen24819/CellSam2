@@ -31,6 +31,7 @@ REQUIRED_PACKAGES = [
     "pillow>=9.4.0",
     "imagecodecs>=2025.3.30",
     "opencv-python>=4.7.0",
+    "peft>=0.15.1",
 ]
 
 EXTRA_PACKAGES = {
