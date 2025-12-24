@@ -1,4 +1,5 @@
 .vscode/
+results/*
 .DS_Store
 __pycache__/
 *-checkpoint.ipynb
