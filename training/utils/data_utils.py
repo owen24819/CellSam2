@@ -210,13 +210,16 @@ def collate_fn(
                 centroid = get_centroids_from_mask(obj.segment)
 
                 # Divided cells are only used for the masks since the mother cells are the inputs to the frame
-                if t > 0 and obj.entering and obj.parent_id > 0:                      
-                    dividing_masks[obj.object_id] = obj.segment.to(torch.bool)
-                    dividing_centroids[obj.object_id] = centroid
+                if t > 0 and obj.entering and obj.parent_id > 0:                 
+                    if obj.daughter_ids.sum() == 2:
+                        dividing_masks[obj.object_id] = obj.segment.to(torch.bool)
+                        dividing_centroids[obj.object_id] = centroid                        
                     continue 
 
-                if obj.daughter_ids.sum() > 0:
+                if obj.daughter_ids.sum() == 2:
                     step_t_daughter_ids[t].append(obj.daughter_ids)
+                elif obj.daughter_ids.sum() == 1:
+                    step_t_daughter_ids[t].append(torch.tensor([obj.daughter_ids[0], 0], dtype=torch.int32))
                 else:
                     step_t_daughter_ids[t].append(torch.zeros((2), dtype=torch.int32))
 
@@ -231,13 +234,19 @@ def collate_fn(
                 if obj.daughter_ids.sum() == 0:
                     step_t_masks[t].append(obj.segment.to(torch.bool))
                     step_t_centroids[t].append(centroid)
+                elif obj.daughter_ids.sum() == 1:
+                    dau_id = obj.daughter_ids[0]
+                    dau_obj = next((o for o in objects if o.object_id == dau_id), None)
+                    if dau_obj is not None:
+                        step_t_masks[t].append(dau_obj.segment.to(torch.bool))
+                        step_t_centroids[t].append(get_centroids_from_mask(dau_obj.segment))
 
                 step_t_objects_identifier[t].append(
                     torch.tensor([orig_video_id, orig_obj_id, orig_frame_idx])
                 )
                 step_t_frame_orig_size[t].append(torch.tensor(orig_frame_size))
 
-                step_t_cell_divides[t].append(obj.daughter_ids.sum() > 0)
+                step_t_cell_divides[t].append(obj.daughter_ids.sum() == 2)
                 # This signifies that a cell is being tracked to the next frame regardless if it exists in the next frame or not
                 # This keeps track of cells being tracked after exiting the current frame for VOSSampler.num_frames_track_lost_objects frames
                 # The VOS Sampler decides the number of frames we track object after it exits
@@ -245,7 +254,7 @@ def collate_fn(
                 step_t_target_obj_mask[t].append(obj.segment.sum() > 0 or obj.daughter_ids.sum() > 0)
 
             for daughter_ids in step_t_daughter_ids[t]:
-                if daughter_ids.sum() > 0:
+                if daughter_ids.sum() == 2:
                     for daughter_id in daughter_ids:
                         step_t_masks[t].append(dividing_masks[int(daughter_id)])
                         step_t_centroids[t].append(dividing_centroids[int(daughter_id)])

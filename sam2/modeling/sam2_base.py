@@ -645,7 +645,7 @@ class SAM2Base(torch.nn.Module):
                 ).expand(self.num_maskmem - num_mem_frames, C // self.mem_dim, self.mem_dim)
         
         # Trim to actual number of memory frames
-        memory = memory[:N]
+        memory = memory[:min(N, self.num_maskmem)]
         
         # Reshape memory for attention: [N, B, C, H, W] -> [(N*H*W), B, C]
         memory = memory.flatten(3).permute(0, 3, 1, 2)
@@ -654,7 +654,7 @@ class SAM2Base(torch.nn.Module):
         # Process object pointers if enabled
         num_obj_ptr_tokens = 0
         if self.use_obj_ptrs_in_encoder:
-            obj_ptrs_mem = obj_ptrs_mem[:N]
+            obj_ptrs_mem = obj_ptrs_mem[:min(N, self.num_maskmem)]
             obj_ptrs_mem = obj_ptrs_mem.permute(0, 2, 1, 3)
             obj_ptrs_mem = obj_ptrs_mem.reshape(-1, B, self.mem_dim)
             memory = torch.cat((memory, obj_ptrs_mem), dim=0)

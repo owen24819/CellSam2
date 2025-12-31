@@ -7,6 +7,8 @@
 import glob
 import json
 import os
+import random
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -17,8 +19,61 @@ from PIL import Image as PILImage
 
 
 class CTCSegmentLoader:
-    def __init__(self, video_mask_path):
+    def __init__(self, video_mask_path, first_mask_path=None, target_size=512, 
+                 resize_threshold=600, training=True, crop_region=None):
         self.mask_paths = sorted(list((video_mask_path).glob("*.tif")))
+        
+        # Determine crop region if parameters are provided
+        if crop_region is not None:
+            self.crop_region = crop_region
+        elif first_mask_path is not None:
+            self.crop_region = self._determine_crop_region(
+                first_mask_path, target_size, resize_threshold, training
+            )
+        else:
+            self.crop_region = None
+    
+    def _determine_crop_region(self, first_mask_path: str, target_size: int, 
+                               resize_threshold: int, training: bool) -> Optional[Tuple[int, int, int, int]]:
+        """Determine crop region: 10% random, 90% center on random cell for training; always center crop for validation."""
+        # Load first frame image to determine size
+        first_mask = tifffile.imread(first_mask_path)
+        h, w = first_mask.shape
+        max_dim = max(h, w)
+        
+        # Only crop if image is much larger than target
+        if max_dim <= resize_threshold:
+            return None
+        
+        top = max(0, (h - target_size) // 2)
+        left = max(0, (w - target_size) // 2)
+        
+        # Determine crop position
+        if training:
+            # Training: 10% random crop, 90% center on random cell
+            if random.random() < 0.1:
+                # Random crop
+                top = random.randint(0, max(0, h - target_size))
+                left = random.randint(0, max(0, w - target_size))
+            else:
+                # Load first frame mask to find cells
+                instance_ids = np.unique(first_mask)
+                valid_cells = instance_ids[instance_ids != 0]
+
+                # Center crop on random cell
+                valid_cell_id= random.choice(valid_cells)
+                where_cell = np.where(first_mask == valid_cell_id)
+                h_cell, w_cell = int(np.median(where_cell[0])), int(np.median(where_cell[1]))
+                top = h_cell - target_size // 2
+                left = w_cell - target_size // 2
+        
+        # Ensure we don't go out of bounds
+        top = min(max(0,top), max(0, h - target_size))
+        left = min(max(0,left), max(0, w - target_size))
+        bottom = top + target_size
+        right = left + target_size
+        
+        return (top, left, bottom, right)
 
     def load(self, frame_id):
         """
@@ -32,12 +87,24 @@ class CTCSegmentLoader:
 
         segments = {}
         for inst_id in instance_ids:
-            segments[int(inst_id)] = torch.from_numpy(mask == inst_id)
+            segment = torch.from_numpy(mask == inst_id)
+            
+            # Apply crop if needed
+            if self.crop_region is not None:
+                top, left, bottom, right = self.crop_region
+                segment = segment[top:bottom, left:right]
 
         # Dilate background mask to avoid points touching objects to ensure there is no confusion between FPs being interpreted as objects
         kernel = np.ones((3,3), np.uint8)
         bkgd_mask_dilated = cv2.erode((mask == 0).astype(np.uint8), kernel, iterations=2) # Erode background = dilate objects
-        segments['bkgd_mask'] = torch.from_numpy(bkgd_mask_dilated.astype(bool))
+        bkgd_mask = torch.from_numpy(bkgd_mask_dilated.astype(bool))
+        
+        # Apply crop to background mask if needed
+        if self.crop_region is not None:
+            top, left, bottom, right = self.crop_region
+            bkgd_mask = bkgd_mask[top:bottom, left:right]
+        
+        segments['bkgd_mask'] = bkgd_mask
 
         return segments
 

@@ -651,3 +651,96 @@ class RandomIlluminationVoodoo:
         if len(result.shape) == 2:
             result = np.repeat(result[..., None], 3, axis=2)
         return PILImage.fromarray(result)
+
+class ResizeImages:
+    """
+    Transform to resize images that weren't cropped (cropping happens before sampling).
+    Resizes maintaining aspect ratio so max dimension is target_size, then pads to square.
+    
+    Handles both:
+    - Larger images (under threshold): resize max dimension to target_size, pad to square
+    - Smaller images: resize max dimension to target_size, pad to square
+    
+    This transform only handles resizing - cropping is done before sampling in vos_dataset.py.
+    
+    Args:
+        target_size: Target size (default: 512)
+    """
+    def __init__(self, target_size=512):
+        self.target_size = target_size
+
+    def __call__(self, datapoint: VideoDatapoint, **kwargs):
+        # Get image size from first frame (all frames should be same size)
+        first_frame = datapoint.frames[0]
+        w, h = first_frame.data.size
+        
+        # If already target_size x target_size, no need to resize
+        if h == self.target_size and w == self.target_size:
+            return datapoint
+        
+        # Resize maintaining aspect ratio and pad to square
+        return self._resize_and_pad_datapoint(datapoint)
+    
+    def _resize_and_pad_datapoint(self, datapoint: VideoDatapoint):
+        """Resize so max dimension is target_size (maintaining aspect ratio), then pad to square"""
+        for i, frame in enumerate(datapoint.frames):
+            # Get actual image size (PIL Image: (width, height))
+            w, h = frame.data.size
+            max_dim = max(h, w)
+            
+            # Resize the image while maintaining aspect ratio so max dimension is target_size
+            if max_dim != self.target_size:
+                # Calculate new size ensuring max dimension is exactly target_size
+                if h > w:
+                    # Height is larger, make height = target_size
+                    new_h = self.target_size
+                    new_w = int(round(w * self.target_size / h))
+                else:
+                    # Width is larger or equal, make width = target_size
+                    new_w = self.target_size
+                    new_h = int(round(h * self.target_size / w))
+                
+                # Resize using the calculated dimensions (resize expects (w, h) tuple, reverses to (h, w) for F.resize)
+                datapoint = resize(datapoint, i, (new_w, new_h), square=False)
+                # Get actual size after resize (PIL Image: (width, height))
+                w, h = datapoint.frames[i].data.size
+                # Verify max dimension is exactly target_size
+                max_dim_after = max(h, w)
+                if max_dim_after != self.target_size:
+                    raise ValueError(
+                        f"Resize failed: expected max_dim={self.target_size}, got {max_dim_after} "
+                        f"(w={w}, h={h}, original w={frame.data.size[0]}, h={frame.data.size[1]})"
+                    )
+            else:
+                # Already target_size, but may need padding if not square
+                w, h = frame.data.size
+
+            # Pad the image to make it square (target_size x target_size)
+            # Note: frame.data.size is (width, height)
+            pad_h = max(0, self.target_size - h)
+            pad_w = max(0, self.target_size - w)
+            
+            # Calculate padding on each side to center the image
+            pad_left = pad_w // 2
+            pad_right = pad_w - pad_left
+            pad_top = pad_h // 2
+            pad_bottom = pad_h - pad_top
+            
+            # Pad on all sides to center the image
+            padding = [pad_left, pad_top, pad_right, pad_bottom]  # left, top, right, bottom
+            
+            if pad_h > 0 or pad_w > 0:
+                datapoint = pad(datapoint, i, padding)
+                
+            # Verify final size is exactly target_size x target_size
+            # Note: PIL Image.size is (width, height)
+            final_w, final_h = datapoint.frames[i].data.size
+            if final_h != self.target_size or final_w != self.target_size:
+                raise ValueError(
+                    f"Frame {i} size mismatch after resize+pad: expected {self.target_size}x{self.target_size}, "
+                    f"got {final_w}x{final_h} (w={final_w}, h={final_h}). "
+                    f"Before pad: w={w}, h={h}, pad_w={pad_w}, pad_h={pad_h}"
+                )
+                
+        
+        return datapoint

@@ -8,15 +8,14 @@ import random
 from dataclasses import dataclass
 from typing import List
 
-from training.dataset.vos_segment_loader import LazySegments
+import numpy as np
 
 MAX_RETRIES = 1000
-
-
 @dataclass
 class SampledFramesAndObjects:
     frames: List[int]
     object_ids_list: List[List[int]]
+    man_track: np.ndarray
 
 
 class VOSSampler:
@@ -59,15 +58,9 @@ class FrameIndexSampler(VOSSampler):
 
         # Get first frame object ids
         visible_object_ids = []
-        loaded_segms = segment_loader.load(frames[0].frame_idx)
-        if isinstance(loaded_segms, LazySegments):
-            visible_object_ids = list(loaded_segms.keys())
-        else:
-            for object_id, segment in segment_loader.load(
-                frames[0].frame_idx
-            ).items():
-                if segment.sum() and object_id != 'bkgd_mask':
-                    visible_object_ids.append(object_id)
+        for object_id, segment in segment_loader.load(frames[0].frame_idx).items():
+            if segment is not None and segment.sum() and object_id != 'bkgd_mask':
+                visible_object_ids.append(object_id)
 
         # Sample objects based on mode
         if self.is_training:
@@ -83,6 +76,12 @@ class FrameIndexSampler(VOSSampler):
         object_ids_list = [object_ids]
         object_ids_dict = {0: object_ids}
 
+        new_man_track = np.zeros((0,4), dtype=np.int16)
+        first_frame_index = frames[0].frame_idx
+        for object_id in object_ids:
+            new_cell_row = np.array([[object_id, first_frame_index, first_frame_index, 0]], dtype=np.int16)
+            new_man_track = np.vstack((new_man_track, new_cell_row))
+
         # Handle object tracking if needed
         if video.man_track is not None and len(frames) > 1:
             for i, frame in enumerate(frames):
@@ -96,18 +95,34 @@ class FrameIndexSampler(VOSSampler):
                 for object_id, segment in segment_loader.load(frame.frame_idx).items():
                     if isinstance(object_id, int):
                         parent_id = video.man_track[video.man_track[:, 0] == object_id, -1]
-                        if any([object_id in object_ids_dict[j] for j in range(i)]) or any([parent_id in object_ids_dict[j] for j in range(i)]):
+                        
+                        # Filter to only include: (1) cells that were present in the previous frame (tracked),
+                        # or (2) daughter cells whose parent was in the previous frame (from division or budding)
+                        if any([object_id in object_ids_dict[i-1]]) or any([parent_id in object_ids_dict[i-1]]):
                             input_object_ids.append(object_id)
                             object_ids_dict[i].append(object_id)
-                
+
+                            # Update man_track if cell tracks to next frame
+                            if any([object_id in object_ids_dict[i-1]]):
+                                new_man_track[new_man_track[:, 0] == object_id, 2] = frame.frame_idx
+                            
+                            # Update man_track if cell in previous frame divides with at least one daughter cell in current frame
+                            if any([parent_id in object_ids_dict[i-1]]):
+                                dau_cells = video.man_track[video.man_track[:, -1] == parent_id, 0]
+
+                                for dau_cell in dau_cells:
+                                    new_cell_row = np.array([dau_cell, frame.frame_idx, frame.frame_idx, parent_id], dtype=np.int16)
+                                    new_man_track = np.vstack((new_man_track, new_cell_row))
+
                 # Include objects from previous frames within tracking window
-                for j in range(i-self.num_frames_track_lost_objects, i):
-                    if j >= 0:  # Ensure we don't access negative indices
-                        input_object_ids.extend(object_ids_dict[j])
+                for j in range(max(0, i-self.num_frames_track_lost_objects), i):
+                    input_object_ids.extend(object_ids_dict[j])
                 
                 # Remove duplicates and sort
                 input_object_ids = sorted(list(set(input_object_ids)))
                 object_ids_list.append(input_object_ids)
+
+            video.man_track = new_man_track
         else:
             # If no tracking or single frame, use same objects for all frames
             object_ids_list.extend([object_ids] * (len(frames) - 1))
@@ -123,4 +138,4 @@ class FrameIndexSampler(VOSSampler):
         for j in range(0, min(len(object_ids_list), self.num_frames_track_lost_objects + 1)):
             object_ids_list[j] = object_ids_list[j] + bkgd_object_ids
 
-        return SampledFramesAndObjects(frames=frames, object_ids_list=object_ids_list)
+        return SampledFramesAndObjects(frames=frames, object_ids_list=object_ids_list, man_track=new_man_track)

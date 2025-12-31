@@ -161,7 +161,10 @@ class CTCRawDataset(VOSRawDataset):
         video = VOSVideo(video_name, int(video_name), frames, man_track)
         
         video_mask_root = self.train_dir / (video_name + "_GT") / "TRA"
-        segment_loader = CTCSegmentLoader(video_mask_root)
+        first_frame_num = re.findall('\d+',selected_frames[0].stem)[0]
+        # Get first mask path (GT) for crop region determination
+        first_mask_path = video_mask_root / ("man_track" + first_frame_num + ".tif")
+        segment_loader = CTCSegmentLoader(video_mask_root, first_mask_path)
 
         return video, segment_loader
 

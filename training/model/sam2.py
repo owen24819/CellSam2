@@ -513,6 +513,8 @@ class SAM2Train(SAM2Base):
     ):
         """Handle cell tracking and division events."""
         # Get cell tracking mask for current frame (filter out padded entries)
+        # You may want to continue to track cells that have exited FOV last frame
+        # e.g. the bkgd points are tracked for 2 frames even tho segment.sum() == 0 where only cls loss would be applied
         cell_tracks_mask = input.cell_tracks_mask[frame_idx][input.is_real[frame_idx]]
         
         # Store pre-division target objects (filter out padded entries)

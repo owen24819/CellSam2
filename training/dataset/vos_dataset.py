@@ -4,8 +4,6 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
  
-from copy import deepcopy
-
 import numpy as np
 import torch
 from PIL import Image as PILImage
@@ -14,7 +12,6 @@ from torchvision.datasets.vision import VisionDataset
 from sam2.utils.misc import read_image
 from training.dataset.vos_raw_dataset import VOSRawDataset
 from training.dataset.vos_sampler import VOSSampler
-from training.dataset.vos_segment_loader import JSONSegmentLoader
 from training.utils.data_utils import Frame, Object, VideoDatapoint
 
 
@@ -27,11 +24,15 @@ class VOSDataset(VisionDataset):
         sampler: VOSSampler,
         multiplier: int,
         always_target=True,
+        target_size=512,
+        resize_threshold=600,
     ):
         self._transforms = transforms
         self.training = training
         self.video_dataset = video_dataset
         self.sampler = sampler
+        self.target_size = target_size
+        self.resize_threshold = resize_threshold
 
         self.repeat_factors = torch.ones(len(self.video_dataset), dtype=torch.float32)
         self.repeat_factors *= multiplier
@@ -46,6 +47,8 @@ class VOSDataset(VisionDataset):
             idx = idx.item()
         # sample a video
         video, segment_loader = self.video_dataset.get_video(idx)
+
+        
         # sample frames and object indices to be used in a datapoint
         sampled_frms_and_objs = self.sampler.sample(
             video, segment_loader, epoch=self.curr_epoch
@@ -54,18 +57,24 @@ class VOSDataset(VisionDataset):
         datapoint = self.construct(video, sampled_frms_and_objs, segment_loader)
         for transform in self._transforms:
             datapoint = transform(datapoint, epoch=self.curr_epoch)
+        
         return datapoint
-
+    
     def construct(self, video, sampled_frms_and_objs, segment_loader):
         """
-        Constructs a VideoDatapoint sample to pass to transforms
+        Constructs a VideoDatapoint sample to pass to transforms.
+        Only tracks cells that appear in the first frame. If a cell leaves and comes back,
+        it is not tracked.
         """
         sampled_frames = sampled_frms_and_objs.frames
         sampled_object_ids_list = sampled_frms_and_objs.object_ids_list
         man_track = video.man_track
 
         images = []
-        rgb_images = load_images(sampled_frames)
+        crop_region = getattr(segment_loader, 'crop_region', None)
+        rgb_images = load_images(sampled_frames, crop_region)
+        # After crop, images are target_size x target_size if cropped, otherwise original size
+        final_size = (self.target_size, self.target_size) if crop_region is not None else rgb_images[0].size[::-1]
         # Iterate over the sampled frames and store their rgb data and object data (bbox, segment)
         for frame_idx, (frame, sampled_object_ids) in enumerate(zip(sampled_frames, sampled_object_ids_list)):
             w, h = rgb_images[frame_idx].size
@@ -77,12 +86,7 @@ class VOSDataset(VisionDataset):
                 )
             )
             # We load the gt segments associated with the current frame
-            if isinstance(segment_loader, JSONSegmentLoader):
-                segments = segment_loader.load(
-                    frame.frame_idx, obj_ids=sampled_object_ids
-                )
-            else:
-                segments = segment_loader.load(frame.frame_idx)
+            segments = segment_loader.load(frame.frame_idx)
 
             for obj_id in sampled_object_ids:
                 # Extract the segment
@@ -156,7 +160,7 @@ class VOSDataset(VisionDataset):
         return VideoDatapoint(
             frames=images,
             video_id=video.video_id,
-            size=(h, w),
+            size=final_size,
             man_track=man_track,
         )
 
@@ -167,19 +171,17 @@ class VOSDataset(VisionDataset):
         return len(self.video_dataset)
 
 
-def load_images(frames):
+def load_images(frames, crop_region=None):
     all_images = []
-    cache = {}
     for frame in frames:
         if frame.data is None:
             # Load the frame rgb data from file
             path = frame.image_path
-            if path in cache:
-                all_images.append(deepcopy(all_images[cache[path]]))
-                continue
             image = read_image(path)
+            if crop_region is not None:
+                top, left, bottom, right = crop_region
+                image = image.crop((left, top, right, bottom))
             all_images.append(image)
-            cache[path] = len(all_images) - 1
         else:
             # The frame rgb data has already been loaded
             # Convert it to a PILImage
