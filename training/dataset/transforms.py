@@ -93,7 +93,7 @@ def resize(datapoint, index, size, max_size=None, square=False, v2=False):
 
 
 def pad(datapoint, index, padding, v2=False):
-    old_h, old_w = datapoint.frames[index].size
+    old_h, old_w = datapoint.frames[index].data.size
     h, w = old_h, old_w
     if len(padding) == 2:
         # assumes that we only pad on the bottom right corners
