@@ -138,4 +138,11 @@ class FrameIndexSampler(VOSSampler):
         for j in range(0, min(len(object_ids_list), self.num_frames_track_lost_objects + 1)):
             object_ids_list[j] = object_ids_list[j] + bkgd_object_ids
 
+        # Only keep frames where objects are being tracked
+        # Discard frames where nothing is being tracked (even lost / bkgd objects)
+        keep = [idx for idx, object_ids in enumerate(object_ids_list) if len(object_ids) > 0]        
+
+        frames = [frames[i] for i in keep]
+        object_ids_list = [object_ids_list[i] for i in keep]
+
         return SampledFramesAndObjects(frames=frames, object_ids_list=object_ids_list, man_track=new_man_track)
