@@ -70,8 +70,8 @@ class CTCSegmentLoader:
         # Ensure we don't go out of bounds
         top = min(max(0,top), max(0, h - target_size))
         left = min(max(0,left), max(0, w - target_size))
-        bottom = top + target_size
-        right = left + target_size
+        bottom = min(top + target_size, h)
+        right = min(left + target_size, w)
         
         return (top, left, bottom, right)
 
