@@ -216,9 +216,9 @@ def collate_fn(
                     dividing_centroids[obj.object_id] = centroid                        
                     continue 
 
-                if obj.daughter_ids.sum() == 2:
+                if (obj.daughter_ids > 0).sum() == 2:
                     step_t_daughter_ids[t].append(obj.daughter_ids)
-                elif obj.daughter_ids.sum() == 1:
+                elif (obj.daughter_ids > 0).sum() == 1:
                     step_t_daughter_ids[t].append(torch.tensor([obj.daughter_ids[0], 0], dtype=torch.int32))
                 else:
                     step_t_daughter_ids[t].append(torch.zeros((2), dtype=torch.int32))
@@ -231,10 +231,10 @@ def collate_fn(
 
                 # Skip the mask of the mother cell dividing since we will use the daugher cells masks instead
                 # The mother cell is the input and the daughter cells are the outputs
-                if obj.daughter_ids.sum() == 0:
+                if (obj.daughter_ids > 0).sum() == 0:
                     step_t_masks[t].append(obj.segment.to(torch.bool))
                     step_t_centroids[t].append(centroid)
-                elif obj.daughter_ids.sum() == 1:
+                elif (obj.daughter_ids > 0).sum() == 1:
                     dau_id = obj.daughter_ids[0]
                     dau_obj = next((o for o in objects if o.object_id == dau_id), None)
                     if dau_obj is not None:
@@ -246,15 +246,15 @@ def collate_fn(
                 )
                 step_t_frame_orig_size[t].append(torch.tensor(orig_frame_size))
 
-                step_t_cell_divides[t].append(obj.daughter_ids.sum() == 2)
+                step_t_cell_divides[t].append((obj.daughter_ids > 0).sum() == 2)
                 # This signifies that a cell is being tracked to the next frame regardless if it exists in the next frame or not
                 # This keeps track of cells being tracked after exiting the current frame for VOSSampler.num_frames_track_lost_objects frames
                 # The VOS Sampler decides the number of frames we track object after it exits
                 step_t_cell_tracks_mask[t].append((obj.is_in_next_object_ids_list))
-                step_t_target_obj_mask[t].append(obj.segment.sum() > 0 or obj.daughter_ids.sum() > 0)
+                step_t_target_obj_mask[t].append(obj.segment.sum() > 0 or (obj.daughter_ids > 0).sum() > 0)
 
             for daughter_ids in step_t_daughter_ids[t]:
-                if daughter_ids.sum() == 2:
+                if (daughter_ids > 0).sum() == 2:
                     for daughter_id in daughter_ids:
                         step_t_masks[t].append(dividing_masks[int(daughter_id)])
                         step_t_centroids[t].append(dividing_centroids[int(daughter_id)])
