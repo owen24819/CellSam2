@@ -94,7 +94,7 @@ class FrameIndexSampler(VOSSampler):
                 
                 for object_id, segment in segment_loader.load(frame.frame_idx).items():
                     if isinstance(object_id, int):
-                        parent_id = video.man_track[video.man_track[:, 0] == object_id, -1]
+                        parent_id = video.man_track[video.man_track[:, 0] == object_id, -1][0]
                         
                         # Filter to only include: (1) cells that were present in the previous frame (tracked),
                         # or (2) daughter cells whose parent was in the previous frame (from division or budding)
