@@ -108,12 +108,9 @@ class FrameIndexSampler(VOSSampler):
                             
                             # Update man_track if cell in previous frame divides with at least one daughter cell in current frame
                             if any([parent_id in object_ids_dict[i-1]]):
-                                dau_cells = video.man_track[video.man_track[:, -1] == parent_id, 0]
-
-                                for dau_cell in dau_cells:
-                                    new_cell_row = np.array([dau_cell, frame.frame_idx, frame.frame_idx, parent_id], dtype=np.int16)
-                                    new_man_track = np.vstack((new_man_track, new_cell_row))
-
+                                new_cell_row = np.array([object_id, frame.frame_idx, frame.frame_idx, parent_id], dtype=np.int16)
+                                new_man_track = np.vstack((new_man_track, new_cell_row))
+                                
                 # Include objects from previous frames within tracking window
                 for j in range(max(0, i-self.num_frames_track_lost_objects), i):
                     input_object_ids.extend(object_ids_dict[j])
