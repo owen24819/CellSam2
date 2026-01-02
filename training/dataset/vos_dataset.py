@@ -106,6 +106,7 @@ class VOSDataset(VisionDataset):
                 parent_id = 0
                 entering = True
                 daughter_ids = torch.zeros((2), dtype=torch.int32)
+                is_dau = False
                 is_in_next_object_ids_list = True
 
                 if man_track is not None and obj_id > 0:
@@ -126,6 +127,11 @@ class VOSDataset(VisionDataset):
                                 man_track[man_track[:,-1] == obj_id, 0], 
                                 dtype=torch.int32
                             )
+
+                        if entering and parent_id > 0:
+                            # Check if parent has exactly 2 daughters (count occurrences of parent_id in last column)
+                            if (man_track[:,-1] == parent_id).sum() == 2:
+                                is_dau = True
                 
                 # Determine if this cell should be tracked in the next frame
                 if frame_idx < len(sampled_object_ids_list) - 1:
@@ -143,6 +149,7 @@ class VOSDataset(VisionDataset):
                         entering=entering,
                         parent_id=parent_id,
                         daughter_ids=daughter_ids,
+                        is_dau=is_dau,
                         is_in_next_object_ids_list=is_in_next_object_ids_list
                     )
                 )

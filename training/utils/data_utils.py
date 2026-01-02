@@ -114,6 +114,7 @@ class Object:
     entering: Optional[bool] = None
     parent_id: Optional[int] = None
     daughter_ids: Optional[torch.Tensor] = None
+    is_dau: Optional[bool] = None
     is_in_next_object_ids_list: Optional[bool] = None
 
 @dataclass
@@ -210,10 +211,9 @@ def collate_fn(
                 centroid = get_centroids_from_mask(obj.segment)
 
                 # Divided cells are only used for the masks since the mother cells are the inputs to the frame
-                if t > 0 and obj.entering and obj.parent_id > 0:                 
-                    if obj.daughter_ids.sum() == 2:
-                        dividing_masks[obj.object_id] = obj.segment.to(torch.bool)
-                        dividing_centroids[obj.object_id] = centroid                        
+                if obj.is_dau:                 
+                    dividing_masks[obj.object_id] = obj.segment.to(torch.bool)
+                    dividing_centroids[obj.object_id] = centroid                        
                     continue 
 
                 if obj.daughter_ids.sum() == 2:
