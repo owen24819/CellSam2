@@ -94,6 +94,8 @@ class CTCSegmentLoader:
                 top, left, bottom, right = self.crop_region
                 segment = segment[top:bottom, left:right]
 
+            segments[int(inst_id)] = segment
+
         # Dilate background mask to avoid points touching objects to ensure there is no confusion between FPs being interpreted as objects
         kernel = np.ones((3,3), np.uint8)
         bkgd_mask_dilated = cv2.erode((mask == 0).astype(np.uint8), kernel, iterations=2) # Erode background = dilate objects
