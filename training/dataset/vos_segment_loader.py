@@ -94,7 +94,9 @@ class CTCSegmentLoader:
                 top, left, bottom, right = self.crop_region
                 segment = segment[top:bottom, left:right]
 
-            segments[int(inst_id)] = segment
+            # Assume 
+            if segment.sum() > 10:
+                segments[int(inst_id)] = segment
 
         # Dilate background mask to avoid points touching objects to ensure there is no confusion between FPs being interpreted as objects
         kernel = np.ones((3,3), np.uint8)
