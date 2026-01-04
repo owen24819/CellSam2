@@ -114,7 +114,8 @@ class Object:
     entering: Optional[bool] = None
     parent_id: Optional[int] = None
     daughter_ids: Optional[torch.Tensor] = None
-    is_dau: Optional[bool] = None
+    is_two_dau: Optional[bool] = None
+    is_one_dau: Optional[bool] = None
     is_in_next_object_ids_list: Optional[bool] = None
 
 @dataclass
@@ -210,8 +211,11 @@ def collate_fn(
 
                 centroid = get_centroids_from_mask(obj.segment)
 
+                if obj.is_one_dau:
+                    continue
+
                 # Divided cells are only used for the masks since the mother cells are the inputs to the frame
-                if obj.is_dau:                 
+                if obj.is_two_dau:                 
                     dividing_masks[obj.object_id] = obj.segment.to(torch.bool)
                     dividing_centroids[obj.object_id] = centroid                        
                     continue 
