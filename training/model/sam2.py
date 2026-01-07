@@ -537,15 +537,21 @@ class SAM2Train(SAM2Base):
 
         # Update tracking object IDs to account for cell division
         prev_tracking_object_ids = tracking_object_ids.clone()
-        mother_ids = tracking_object_ids[is_dividing]
+        assert (tracking_object_ids == input.metadata.unique_objects_identifier[frame_idx][input.is_real[frame_idx]][:, 1]).all(), "Tracking object IDs do not match the input object IDs"
+
         
         # Get new daughter cell IDs (filter out padded entries)
-        new_daughter_ids = input.daughter_ids[frame_idx][input.is_real[frame_idx]].flatten()
-        new_daughter_ids = new_daughter_ids[new_daughter_ids > 0]
+        daughter_ids = input.daughter_ids[frame_idx][input.is_real[frame_idx]]
+        mother_ids = tracking_object_ids[(daughter_ids > 0).any(1)]
         
-        # Update tracking object IDs - swap out mother ID with daughter IDs
-        tracking_object_ids = torch.cat((tracking_object_ids[~is_dividing], new_daughter_ids))
+        # For cell that divides into one daughter cell, swap out mother ID with daughter ID
+        one_dau_mask = (daughter_ids > 0).sum(1) == 1
+        tracking_object_ids[one_dau_mask] = daughter_ids[one_dau_mask,0]
         
+        # For cell that divides into two daughter cells, remove mother ID and add daughter IDs at end
+        two_daughter_ids = daughter_ids[(daughter_ids > 0).all(1)].flatten()
+        tracking_object_ids = torch.cat((tracking_object_ids[~is_dividing], two_daughter_ids))
+
         # Filter out objects that are no longer tracked
         tracking_object_ids = tracking_object_ids[keep_tokens_mask]
 

@@ -230,7 +230,7 @@ def collate_fn(
                 orig_obj_id = obj.object_id
                 orig_frame_idx = obj.frame_index
                 step_t_obj_to_frame_idx[t].append(
-                    torch.tensor([t, video_idx], dtype=torch.int)
+                    torch.tensor([t, video_idx], dtype=torch.int32)
                 )
 
                 # Skip the mask of the mother cell dividing since we will use the daugher cells masks instead
@@ -246,7 +246,7 @@ def collate_fn(
                         step_t_centroids[t].append(get_centroids_from_mask(dau_obj.segment))
 
                 step_t_objects_identifier[t].append(
-                    torch.tensor([orig_video_id, orig_obj_id, orig_frame_idx])
+                    torch.tensor([orig_video_id, orig_obj_id, orig_frame_idx], dtype=torch.int32)
                 )
                 step_t_frame_orig_size[t].append(torch.tensor(orig_frame_size))
 
@@ -271,7 +271,7 @@ def collate_fn(
     # Handle empty lists to prevent stack errors
     for t in range(T):
         if not step_t_obj_to_frame_idx[t]:
-            step_t_obj_to_frame_idx[t].append(torch.tensor([t, 0], dtype=torch.int))
+            step_t_obj_to_frame_idx[t].append(torch.tensor([t, 0], dtype=torch.int32))
             step_t_masks[t].append(torch.zeros((H, W), dtype=torch.bool))
             step_t_objects_identifier[t].append(torch.tensor([0, 0, 0]))
             step_t_frame_orig_size[t].append(torch.tensor([H, W]))
