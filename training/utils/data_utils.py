@@ -262,9 +262,9 @@ def collate_fn(
             step_t_masks[t].append(torch.zeros((H, W), dtype=torch.bool))
             step_t_objects_identifier[t].append(torch.tensor([0, 0, 0]))
             step_t_frame_orig_size[t].append(torch.tensor([H, W]))
-            step_t_cell_divides[t].append(torch.zeros(1, dtype=torch.bool))
-            step_t_cell_tracks_mask[t].append(torch.zeros(1, dtype=torch.bool))
-            step_t_target_obj_mask[t].append(torch.zeros(1, dtype=torch.bool))
+            step_t_cell_divides[t].append(torch.tensor(False))
+            step_t_cell_tracks_mask[t].append(torch.tensor(False))
+            step_t_target_obj_mask[t].append(torch.tensor(False))
             step_t_daughter_ids[t].append(torch.zeros((2), dtype=torch.int32))
             step_t_centroids[t].append(torch.zeros((2), dtype=torch.float32))
 
