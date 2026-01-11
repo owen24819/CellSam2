@@ -91,33 +91,48 @@ class FrameIndexSampler(VOSSampler):
                 # Get all object ids in the current frame
                 object_ids_dict[i] = []
                 input_object_ids = []
+                daus = {}
                 
                 for object_id, segment in segment_loader.load(frame.frame_idx).items():
                     if isinstance(object_id, int):
-                        parent_id = video.man_track[video.man_track[:, 0] == object_id, -1][0]
+                        parent_id = int(video.man_track[video.man_track[:, 0] == object_id, -1][0])
                         
                         # Filter to only include: (1) cells that were present in the previous frame (tracked),
                         # or (2) daughter cells whose parent was in the previous frame (from division or budding)
                         if any([object_id in object_ids_dict[i-1]]) or any([parent_id in object_ids_dict[i-1]]):
-                            input_object_ids.append(object_id)
                             object_ids_dict[i].append(object_id)
 
                             # Update man_track if cell tracks to next frame
                             if any([object_id in object_ids_dict[i-1]]):
+                                input_object_ids.append(object_id)
                                 new_man_track[new_man_track[:, 0] == object_id, 2] = frame.frame_idx
                             
                             # Update man_track if cell in previous frame divides with at least one daughter cell in current frame
                             if any([parent_id in object_ids_dict[i-1]]):
                                 new_cell_row = np.array([object_id, frame.frame_idx, frame.frame_idx, parent_id], dtype=np.int16)
                                 new_man_track = np.vstack((new_man_track, new_cell_row))
+
+                                daus.setdefault(parent_id, []).append(object_id)
                                 
                 # Include objects from previous frames within tracking window
                 for j in range(max(0, i-self.num_frames_track_lost_objects), i):
                     input_object_ids.extend(object_ids_dict[j])
                 
-                # Remove duplicates and sort
-                input_object_ids = sorted(list(set(input_object_ids)))
-                object_ids_list.append(input_object_ids)
+                # Order: maintain order from previous frame for common IDs, then append new IDs sorted, then division cells grouped by parent_id
+                previous_order = object_ids_list[i-1]
+                previous_ids = set(previous_order)
+                current_ids = set(input_object_ids)
+                
+                # Keep IDs that appear in both lists, maintaining previous order
+                ordered_ids = [obj_id for obj_id in previous_order if obj_id in current_ids]
+                # Add new IDs that weren't in previous frame, sorted
+                new_ids = sorted([obj_id for obj_id in current_ids if obj_id not in previous_ids])
+                # Create div_ids from daus dict, ordered by parent_id (sorted parents, sorted daughters within each group)
+                div_ids = [dau_id for parent_id in sorted(daus.keys()) for dau_id in sorted(daus[parent_id])]
+                
+                ordered_input_object_ids = ordered_ids + new_ids + div_ids
+                
+                object_ids_list.append(ordered_input_object_ids)
 
             video.man_track = new_man_track
         else:
