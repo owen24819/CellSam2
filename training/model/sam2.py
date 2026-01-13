@@ -442,7 +442,7 @@ class SAM2Train(SAM2Base):
         )
 
         # Apply iterative correction points if needed
-        if frame_idx in frames_to_add_correction_pt and keep_tokens_mask.sum() > 0:
+        if frame_idx in frames_to_add_correction_pt and is_used.sum() > 0:
             assert frame_idx == 0 and is_dividing.sum() == 0
             # Only add points to first frame
             # Maybe adapt this for other frames but will need to handle dividing cells
