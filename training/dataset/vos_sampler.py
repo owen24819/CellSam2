@@ -84,6 +84,9 @@ class FrameIndexSampler(VOSSampler):
 
         # Handle object tracking if needed
         if video.man_track is not None and len(frames) > 1:
+
+            lost_object_ids_dict = {i: [] for i in range(len(frames))}
+
             for i, frame in enumerate(frames):
                 if i == 0:
                     continue
@@ -92,10 +95,14 @@ class FrameIndexSampler(VOSSampler):
                 object_ids_dict[i] = []
                 input_object_ids = []
                 daus = {}
+                parents = []
                 
                 for object_id, segment in segment_loader.load(frame.frame_idx).items():
                     if isinstance(object_id, int):
                         parent_id = int(video.man_track[video.man_track[:, 0] == object_id, -1][0])
+
+                        if parent_id > 0:
+                            parents.append(parent_id)
                         
                         # Filter to only include: (1) cells that were present in the previous frame (tracked),
                         # or (2) daughter cells whose parent was in the previous frame (from division or budding)
@@ -113,24 +120,36 @@ class FrameIndexSampler(VOSSampler):
                                 new_man_track = np.vstack((new_man_track, new_cell_row))
 
                                 daus.setdefault(parent_id, []).append(object_id)
+
+                lost_object_ids_dict[i-1] = [obj_id for obj_id in object_ids_dict[i-1] if obj_id not in object_ids_dict[i] and obj_id not in parents]
                                 
                 # Include objects from previous frames within tracking window
                 for j in range(max(0, i-self.num_frames_track_lost_objects), i):
-                    input_object_ids.extend(object_ids_dict[j])
+                    input_object_ids.extend(lost_object_ids_dict[j])
+
+                # Post-process daus: find all parent_ids with a single daughter (len==1), collect these, and remove them from daus
+                assert all(len(obj_ids) == 1 or len(obj_ids) == 2 for obj_ids in daus.values()), "Each parent_id must have either 1 or 2 daughters"
+                single_dau_items = {parent_id: obj_ids for parent_id, obj_ids in daus.items() if len(obj_ids) == 1}
+                two_dau_items = {parent_id: obj_ids for parent_id, obj_ids in daus.items() if len(obj_ids) == 2}
+
+                # Optionally: now daus contains only those with 2 daughters
+                daus = two_dau_items
                 
                 # Order: maintain order from previous frame for common IDs, then append new IDs sorted, then division cells grouped by parent_id
-                previous_order = object_ids_list[i-1]
-                previous_ids = set(previous_order)
-                current_ids = set(input_object_ids)
+                previous_ids_ordered = object_ids_list[i-1]
                 
-                # Keep IDs that appear in both lists, maintaining previous order
-                ordered_ids = [obj_id for obj_id in previous_order if obj_id in current_ids]
-                # Add new IDs that weren't in previous frame, sorted
-                new_ids = sorted([obj_id for obj_id in current_ids if obj_id not in previous_ids])
+                # data_utils.py needs both the mother and daughter cells when processing inputs
+                # If a cell exits the FOV, then we add it ot hte lost_object_ids_dict where it can be added back for self.num_frames_track_lost_objects frames
+                # This use case is for when an cell may disappear then reappear. Also we can further train the model extra frames that the cell is not in the FOV
+                ordered_ids = []
+                for obj_id in previous_ids_ordered:
+                    if obj_id in input_object_ids or obj_id in two_dau_items.keys() or obj_id in single_dau_items.keys():
+                        ordered_ids.append(obj_id)
+
                 # Create div_ids from daus dict, ordered by parent_id (sorted parents, sorted daughters within each group)
                 div_ids = [dau_id for parent_id in sorted(daus.keys()) for dau_id in sorted(daus[parent_id])]
                 
-                ordered_input_object_ids = ordered_ids + new_ids + div_ids
+                ordered_input_object_ids = ordered_ids + div_ids
                 
                 object_ids_list.append(ordered_input_object_ids)
 
