@@ -430,7 +430,7 @@ class SAM2Train(SAM2Base):
         )
 
         current_out["heatmap_predictions"] = self.get_heatmap_predictions(current_vision_feats, feat_sizes)[0,0] # assume batch size is 1
-
+        is_used = tracking_object_ids > 0
         # Handle cell tracking and division
         keep_tokens_mask, tracking_object_ids, mother_ids, prev_tracking_object_ids = self._handle_cell_tracking(
             current_out,
@@ -453,6 +453,7 @@ class SAM2Train(SAM2Base):
                 pix_feat,
                 current_out,
                 keep_tokens_mask,
+                is_used=is_used
             )
 
         # Adjust vision features based on token count changes
@@ -521,6 +522,8 @@ class SAM2Train(SAM2Base):
         pre_div_target_obj = input.target_obj_mask[frame_idx][input.is_real[frame_idx]].float()[:,None]
         current_out["pre_div_target_obj"] = [pre_div_target_obj]
 
+        current_out["target_obj_divides"] = [is_dividing.float()[:,None]]
+
         # Create mask for tokens to keep after division
         post_div_target_obj = torch.cat((
             pre_div_target_obj[~is_dividing], 
@@ -538,7 +541,6 @@ class SAM2Train(SAM2Base):
         # Update tracking object IDs to account for cell division
         prev_tracking_object_ids = tracking_object_ids.clone()
         assert (tracking_object_ids == input.metadata.unique_objects_identifier[frame_idx][input.is_real[frame_idx]][:, 1]).all(), "Tracking object IDs do not match the input object IDs"
-
         
         # Get new daughter cell IDs (filter out padded entries)
         daughter_ids = input.daughter_ids[frame_idx][input.is_real[frame_idx]]
@@ -634,6 +636,7 @@ class SAM2Train(SAM2Base):
         pix_feat_with_mem,
         current_out,
         keep_tokens_mask,
+        is_used,
     ):
         """
         Iteratively sample correction points to improve mask predictions.
@@ -650,18 +653,18 @@ class SAM2Train(SAM2Base):
             Updated current_out dictionary with iterative correction results
         """
         # Filter inputs based on keep_tokens_mask
-        gt_masks = gt_masks[keep_tokens_mask]
-        high_res_features = [feat[keep_tokens_mask] for feat in high_res_features]
-        pix_feat_with_mem = pix_feat_with_mem[keep_tokens_mask]
+        gt_masks = gt_masks[is_used]
+        high_res_features = [feat[is_used] for feat in high_res_features]
+        pix_feat_with_mem = pix_feat_with_mem[is_used]
         
         point_inputs = {
-            'point_coords': point_inputs['point_coords'][keep_tokens_mask],
-            'point_labels': point_inputs['point_labels'][keep_tokens_mask],
+            'point_coords': point_inputs['point_coords'][is_used],
+            'point_labels': point_inputs['point_labels'][is_used],
         }
         
         # Get initial masks from the first prediction step
-        low_res_masks = current_out["multistep_pred_masks"][0][keep_tokens_mask]
-        high_res_masks = current_out["multistep_pred_masks_high_res"][0][keep_tokens_mask]
+        low_res_masks = current_out["multistep_pred_masks"][0][is_used]
+        high_res_masks = current_out["multistep_pred_masks_high_res"][0][is_used]
         is_dividing = torch.zeros(low_res_masks.shape[0], dtype=torch.bool)
         
         assert gt_masks is not None, "Ground truth masks required for correction point sampling"
@@ -728,14 +731,15 @@ class SAM2Train(SAM2Base):
             current_out["multistep_object_score_logits"].append(object_score_logits_dict["pre_div"])
             current_out["multistep_div_score_logits"].append(div_score_logits)
             current_out["post_split_object_score_logits"].append(object_score_logits_dict["post_div"])
-            current_out["multistep_is_point_used"].append(keep_tokens_mask)
+            current_out["multistep_is_point_used"].append(is_used)
             
-            current_out["pre_div_target_obj"].append(current_out["pre_div_target_obj"][0].clone())
-            current_out["post_div_target_obj"].append(current_out["post_div_target_obj"][0].clone())
+            current_out["pre_div_target_obj"].append(current_out["pre_div_target_obj"][0].clone()[is_used])
+            current_out["post_div_target_obj"].append(current_out["post_div_target_obj"][0].clone()[is_used])
+            current_out["target_obj_divides"].append(current_out["target_obj_divides"][0].clone()[is_used])
         
         # Update final predictions for memory encoder
-        current_out["obj_ptr"] = obj_ptr
-        current_out["pred_masks"] = low_res_masks
-        current_out["pred_masks_high_res"] = high_res_masks
+        current_out["obj_ptr"][is_used[keep_tokens_mask]] = obj_ptr[keep_tokens_mask[is_used]]
+        current_out["pred_masks"][is_used[keep_tokens_mask]] = low_res_masks[keep_tokens_mask[is_used]]
+        current_out["pred_masks_high_res"][is_used[keep_tokens_mask]] = high_res_masks[keep_tokens_mask[is_used]]
         
         return current_out

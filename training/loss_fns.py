@@ -217,6 +217,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
 
         pre_div_target_obj_list = outputs["pre_div_target_obj"]
         post_div_target_obj_list = outputs["post_div_target_obj"]
+        target_obj_divides_list = outputs["target_obj_divides"]
 
         heatmap_predictions = outputs["heatmap_predictions"]
 
@@ -232,20 +233,21 @@ class MultiStepMultiMasksAndIous(nn.Module):
 
         # accumulate the loss over prediction steps
         losses = {"loss_mask": 0, "loss_dice": 0, "loss_iou": 0, "loss_div": 0, "loss_class": 0, "loss_heatmap": loss_heatmap}
-        for src_masks, ious, object_score_logits, div_score_logits, is_point_used, pre_div_target_obj, post_div_target_obj in zip(src_masks_list, ious_list, object_score_logits_list, div_score_logits_list, is_point_used_list, pre_div_target_obj_list, post_div_target_obj_list):
+        for src_masks, ious, object_score_logits, div_score_logits, is_point_used, pre_div_target_obj, post_div_target_obj, target_obj_divides in zip(src_masks_list, ious_list, object_score_logits_list, div_score_logits_list, is_point_used_list, pre_div_target_obj_list, post_div_target_obj_list, target_obj_divides_list):
             target_masks_used = target_masks[is_point_used]
+
             assert len(target_masks_used) == len(src_masks)
 
             num_objects = torch.tensor(max(1, src_masks.shape[0]), device=src_masks.device, dtype=torch.float)
 
             self._update_losses(
-                losses, src_masks, target_masks_used, ious, num_objects, object_score_logits, div_score_logits, pre_div_target_obj, post_div_target_obj, target_divide
+                losses, src_masks, target_masks_used, ious, num_objects, object_score_logits, div_score_logits, pre_div_target_obj, post_div_target_obj, target_obj_divides
             )
         losses[CORE_LOSS_KEY] = self.reduce_loss(losses)
         return losses
 
     def _update_losses(
-        self, losses, src_masks, target_masks, ious, num_objects, object_score_logits, div_score_logits, pre_div_target_obj, post_div_target_obj, target_divide
+        self, losses, src_masks, target_masks, ious, num_objects, object_score_logits, div_score_logits, pre_div_target_obj, post_div_target_obj, target_obj_divides
     ):
         target_masks = target_masks.expand_as(src_masks)
 
@@ -275,7 +277,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
 
         loss_div = sigmoid_focal_loss(
             div_score_logits,
-            target_divide[:,None].to(torch.float),
+            target_obj_divides,
             num_objects,
             alpha=self.focal_alpha_obj_score,
             gamma=self.focal_gamma_obj_score,
