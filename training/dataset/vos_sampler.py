@@ -150,8 +150,9 @@ class FrameIndexSampler(VOSSampler):
                     if obj_id in input_object_ids or obj_id in two_dau_items.keys() or obj_id in single_dau_items.values() or obj_id in single_dau_items.keys():
                         ordered_ids.append(obj_id)
 
-                # Create div_ids from daus dict, ordered by parent_id (sorted parents, sorted daughters within each group)
-                div_ids = [dau_id for parent_id in sorted(daus.keys()) for dau_id in sorted(daus[parent_id])]
+                # Create div_ids from daus dict, ordered by parent_id based on previous_ids_ordered
+                parent_ids_in_order = [pid for pid in previous_ids_ordered if pid in daus]
+                div_ids = [dau_id for parent_id in parent_ids_in_order for dau_id in sorted(daus[parent_id])]
                 
                 ordered_input_object_ids = ordered_ids + div_ids
                 
