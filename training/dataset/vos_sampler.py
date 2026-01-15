@@ -129,21 +129,25 @@ class FrameIndexSampler(VOSSampler):
 
                 # Post-process daus: find all parent_ids with a single daughter (len==1), collect these, and remove them from daus
                 assert all(len(obj_ids) == 1 or len(obj_ids) == 2 for obj_ids in daus.values()), "Each parent_id must have either 1 or 2 daughters"
-                single_dau_items = {parent_id: obj_ids for parent_id, obj_ids in daus.items() if len(obj_ids) == 1}
+                single_dau_items = {parent_id: obj_ids[0] for parent_id, obj_ids in daus.items() if len(obj_ids) == 1}
                 two_dau_items = {parent_id: obj_ids for parent_id, obj_ids in daus.items() if len(obj_ids) == 2}
 
                 # Optionally: now daus contains only those with 2 daughters
                 daus = two_dau_items
                 
-                # Order: maintain order from previous frame for common IDs, then append new IDs sorted, then division cells grouped by parent_id
-                previous_ids_ordered = object_ids_list[i-1]
-                
+                # Insert single daughters next to their parent_ids in the ordered list
+                previous_ids_ordered = []
+                for obj_id in object_ids_list[i-1]:
+                    previous_ids_ordered.append(obj_id)
+                    if obj_id in single_dau_items:
+                        previous_ids_ordered.append(single_dau_items[obj_id])
+
                 # data_utils.py needs both the mother and daughter cells when processing inputs
                 # If a cell exits the FOV, then we add it ot hte lost_object_ids_dict where it can be added back for self.num_frames_track_lost_objects frames
                 # This use case is for when an cell may disappear then reappear. Also we can further train the model extra frames that the cell is not in the FOV
                 ordered_ids = []
                 for obj_id in previous_ids_ordered:
-                    if obj_id in input_object_ids or obj_id in two_dau_items.keys() or obj_id in single_dau_items.keys():
+                    if obj_id in input_object_ids or obj_id in two_dau_items.keys() or obj_id in single_dau_items.values() or obj_id in single_dau_items.keys():
                         ordered_ids.append(obj_id)
 
                 # Create div_ids from daus dict, ordered by parent_id (sorted parents, sorted daughters within each group)
