@@ -58,13 +58,19 @@ class CTCRawDataset(VOSRawDataset):
                  file_list_txt=None,
                  excluded_videos_list_txt=None,
                  truncate_video=-1,
-                 sample_rate=1):
+                 sample_rate=1,
+                 target_size=512,
+                 resize_threshold=600,
+                 training=True):
         
         self.train_dir = Path(train_dir)
         self.img_folders = list(self.train_dir.glob("[0-9][0-9]"))
         self.num_frames = num_frames
         self.truncate_video = truncate_video
         self.sample_rate = sample_rate
+        self.target_size = target_size
+        self.resize_threshold = resize_threshold
+        self.training = training
 
         # Read the subset defined in file_list_txt
         if file_list_txt is not None:
@@ -164,7 +170,13 @@ class CTCRawDataset(VOSRawDataset):
         first_frame_num = re.findall('\d+',selected_frames[0].stem)[0]
         # Get first mask path (GT) for crop region determination
         first_mask_path = video_mask_root / ("man_track" + first_frame_num + ".tif")
-        segment_loader = CTCSegmentLoader(video_mask_root, first_mask_path)
+        segment_loader = CTCSegmentLoader(
+            video_mask_root, 
+            first_mask_path, 
+            target_size=self.target_size, 
+            resize_threshold=self.resize_threshold, 
+            training=self.training
+            )
 
         return video, segment_loader
 

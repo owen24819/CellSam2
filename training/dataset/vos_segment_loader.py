@@ -19,20 +19,14 @@ from PIL import Image as PILImage
 
 
 class CTCSegmentLoader:
-    def __init__(self, video_mask_path, first_mask_path=None, target_size=512, 
-                 resize_threshold=600, training=True, crop_region=None):
-        self.mask_paths = sorted(list((video_mask_path).glob("*.tif")))
+    def __init__(self, video_mask_path, first_mask_path, target_size, 
+                 resize_threshold, training):
         
-        # Determine crop region if parameters are provided
-        if crop_region is not None:
-            self.crop_region = crop_region
-        elif first_mask_path is not None:
-            self.crop_region = self._determine_crop_region(
-                first_mask_path, target_size, resize_threshold, training
-            )
-        else:
-            self.crop_region = None
-    
+        self.mask_paths = sorted(list((video_mask_path).glob("*.tif")))
+        self.crop_region = self._determine_crop_region(
+            first_mask_path, target_size, resize_threshold, training
+        )
+
     def _determine_crop_region(self, first_mask_path: str, target_size: int, 
                                resize_threshold: int, training: bool) -> Optional[Tuple[int, int, int, int]]:
         """Determine crop region: 10% random, 90% center on random cell for training; always center crop for validation."""

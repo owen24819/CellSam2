@@ -19,20 +19,17 @@ class VOSDataset(VisionDataset):
     def __init__(
         self,
         transforms,
-        training: bool,
         video_dataset: VOSRawDataset,
         sampler: VOSSampler,
         multiplier: int,
         always_target=True,
         target_size=512,
-        resize_threshold=600,
-    ):
+        ):
+
         self._transforms = transforms
-        self.training = training
         self.video_dataset = video_dataset
         self.sampler = sampler
         self.target_size = target_size
-        self.resize_threshold = resize_threshold
 
         self.repeat_factors = torch.ones(len(self.video_dataset), dtype=torch.float32)
         self.repeat_factors *= multiplier
