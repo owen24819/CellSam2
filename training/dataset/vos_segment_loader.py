@@ -23,49 +23,53 @@ class CTCSegmentLoader:
                  resize_threshold, training):
         
         self.mask_paths = sorted(list((video_mask_path).glob("*.tif")))
-        self.crop_region = self._determine_crop_region(
-            first_mask_path, target_size, resize_threshold, training
-        )
+        self.training = training
+        self.target_size = target_size
+        self.resize_threshold = resize_threshold
+        self.crop_region = self._determine_crop_region(first_mask_path)
 
-    def _determine_crop_region(self, first_mask_path: str, target_size: int, 
-                               resize_threshold: int, training: bool) -> Optional[Tuple[int, int, int, int]]:
+    def _determine_crop_region(self, first_mask_path: str) -> Optional[Tuple[int, int, int, int]]:
         """Determine crop region: 10% random, 90% center on random cell for training; always center crop for validation."""
         # Load first frame image to determine size
         first_mask = tifffile.imread(first_mask_path)
         h, w = first_mask.shape
+        self.full_h = h
+        self.full_w = w
         max_dim = max(h, w)
         
         # Only crop if image is much larger than target
-        if max_dim <= resize_threshold:
+        if max_dim <= self.resize_threshold:
             return None
         
-        top = max(0, (h - target_size) // 2)
-        left = max(0, (w - target_size) // 2)
+        top = max(0, (h - self.target_size) // 2)
+        left = max(0, (w - self.target_size) // 2)
         
         # Determine crop position
-        if training:
             # Training: 10% random crop, 90% center on random cell
-            if random.random() < 0.1:
-                # Random crop
-                top = random.randint(0, max(0, h - target_size))
-                left = random.randint(0, max(0, w - target_size))
-            else:
-                # Load first frame mask to find cells
-                instance_ids = np.unique(first_mask)
-                valid_cells = instance_ids[instance_ids != 0]
+        if self.training and random.random() < 0.1:
+            # Random crop
+            top = random.randint(0, max(0, h - self.target_size))
+            left = random.randint(0, max(0, w - self.target_size))
+        else:
+            # Load first frame mask to find cells
+            instance_ids = np.unique(first_mask)
+            valid_cells = instance_ids[instance_ids != 0]
 
-                # Center crop on random cell
+            # Center crop on random cell
+            if self.training:
                 valid_cell_id= random.choice(valid_cells)
-                where_cell = np.where(first_mask == valid_cell_id)
-                h_cell, w_cell = int(np.median(where_cell[0])), int(np.median(where_cell[1]))
-                top = h_cell - target_size // 2
-                left = w_cell - target_size // 2
+            else:
+                valid_cell_id = valid_cells[0]
+            where_cell = np.where(first_mask == valid_cell_id)
+            h_cell, w_cell = int(np.median(where_cell[0])), int(np.median(where_cell[1]))
+            top = h_cell - self.target_size // 2
+            left = w_cell - self.target_size // 2
         
         # Ensure we don't go out of bounds
-        top = min(max(0,top), max(0, h - target_size))
-        left = min(max(0,left), max(0, w - target_size))
-        bottom = min(top + target_size, h)
-        right = min(left + target_size, w)
+        top = min(max(0,top), max(0, h - self.target_size))
+        left = min(max(0,left), max(0, w - self.target_size))
+        bottom = min(top + self.target_size, h)
+        right = min(left + self.target_size, w)
         
         return (top, left, bottom, right)
 
