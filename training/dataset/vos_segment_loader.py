@@ -41,35 +41,39 @@ class CTCSegmentLoader:
         if max_dim <= self.resize_threshold:
             return None
         
-        top = max(0, (h - self.target_size) // 2)
-        left = max(0, (w - self.target_size) // 2)
+        scale = 1.0 + random.uniform(-0.05, 0.05) if self.training else 1.0
+        crop_h = max(1, int(round(self.target_size * scale)))
+        crop_w = max(1, int(round(self.target_size * scale)))
+        top = max(0, (h - crop_h) // 2)
+        left = max(0, (w - crop_w) // 2)
         
         # Determine crop position
-            # Training: 10% random crop, 90% center on random cell
+        # Training: 10% random crop, 90% center on random cell
         if self.training and random.random() < 0.1:
             # Random crop
-            top = random.randint(0, max(0, h - self.target_size))
-            left = random.randint(0, max(0, w - self.target_size))
+            top = random.randint(0, max(0, h - crop_h))
+            left = random.randint(0, max(0, w - crop_w))
         else:
             # Load first frame mask to find cells
             instance_ids = np.unique(first_mask)
             valid_cells = instance_ids[instance_ids != 0]
+            if valid_cells.size > 0:
 
-            # Center crop on random cell
-            if self.training:
-                valid_cell_id= random.choice(valid_cells)
-            else:
-                valid_cell_id = valid_cells[0]
-            where_cell = np.where(first_mask == valid_cell_id)
-            h_cell, w_cell = int(np.median(where_cell[0])), int(np.median(where_cell[1]))
-            top = h_cell - self.target_size // 2
-            left = w_cell - self.target_size // 2
-        
+                # Center crop on random cell
+                if self.training:
+                    valid_cell_id= random.choice(valid_cells)
+                else:
+                    valid_cell_id = valid_cells[0]
+                where_cell = np.where(first_mask == valid_cell_id)
+                h_cell, w_cell = int(np.median(where_cell[0])), int(np.median(where_cell[1]))
+                top = h_cell - crop_h // 2
+                left = w_cell - crop_w // 2
+            
         # Ensure we don't go out of bounds
-        top = min(max(0,top), max(0, h - self.target_size))
-        left = min(max(0,left), max(0, w - self.target_size))
-        bottom = min(top + self.target_size, h)
-        right = min(left + self.target_size, w)
+        top = min(max(0,top), max(0, h - crop_h))
+        left = min(max(0,left), max(0, w - crop_w))
+        bottom = min(top + crop_h, h)
+        right = min(left + crop_w, w)
         
         return (top, left, bottom, right)
 
