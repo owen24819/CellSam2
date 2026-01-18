@@ -63,8 +63,7 @@ class CTCRawDataset(VOSRawDataset):
                  resize_threshold=600,
                  training=True):
         
-        self.train_dir = Path(train_dir)
-        self.img_folders = list(self.train_dir.glob("[0-9][0-9]"))
+        self.train_dirs = self._resolve_train_dirs(train_dir)
         self.num_frames = num_frames
         self.truncate_video = truncate_video
         self.sample_rate = sample_rate
@@ -77,7 +76,7 @@ class CTCRawDataset(VOSRawDataset):
             with g_pathmgr.open(file_list_txt, "r") as f:
                 subset = [os.path.splitext(line.strip())[0] for line in f]
         else:
-            subset = [img_folder.name for img_folder in self.img_folders]
+            subset = None
 
         # Read and process excluded files if provided
         if excluded_videos_list_txt is not None:
@@ -86,32 +85,47 @@ class CTCRawDataset(VOSRawDataset):
         else:
             excluded_files = []
 
-        # Check if it's not in excluded_files
-        self.video_names = sorted(
-            [video_name for video_name in subset if video_name not in excluded_files]
-        )
+        self.video_entries = []
+        for train_dir_path in self.train_dirs:
+            img_folders = list(Path(train_dir_path).glob("[0-9][0-9]"))
+            if subset is None:
+                video_names = [img_folder.name for img_folder in img_folders]
+            else:
+                video_names = subset
+            video_names = sorted(
+                [video_name for video_name in video_names if video_name not in excluded_files]
+            )
+            for video_name in video_names:
+                self.video_entries.append(
+                    {
+                        "train_dir": Path(train_dir_path),
+                        "video_name": video_name,
+                        "video_id": len(self.video_entries),
+                    }
+                )
 
         # Build index of (video_name, start_frame) pairs
         self.frame_index = []
-        for video_name in self.video_names:
+        for entry_idx, entry in enumerate(self.video_entries):
             # For initialization, we need all frames to know how many starting points we have
-            all_frames = self.get_all_frames(video_name)
+            all_frames = self.get_all_frames(entry_idx)
             
             # For each possible start frame that allows num_frames sequence
             max_start_idx = len(all_frames) - self.num_frames + 1 if self.num_frames > 1 else len(all_frames)
             for i in range(0, max_start_idx):
-                self.frame_index.append((video_name, i))
+                self.frame_index.append((entry_idx, i))
 
     def __len__(self):
         return len(self.frame_index)
 
-    def get_all_frames(self, video_name):
+    def get_all_frames(self, entry_idx):
         """Get a sampled subset of frames from a video.
         Args:
-            video_name: Name of the video
+            entry_idx: Index of the video entry
             start_idx: Starting frame index in the sampled sequence
         """
-        all_frames = sorted((self.train_dir / video_name).glob("*.tif"))
+        entry = self.video_entries[entry_idx]
+        all_frames = sorted((entry["train_dir"] / entry["video_name"]).glob("*.tif"))
         # Apply sampling first since it reduces video size
         all_frames = all_frames[::self.sample_rate]
         # Then truncate if needed
@@ -122,10 +136,13 @@ class CTCRawDataset(VOSRawDataset):
 
     def get_video(self, idx):
         """Get a video starting from the specified frame index"""
-        video_name, start_idx = self.frame_index[idx]
+        entry_idx, start_idx = self.frame_index[idx]
+        entry = self.video_entries[entry_idx]
+        train_dir = entry["train_dir"]
+        video_name = entry["video_name"]
         
         # Get just the frames we need
-        all_frames = self.get_all_frames(video_name)
+        all_frames = self.get_all_frames(entry_idx)
         selected_frames = all_frames[start_idx:start_idx + self.num_frames]
         
         # Create frames list
@@ -135,8 +152,8 @@ class CTCRawDataset(VOSRawDataset):
             frames.append(VOSFrame(fid, image_path=fpath))
             
         # Load man_track if available
-        if (self.train_dir / (video_name + "_GT") / "TRA" / "man_track.txt").exists():
-            man_track = np.loadtxt(self.train_dir / (video_name + "_GT") / "TRA" / "man_track.txt", dtype=np.int16)
+        if (train_dir / (video_name + "_GT") / "TRA" / "man_track.txt").exists():
+            man_track = np.loadtxt(train_dir / (video_name + "_GT") / "TRA" / "man_track.txt", dtype=np.int16)
             # Step 1: Remove parent IDs that appear only once and are positive
             parent_ids, counts = np.unique(man_track[:, -1], return_counts=True)
             single_use_parents = parent_ids[(counts == 1) & (parent_ids > 0)]
@@ -164,9 +181,9 @@ class CTCRawDataset(VOSRawDataset):
         else:
             man_track = None
             
-        video = VOSVideo(video_name, int(video_name), frames, man_track)
+        video = VOSVideo(video_name, entry["video_id"], frames, man_track)
         
-        video_mask_root = self.train_dir / (video_name + "_GT") / "TRA"
+        video_mask_root = train_dir / (video_name + "_GT") / "TRA"
         first_frame_num = re.findall('\d+',selected_frames[0].stem)[0]
         # Get first mask path (GT) for crop region determination
         first_mask_path = video_mask_root / ("man_track" + first_frame_num + ".tif")
@@ -179,6 +196,31 @@ class CTCRawDataset(VOSRawDataset):
             )
 
         return video, segment_loader
+
+    def _resolve_train_dirs(self, train_dir):
+        if isinstance(train_dir, ListConfig):
+            return [Path(p) for p in train_dir]
+        if isinstance(train_dir, (list, tuple)):
+            return [Path(p) for p in train_dir]
+        train_dir_path = Path(train_dir)
+        if train_dir_path.exists():
+            return [train_dir_path]
+        parts = train_dir_path.parts
+        if "all" not in parts:
+            raise FileNotFoundError(f"train_dir not found: {train_dir_path}")
+        all_index = parts.index("all")
+        base_root = Path(*parts[:all_index])
+        suffix = Path(*parts[all_index + 1 :])
+        train_dirs = []
+        for child in base_root.iterdir():
+            candidate = child / suffix
+            if candidate.is_dir():
+                train_dirs.append(candidate)
+        if not train_dirs:
+            raise FileNotFoundError(
+                f"No dataset directories found under {base_root} with suffix {suffix}"
+            )
+        return sorted(train_dirs)
 
 class PNGRawDataset(VOSRawDataset):
     def __init__(
