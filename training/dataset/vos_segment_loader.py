@@ -73,6 +73,22 @@ class CTCSegmentLoader:
         
         return (top, left, bottom, right)
 
+    def _get_frame_crop_region(self, frame_id):
+        if self.crop_region is None:
+            return None
+        if not self.training or random.random() >= 0.5:
+            return self.crop_region
+        top, left, bottom, right = self.crop_region
+        crop_h = bottom - top
+        crop_w = right - left
+        max_shift_y = min(50, int(round(0.05 * crop_h)))
+        max_shift_x = min(50, int(round(0.05 * crop_w)))
+        shift_y = random.randint(-max_shift_y, max_shift_y)
+        shift_x = random.randint(-max_shift_x, max_shift_x)
+        new_top = min(max(0, top + shift_y), max(0, self.full_h - crop_h))
+        new_left = min(max(0, left + shift_x), max(0, self.full_w - crop_w))
+        return (new_top, new_left, new_top + crop_h, new_left + crop_w)
+
     def load(self, frame_id):
         """
         Mimics SAM2 segment loaders by returning a dictionary of binary masks.
@@ -84,12 +100,13 @@ class CTCSegmentLoader:
         instance_ids = instance_ids[instance_ids != 0]
 
         segments = {}
+        crop_region = self._get_frame_crop_region(frame_id)
         for inst_id in instance_ids:
             segment = torch.from_numpy(mask == inst_id)
             
             # Apply crop if needed
-            if self.crop_region is not None:
-                top, left, bottom, right = self.crop_region
+            if crop_region is not None:
+                top, left, bottom, right = crop_region
                 segment = segment[top:bottom, left:right]
 
             # Assume 
@@ -102,8 +119,8 @@ class CTCSegmentLoader:
         bkgd_mask = torch.from_numpy(bkgd_mask_dilated.astype(bool))
         
         # Apply crop to background mask if needed
-        if self.crop_region is not None:
-            top, left, bottom, right = self.crop_region
+        if crop_region is not None:
+            top, left, bottom, right = crop_region
             bkgd_mask = bkgd_mask[top:bottom, left:right]
         
         segments['bkgd_mask'] = bkgd_mask
