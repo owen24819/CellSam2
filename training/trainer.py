@@ -482,16 +482,14 @@ class Trainer:
         T = is_real.shape[0]
         
         targets = [batch.masks[t][is_real_masks[t]] for t in range(T)]
-        target_divide = [batch.cell_divides[t][is_real[t]] for t in range(T)]
         target_heatmaps = [batch.heatmaps[t] for t in range(T)]  # heatmaps are per frame, not per object
         
         batch_size = len(batch.img_batch)
         targets = [target for target, no_inputs in zip(targets, batch.no_inputs) if not no_inputs]
-        target_divide = [target_divide for target_divide, no_inputs in zip(target_divide, batch.no_inputs) if not no_inputs]
         target_heatmaps = [target_heatmaps for target_heatmaps, no_inputs in zip(target_heatmaps, batch.no_inputs) if not no_inputs]
 
         key = batch.dict_key  # key for dataset
-        loss = self.loss[key](outputs, targets, target_divide, target_heatmaps)
+        loss = self.loss[key](outputs, targets, target_heatmaps)
         loss_str = f"Losses/{phase}_{key}_loss"
 
         loss_log_str = os.path.join("Step_Losses", loss_str)

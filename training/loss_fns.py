@@ -182,18 +182,18 @@ class MultiStepMultiMasksAndIous(nn.Module):
         self.iou_use_l1_loss = iou_use_l1_loss
         self.pred_obj_scores = pred_obj_scores
 
-    def forward(self, outs_batch: List[Dict], targets_batch: torch.Tensor, target_divide_batch: torch.Tensor, target_heatmaps_batch: torch.Tensor):
+    def forward(self, outs_batch: List[Dict], targets_batch: torch.Tensor, target_heatmaps_batch: torch.Tensor):
         assert len(outs_batch) == len(targets_batch)
 
         losses = defaultdict(int)
-        for outs, targets, target_divide, target_heatmaps in zip(outs_batch, targets_batch, target_divide_batch, target_heatmaps_batch):
-            cur_losses = self._forward(outs, targets, target_divide, target_heatmaps)
+        for outs, targets, target_heatmaps in zip(outs_batch, targets_batch, target_heatmaps_batch):
+            cur_losses = self._forward(outs, targets, target_heatmaps)
             for k, v in cur_losses.items():
                 losses[k] += v
 
         return losses
 
-    def _forward(self, outputs: Dict, targets: torch.Tensor, target_divide: torch.Tensor, target_heatmaps: torch.Tensor):
+    def _forward(self, outputs: Dict, targets: torch.Tensor, target_heatmaps: torch.Tensor):
         """
         Compute the losses related to the masks: the focal loss and the dice loss.
         and also the MAE or MSE loss between predicted IoUs and actual IoUs.
