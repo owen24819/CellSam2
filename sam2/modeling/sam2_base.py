@@ -274,11 +274,16 @@ class SAM2Base(torch.nn.Module):
             self.obj_ptr_tpos_proj = torch.nn.Identity()
 
         self.heatmap_predictor = torch.nn.Sequential(
-            torch.nn.Conv2d(self.hidden_dim // 8 * 3, self.hidden_dim // 8, kernel_size=3, padding=1),  # Local context
+            torch.nn.Conv2d(self.hidden_dim // 8 * 6, self.hidden_dim // 8, kernel_size=3, padding=1),  # Local context
             torch.nn.ReLU(inplace=True),
             torch.nn.Conv2d(self.hidden_dim // 8, self.hidden_dim // 8, kernel_size=3, padding=1),
             torch.nn.ReLU(inplace=True),
             torch.nn.Conv2d(self.hidden_dim // 8, 1, kernel_size=1),  # Compress to heatmap
+        )
+        self.heatmap_image_proj = torch.nn.Sequential(
+            torch.nn.Conv2d(3, self.hidden_dim // 8, kernel_size=3, padding=1),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Conv2d(self.hidden_dim // 8, self.hidden_dim // 8 * 3, kernel_size=1),
         )
 
         self.feature_dim_reducers = torch.nn.ModuleList([
@@ -1044,7 +1049,7 @@ class SAM2Base(torch.nn.Module):
 
         return memory_dict
     
-    def get_heatmap_predictions(self, current_vision_feats, feat_sizes):
+    def get_heatmap_predictions(self, current_vision_feats, feat_sizes, image_tensor=None):
         """
         Generate heatmap predictions from multi-scale vision features.
         
@@ -1056,7 +1061,7 @@ class SAM2Base(torch.nn.Module):
             torch.Tensor: Predicted heatmap of shape (B, 1, H, H) where H = image_size // 4
         """
         # Define target size for all feature maps
-        heatmap_size = self.image_size // 4
+        heatmap_size = self.image_size
         
         # Process each feature map
         heatmap_vision_feats = []
@@ -1077,6 +1082,18 @@ class SAM2Base(torch.nn.Module):
 
         # Concatenate features along channel dimension
         fused_features = torch.cat(heatmap_vision_feats, dim=1)
+
+        if image_tensor is not None:
+            if image_tensor.dim() == 3:
+                image_tensor = image_tensor.unsqueeze(0)
+            image_tensor = F.interpolate(
+                image_tensor,
+                size=(heatmap_size, heatmap_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+            image_feat = self.heatmap_image_proj(image_tensor)
+            fused_features = torch.cat([fused_features, image_feat], dim=1)
         
         # Generate final heatmap prediction
         heatmap = self.heatmap_predictor(fused_features)

@@ -599,7 +599,10 @@ class SAM2Train(SAM2Base):
         )
 
 
-        heatmap_predictions = self.get_heatmap_predictions(current_vision_feats, feat_sizes)[0,0]
+        image_tensor = input.flat_img_batch[:1]
+        heatmap_predictions = self.get_heatmap_predictions(
+            current_vision_feats, feat_sizes, image_tensor=image_tensor
+        )[0, 0]
         points = self.extract_peak_points(heatmap_predictions)
 
         # Handle edge case: no points extracted from heatmap

@@ -298,9 +298,9 @@ def collate_fn(
     heatmaps = []
     for t in range(T):
         # Use the actual (non-padded) masks and centroids for this time step
-        heatmap = make_gaussian_heatmap(H//4, W//4, centroids_per_t[t]/4, masks_per_t[t])
+        heatmap = make_gaussian_heatmap(H, W, centroids_per_t[t], masks_per_t[t])
         heatmaps.append(heatmap)
-    heatmaps = torch.stack(heatmaps, dim=0)  # Shape: [T, H//4, W//4]
+    heatmaps = torch.stack(heatmaps, dim=0)  # Shape: [T, H, W]
     
     # Find maximum number of objects across all time steps
     max_objects = max([t.shape[0] for t in obj_to_frame_idx_per_t]) if obj_to_frame_idx_per_t else 1
