@@ -5,8 +5,8 @@ scratch:
   resize_threshold: 600
   batch_size: 1
   num_train_workers: 2
-  num_frames: 3
-  max_num_objects: 40
+  num_frames: 4
+  max_num_objects: 100
   max_num_bkgd_objects: 10
   base_lr: 5.0e-6
   vision_lr: 3.0e-06
