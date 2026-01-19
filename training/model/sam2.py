@@ -429,7 +429,10 @@ class SAM2Train(SAM2Base):
             div_score_logits,
         )
 
-        current_out["heatmap_predictions"] = self.get_heatmap_predictions(current_vision_feats, feat_sizes)[0,0] # assume batch size is 1
+        image_tensor = input.img_batch[frame_idx, :1]
+        current_out["heatmap_predictions"] = self.get_heatmap_predictions(
+            current_vision_feats, feat_sizes, image_tensor=image_tensor
+        )[0, 0]  # assume batch size is 1
         is_used = tracking_object_ids > 0
         # Handle cell tracking and division
         keep_tokens_mask, tracking_object_ids, mother_ids, prev_tracking_object_ids = self._handle_cell_tracking(
