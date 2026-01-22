@@ -2,12 +2,15 @@ import argparse
 import random
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 from hydra import compose, initialize, initialize_config_dir
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from PIL import Image, ImageDraw
+
+from training.utils.data_utils import get_centroids_from_mask, make_gaussian_heatmap
 
 
 def _extract_norm(cfg_container):
@@ -115,6 +118,18 @@ def _overlay_masks(image, objects):
     return np.array(pil_img)
 
 
+def _dilate_masks(masks, radius):
+    if radius <= 0:
+        return masks
+    kernel_size = radius * 2 + 1
+    kernel = torch.ones(1, 1, kernel_size, kernel_size, device=masks.device)
+    padded = torch.nn.functional.pad(
+        masks.float(), (radius, radius, radius, radius)
+    )
+    dilated = torch.nn.functional.conv2d(padded, kernel) > 0
+    return dilated.squeeze(1)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str, default="../sam2/configs/sam2.1_training")
@@ -124,6 +139,25 @@ def main():
     parser.add_argument("--out_dir", type=str, default="debug_samples")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dataset", type=str, default=None, help="Override dataset name")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["normal", "heatmap"],
+        default="normal",
+        help="Debug output type",
+    )
+    parser.add_argument(
+        "--sigmas",
+        type=str,
+        default="3",
+        help="Comma-separated sigma values for heatmap mode",
+    )
+    parser.add_argument(
+        "--dilate_radius",
+        type=int,
+        default=0,
+        help="Mask dilation radius in pixels for heatmap mode",
+    )
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -151,6 +185,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     indices = random.sample(range(len(dataset)), k=min(args.num_samples, len(dataset)))
+    sigmas = [float(s.strip()) for s in args.sigmas.split(",") if s.strip()]
     for sample_idx, idx in enumerate(indices):
         datapoint = dataset[idx]
         frames = datapoint.frames
@@ -159,9 +194,44 @@ def main():
         for t in range(num_frames):
             frame = frames[t]
             img = _to_uint8_image(frame.data, mean, std)
-            vis = _overlay_masks(img, frame.objects)
-            out_path = out_dir / f"sample_{sample_idx}_idx_{idx}_frame_{t:03d}.png"
-            Image.fromarray(vis).save(out_path)
+            if args.mode == "normal":
+                vis = _overlay_masks(img, frame.objects)
+                out_path = out_dir / f"sample_{sample_idx}_idx_{idx}_frame_{t:03d}.png"
+                Image.fromarray(vis).save(out_path)
+            else:
+                masks = []
+                centers = []
+                for obj in frame.objects:
+                    if obj.object_id <= 0:
+                        continue
+                    masks.append(obj.segment.to(torch.bool))
+                    centers.append(get_centroids_from_mask(obj.segment))
+                if not masks:
+                    continue
+                masks = torch.stack(masks, dim=0)
+                centers = torch.stack(centers, dim=0)
+                h, w = masks.shape[-2], masks.shape[-1]
+                masks = _dilate_masks(masks, args.dilate_radius)
+                for sigma in sigmas:
+                    heatmap = make_gaussian_heatmap(
+                        h, w, centers, masks, sigma=sigma
+                    )
+                    heatmap_np = heatmap.detach().cpu().numpy()
+                    heatmap_np = (heatmap_np - heatmap_np.min()) / (
+                        heatmap_np.max() - heatmap_np.min() + 1e-6
+                    )
+                    heatmap_np = (heatmap_np * 255).astype(np.uint8)
+                    heatmap_np = cv2.resize(
+                        heatmap_np,
+                        (img.shape[1], img.shape[0]),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
+                    heatmap_color = cv2.applyColorMap(heatmap_np, cv2.COLORMAP_JET)
+                    heatmap_overlay = cv2.addWeighted(img, 0.6, heatmap_color, 0.4, 0)
+                    out_path = out_dir / (
+                        f"sample_{sample_idx}_idx_{idx}_frame_{t:03d}_sigma_{sigma}_d{args.dilate_radius}.png"
+                    )
+                    Image.fromarray(heatmap_overlay).save(out_path)
 
 
 if __name__ == "__main__":

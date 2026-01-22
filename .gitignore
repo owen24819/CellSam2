@@ -15,3 +15,4 @@ SAM2_logs/*
 wandb/*
 *.docx
 debug_samples/*
+debug_heatmap_sweep/*
