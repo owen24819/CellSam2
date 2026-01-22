@@ -68,10 +68,17 @@ class VOSDataset(VisionDataset):
         man_track = video.man_track
 
         images = []
-        crop_region = getattr(segment_loader, 'crop_region', None)
-        rgb_images = load_images(sampled_frames, crop_region)
-        # After crop, images are target_size x target_size if cropped, otherwise original size
-        final_size = (self.target_size, self.target_size) if crop_region is not None else rgb_images[0].size[::-1]
+        crop_regions = [
+            segment_loader._get_frame_crop_region(frame.frame_idx)
+            for frame in sampled_frames
+        ]
+        rgb_images = load_images(sampled_frames, crop_regions)
+        # After crop, images are crop_size (may be non-square), otherwise original size
+        if crop_regions and crop_regions[0] is not None:
+            top, left, bottom, right = crop_regions[0]
+            final_size = (bottom - top, right - left)
+        else:
+            final_size = rgb_images[0].size[::-1]
         # Iterate over the sampled frames and store their rgb data and object data (bbox, segment)
         for frame_idx, (frame, sampled_object_ids) in enumerate(zip(sampled_frames, sampled_object_ids_list)):
             w, h = rgb_images[frame_idx].size
@@ -179,9 +186,11 @@ class VOSDataset(VisionDataset):
         return len(self.video_dataset)
 
 
-def load_images(frames, crop_region=None):
+def load_images(frames, crop_regions=None):
     all_images = []
-    for frame in frames:
+    if crop_regions is None:
+        crop_regions = [None] * len(frames)
+    for frame, crop_region in zip(frames, crop_regions, strict=False):
         if frame.data is None:
             # Load the frame rgb data from file
             path = frame.image_path

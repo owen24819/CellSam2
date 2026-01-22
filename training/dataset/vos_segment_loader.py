@@ -27,6 +27,7 @@ class CTCSegmentLoader:
         self.target_size = target_size
         self.resize_threshold = resize_threshold
         self.crop_region = self._determine_crop_region(first_mask_path)
+        self._frame_crop_cache = {}
 
     def _determine_crop_region(self, first_mask_path: str) -> Optional[Tuple[int, int, int, int]]:
         """Determine crop region: 10% random, 90% center on random cell for training; always center crop for validation."""
@@ -80,7 +81,10 @@ class CTCSegmentLoader:
     def _get_frame_crop_region(self, frame_id):
         if self.crop_region is None:
             return None
+        if frame_id in self._frame_crop_cache:
+            return self._frame_crop_cache[frame_id]
         if not self.training or random.random() >= 0.5:
+            self._frame_crop_cache[frame_id] = self.crop_region
             return self.crop_region
         top, left, bottom, right = self.crop_region
         crop_h = bottom - top
@@ -91,7 +95,9 @@ class CTCSegmentLoader:
         shift_x = random.randint(-max_shift_x, max_shift_x)
         new_top = min(max(0, top + shift_y), max(0, self.full_h - crop_h))
         new_left = min(max(0, left + shift_x), max(0, self.full_w - crop_w))
-        return (new_top, new_left, new_top + crop_h, new_left + crop_w)
+        crop_region = (new_top, new_left, new_top + crop_h, new_left + crop_w)
+        self._frame_crop_cache[frame_id] = crop_region
+        return crop_region
 
     def load(self, frame_id):
         """

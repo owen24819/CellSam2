@@ -14,3 +14,4 @@ events.out.tfevents.*
 SAM2_logs/*
 wandb/*
 *.docx
+debug_samples/*
