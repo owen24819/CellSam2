@@ -130,7 +130,7 @@ class SAM2LoRAModel:
                 param.requires_grad = False
 
             # Unfreeze LoRA parameters and optionally prediction heads
-            trainable_patterns = ['lora', 'div', 'no_mem_', 'no_obj_', ' maskmem_tpos_enc', 'feature_dim_reducers', 'heatmap_predictor']
+            trainable_patterns = ['lora', 'div', 'no_mem_', 'no_obj_', ' maskmem_tpos_enc', 'feature_dim_reducers', 'heatmap_predictor', 'heatmap_image_proj']
 
             if self.trainable_iou_pred_heads:
                 trainable_patterns.append('iou_prediction_head')
