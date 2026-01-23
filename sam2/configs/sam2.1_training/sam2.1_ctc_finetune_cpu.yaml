@@ -360,8 +360,8 @@ trainer:
         loss_mask: 20
         loss_dice: 1
         loss_iou: 1
-        loss_class: 1
-        loss_div: 1
+        loss_class: 10
+        loss_div: 2
         loss_heatmap: 1
       supervise_all_iou: true
       iou_use_l1_loss: true
