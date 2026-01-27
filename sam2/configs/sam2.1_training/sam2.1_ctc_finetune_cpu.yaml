@@ -235,6 +235,7 @@ trainer:
     num_init_cond_frames_for_train: 1
     rand_init_cond_frames_for_train: True  # random 1~2
     num_correction_pt_per_frame: 2
+    variable_num_correction_pt: true  # randomly vary refinement (0 to num_correction_pt_per_frame) for robustness
     use_act_ckpt_iterative_pt_sampling: false
     
 

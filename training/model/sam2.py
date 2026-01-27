@@ -50,6 +50,9 @@ class SAM2Train(SAM2Base):
         # how many additional correction points to sample (on each frame selected to be corrected)
         # note that the first frame receives an initial input click (in addition to any correction clicks)
         num_correction_pt_per_frame=7,
+        # whether to use variable number of correction points (0 to num_correction_pt_per_frame)
+        # this makes training more robust by teaching model to track from obj_ptrs with varying refinement
+        variable_num_correction_pt=False,
         # method for point sampling during evaluation
         # "uniform" (sample uniformly from error region) or "center" (use the point with the largest distance to error region boundary)
         # default to "center" to be consistent with evaluation in the SAM paper
@@ -92,6 +95,7 @@ class SAM2Train(SAM2Base):
         self.rand_init_cond_frames_for_eval = rand_init_cond_frames_for_eval
         self.add_all_frames_to_correct_as_cond = add_all_frames_to_correct_as_cond
         self.num_correction_pt_per_frame = num_correction_pt_per_frame
+        self.variable_num_correction_pt = variable_num_correction_pt
         self.pt_sampling_for_eval = pt_sampling_for_eval
         self.prob_to_sample_from_gt_for_train = prob_to_sample_from_gt_for_train
         # A random number generator with a fixed initial seed across GPUs
@@ -251,10 +255,23 @@ class SAM2Train(SAM2Base):
                 point_inputs = {"point_coords": points, "point_labels": labels}
                 backbone_out["point_inputs_per_frame"][t] = point_inputs
 
+        # Determine number of correction points for this sample
+        # Variable refinement makes the model robust to different amounts of iterative refinement
+        if self.training and self.variable_num_correction_pt:
+            # Randomly sample 0 to num_correction_pt_per_frame (inclusive)
+            # This teaches model to track from obj_ptrs with varying levels of refinement
+            num_corrections = self.rng.integers(0, self.num_correction_pt_per_frame + 1)
+        else:
+            num_corrections = self.num_correction_pt_per_frame
+        backbone_out["num_corrections"] = num_corrections
+        
         # Sample frames where we will add correction clicks on the fly
         # based on the error between prediction and ground-truth masks
         if not use_pt_input:
             # no correction points will be sampled when using mask inputs
+            frames_to_add_correction_pt = []
+        elif num_corrections == 0:
+            # no correction clicks when variable refinement samples 0
             frames_to_add_correction_pt = []
         elif num_frames_to_correct == num_init_cond_frames:
             frames_to_add_correction_pt = init_cond_frames
@@ -339,6 +356,7 @@ class SAM2Train(SAM2Base):
                 input=input,
                 tracking_object_ids=tracking_object_ids,
                 memory_dict=memory_dict,
+                num_corrections=backbone_out["num_corrections"],
             )
 
             all_frame_outputs[stage_id] = current_out
@@ -369,6 +387,7 @@ class SAM2Train(SAM2Base):
         prev_sam_mask_logits=None,  # The previously predicted SAM mask logits.
         frames_to_add_correction_pt=None,
         gt_masks=None,
+        num_corrections=None,  # Number of correction points (determined in prepare_prompt_inputs)
     ):
         """
         Process a single frame in the tracking sequence.
@@ -390,6 +409,9 @@ class SAM2Train(SAM2Base):
         # Set default for frames_to_add_correction_pt if None
         if frames_to_add_correction_pt is None:
             frames_to_add_correction_pt = []
+        # Set default for num_corrections if None
+        if num_corrections is None:
+            num_corrections = self.num_correction_pt_per_frame
             
         # Run the core tracking step
         current_out, sam_outputs, high_res_features, pix_feat = self._track_step(
@@ -456,7 +478,8 @@ class SAM2Train(SAM2Base):
                 pix_feat,
                 current_out,
                 keep_tokens_mask,
-                is_used=is_used
+                is_used=is_used,
+                num_corrections=num_corrections,
             )
 
         # Adjust vision features based on token count changes
@@ -643,6 +666,7 @@ class SAM2Train(SAM2Base):
         current_out,
         keep_tokens_mask,
         is_used,
+        num_corrections,
     ):
         """
         Iteratively sample correction points to improve mask predictions.
@@ -654,6 +678,7 @@ class SAM2Train(SAM2Base):
             pix_feat_with_mem: Pixel features with memory
             current_out: Current output dictionary to update
             keep_tokens_mask: Boolean mask indicating which tokens to keep
+            num_corrections: Number of correction points to sample
         
         Returns:
             Updated current_out dictionary with iterative correction results
@@ -676,7 +701,7 @@ class SAM2Train(SAM2Base):
         assert gt_masks is not None, "Ground truth masks required for correction point sampling"
         
         # Iteratively add correction points
-        for _ in range(self.num_correction_pt_per_frame):
+        for _ in range(num_corrections):
             # Determine whether to sample from GT or error regions
             sample_from_gt = False
             if self.training and self.prob_to_sample_from_gt_for_train > 0:
