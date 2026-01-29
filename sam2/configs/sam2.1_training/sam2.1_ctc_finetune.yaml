@@ -82,6 +82,8 @@ trainer:
   accelerator: cuda
   seed_value: 123
   freeze_encoder: ${scratch.freeze_encoder}
+  debug_viz: true  # Set to true to enable debug visualization of predictions vs ground truth
+  debug_viz_interval: 5.0  # Percentage interval (5.0 = every 5% of dataset)
 
   use_lora: ${scratch.use_lora}
   lora:

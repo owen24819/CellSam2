@@ -591,6 +591,7 @@ class SAM2Train(SAM2Base):
         current_out["pred_masks"] = current_out["multistep_pred_masks"][0][keep_tokens_mask]
         current_out["pred_masks_high_res"] = current_out["multistep_pred_masks_high_res"][0][keep_tokens_mask]
         current_out["pred_object_score_logits"] = current_out["post_split_object_score_logits"][0][keep_tokens_mask]
+        current_out["tracking_object_ids"] = tracking_object_ids  # Store for visualization
         
         return keep_tokens_mask, tracking_object_ids, mother_ids, prev_tracking_object_ids
         

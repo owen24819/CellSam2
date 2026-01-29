@@ -21,6 +21,7 @@ import torch.nn as nn
 from hydra.utils import instantiate
 from iopath.common.file_io import g_pathmgr
 
+from training.debug_viz import create_debug_visualization, should_visualize
 from training.optimizer import construct_optimizer
 from training.utils.checkpoint_utils import (
     assert_skipped_parameters_are_frozen,
@@ -162,6 +163,8 @@ class Trainer:
         meters: Optional[Dict[str, Any]] = None,
         loss: Optional[Dict[str, Any]] = None,
         freeze_encoder: bool = False,
+        debug_viz: bool = False,
+        debug_viz_interval: float = 5.0,
     ):
 
         self._setup_env_variables(env_variables)
@@ -180,6 +183,12 @@ class Trainer:
         self.meters_conf = meters
         self.loss_conf = loss
         self.freeze_encoder = freeze_encoder
+        self.debug_viz = debug_viz
+        self.debug_viz_interval_train = debug_viz_interval
+        self.debug_viz_interval_val = 10.0  # Less data in val, so use 10%
+        self.debug_viz_dir = os.path.join(logging.get("log_dir", "sam2_logs"), "debug_viz")
+        self.debug_viz_sample_count_train = 0
+        self.debug_viz_sample_count_val = 0
         distributed = DistributedConf(**distributed or {})
         cuda = CudaConf(**cuda or {})
         self.where = 0.0
@@ -472,8 +481,33 @@ class Trainer:
         batch: BatchedVideoDatapoint,
         model: nn.Module,
         phase: str,
+        data_iter: int = 0,
+        total_iters: int = 0,
     ):
         outputs = model(batch)
+        
+        # Debug visualization during training or validation
+        if self.debug_viz and self.distributed_rank == 0:
+            interval = self.debug_viz_interval_train if phase == Phase.TRAIN else self.debug_viz_interval_val
+            if should_visualize(data_iter, total_iters, interval):
+                try:
+                    phase_folder = "train" if phase == Phase.TRAIN else "val"
+                    epoch_viz_dir = os.path.join(self.debug_viz_dir, phase_folder, f"epoch_{self.epoch}")
+                    if phase == Phase.TRAIN:
+                        sample_count = self.debug_viz_sample_count_train
+                        self.debug_viz_sample_count_train += 1
+                    else:
+                        sample_count = self.debug_viz_sample_count_val
+                        self.debug_viz_sample_count_val += 1
+                    create_debug_visualization(
+                        batch=batch,
+                        outputs=outputs,
+                        save_dir=epoch_viz_dir,
+                        sample_idx=sample_count,
+                        dataset_idx=data_iter,
+                    )
+                except Exception as e:
+                    logging.warning(f"Debug visualization failed: {e}")
         
         # Convert tensors to lists per time step, filtering out padded entries
         # batch.masks, batch.cell_divides are now tensors with shape [T, max_objects, ...]
@@ -611,6 +645,9 @@ class Trainer:
                 f.write(json.dumps(outs) + "\n")
 
     def val_epoch(self, val_loader, phase):
+        # Reset debug visualization counter for val
+        self.debug_viz_sample_count_val = 0
+
         batch_time = AverageMeter("Batch Time", self.device, ":.2f")
         data_time = AverageMeter("Data Time", self.device, ":.2f")
         mem = MemMeter("Mem (GB)", self.device, ":.2f")
@@ -667,6 +704,8 @@ class Trainer:
                             batch,
                             model,
                             phase,
+                            data_iter=data_iter,
+                            total_iters=iters_per_epoch,
                         )
 
                         assert len(loss_dict) == 1
@@ -753,6 +792,9 @@ class Trainer:
 
     def train_epoch(self, train_loader):
 
+        # Reset debug visualization counter for this epoch
+        self.debug_viz_sample_count_train = 0
+
         # Init stat meters
         batch_time_meter = AverageMeter("Batch Time", self.device, ":.2f")
         data_time_meter = AverageMeter("Data Time", self.device, ":.2f")
@@ -797,7 +839,7 @@ class Trainer:
             )  # move tensors in a tensorclass
 
             try:
-                self._run_step(batch, phase, loss_mts, extra_loss_mts)
+                self._run_step(batch, phase, loss_mts, extra_loss_mts, data_iter=data_iter, total_iters=iters_per_epoch)
 
                 # compute gradient and do optim step
                 exact_epoch = self.epoch + float(data_iter) / iters_per_epoch
@@ -920,6 +962,8 @@ class Trainer:
         loss_mts: Dict[str, AverageMeter],
         extra_loss_mts: Dict[str, AverageMeter],
         raise_on_error: bool = True,
+        data_iter: int = 0,
+        total_iters: int = 0,
     ):
         """
         Run the forward / backward
@@ -938,6 +982,8 @@ class Trainer:
                 batch,
                 self.model,
                 phase,
+                data_iter=data_iter,
+                total_iters=total_iters,
             )
 
         assert len(loss_dict) == 1
