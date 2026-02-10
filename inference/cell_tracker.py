@@ -737,7 +737,7 @@ class SAM2AutomaticCellTracker:
         for state in tiled_states:
             if not self.use_heatmap:
                 state = self.generate_proportional_point_grid(state)
-            generators.append(self.propagate_in_video(state, start_frame_idx=0))
+            generators.append(self.propagate_in_video(state, start_frame_idx=0, disable_progress=True))
 
         num_frames = tiled_states[0]["num_frames"] if tiled_states else 0
         tracking_results = []
@@ -757,7 +757,7 @@ class SAM2AutomaticCellTracker:
         for state in tiled_states:
             state["crop_assignments"] = {}
         
-        for frame_idx in range(num_frames):
+        for frame_idx in tqdm(range(num_frames), desc="propagate in video"):
             crop_masks = []
             for gen in generators:
                 _, state, track_mask = next(gen)
@@ -947,6 +947,7 @@ class SAM2AutomaticCellTracker:
         self,
         inference_state,
         start_frame_idx=0,
+        disable_progress=False,
     ):
         """Propagate the input points across frames to track in the entire video."""
         num_frames = inference_state["num_frames"]
@@ -959,7 +960,7 @@ class SAM2AutomaticCellTracker:
         end_frame_idx = min(start_frame_idx + max_frame_num_to_track, num_frames - 1)
         processing_order = range(start_frame_idx, end_frame_idx + 1)
 
-        for frame_idx in tqdm(processing_order, desc="propagate in video"):
+        for frame_idx in tqdm(processing_order, desc="propagate in video", disable=disable_progress):
             if frame_idx == 0 or self.segment:
                 if self.use_heatmap:
                     input_points, point_labels = self.get_input_points_from_heatmap(
