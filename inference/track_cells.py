@@ -6,6 +6,7 @@ from pathlib import Path
 # Third-party imports
 import hydra
 from cell_tracker import SAM2AutomaticCellTracker
+from hydra import compose
 from hydra.core.global_hydra import GlobalHydra
 from inference_utils import (
     get_device,
@@ -13,6 +14,7 @@ from inference_utils import (
     get_tif_directories,
     get_video_path,
 )
+from omegaconf import OmegaConf
 
 # Local imports
 from sam2.build_sam import build_sam2
@@ -57,7 +59,42 @@ def parse_args():
         "--use_heatmap", type=bool, default=True, help="Whether to use heatmap"
     )
     parser.add_argument(
+        "--heatmap_debug",
+        action="store_true",
+        help="Save heatmap peak overlays for debugging",
+    )
+    parser.add_argument(
+        "--heatmap_min_dist",
+        type=int,
+        default=2,
+        help="Min distance for heatmap peak suppression",
+    )
+    parser.add_argument(
+        "--heatmap_threshold",
+        type=float,
+        default=0.1,
+        help="Min confidence for heatmap peaks",
+    )
+    parser.add_argument(
+        "--heatmap_topk",
+        type=int,
+        default=0,
+        help="Fallback to top-K heatmap peaks when none found",
+    )
+    parser.add_argument(
         "--checkpoint_num", type=int, default=None, help="Checkpoint number to use"
+    )
+    parser.add_argument(
+        "--resize_threshold",
+        type=int,
+        default=None,
+        help="Enable tiled inference when images exceed this size",
+    )
+    parser.add_argument(
+        "--crop_overlap",
+        type=int,
+        default=128,
+        help="Overlap in pixels between adjacent crops",
     )
     return parser.parse_args()
 
@@ -135,6 +172,10 @@ def main():
 
     # Setup model and device
     device = get_device()
+    cfg = compose(config_name=config_name)
+    OmegaConf.resolve(cfg)
+    if args.resize_threshold is None:
+        args.resize_threshold = getattr(cfg.scratch, "resize_threshold", None)
     if args.checkpoint_num is None:
         sam2_checkpoint = f"sam2_logs/{model_name}/checkpoints/checkpoint.pt"
     else:
@@ -152,6 +193,12 @@ def main():
         box_nms_thresh=args.box_nms_thresh,
         segment=args.segment,
         use_heatmap=args.use_heatmap,
+        resize_threshold=args.resize_threshold,
+        crop_overlap=args.crop_overlap,
+        heatmap_debug=args.heatmap_debug,
+        heatmap_min_dist=args.heatmap_min_dist,
+        heatmap_threshold=args.heatmap_threshold,
+        heatmap_topk=args.heatmap_topk,
     )
 
     # Get input path
