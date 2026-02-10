@@ -56,30 +56,9 @@ def parse_args():
         help="Whether to perform segmentation (default: False)",
     )
     parser.add_argument(
-        "--use_heatmap", type=bool, default=True, help="Whether to use heatmap"
-    )
-    parser.add_argument(
-        "--heatmap_debug",
+        "--no_heatmap",
         action="store_true",
-        help="Save heatmap peak overlays for debugging",
-    )
-    parser.add_argument(
-        "--heatmap_min_dist",
-        type=int,
-        default=2,
-        help="Min distance for heatmap peak suppression",
-    )
-    parser.add_argument(
-        "--heatmap_threshold",
-        type=float,
-        default=0.1,
-        help="Min confidence for heatmap peaks",
-    )
-    parser.add_argument(
-        "--heatmap_topk",
-        type=int,
-        default=0,
-        help="Fallback to top-K heatmap peaks when none found",
+        help="Disable heatmap (heatmap is used by default)",
     )
     parser.add_argument(
         "--checkpoint_num", type=int, default=None, help="Checkpoint number to use"
@@ -192,13 +171,9 @@ def main():
         div_obj_score_thresh=0,
         box_nms_thresh=args.box_nms_thresh,
         segment=args.segment,
-        use_heatmap=args.use_heatmap,
+        use_heatmap=not args.no_heatmap,
         resize_threshold=args.resize_threshold,
         crop_overlap=args.crop_overlap,
-        heatmap_debug=args.heatmap_debug,
-        heatmap_min_dist=args.heatmap_min_dist,
-        heatmap_threshold=args.heatmap_threshold,
-        heatmap_topk=args.heatmap_topk,
     )
 
     # Get input path
