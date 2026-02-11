@@ -75,6 +75,11 @@ def parse_args():
         default=128,
         help="Overlap in pixels between adjacent crops",
     )
+    parser.add_argument(
+        "--save_crop_movies",
+        action="store_true",
+        help="Save individual movies for each crop (for debugging)",
+    )
     return parser.parse_args()
 
 
@@ -174,6 +179,7 @@ def main():
         use_heatmap=not args.no_heatmap,
         resize_threshold=args.resize_threshold,
         crop_overlap=args.crop_overlap,
+        save_crop_movies=args.save_crop_movies,
     )
 
     # Get input path

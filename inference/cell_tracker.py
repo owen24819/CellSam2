@@ -40,6 +40,7 @@ class SAM2AutomaticCellTracker:
         heatmap_topk: int = 0,
         segmentation_merge_iou_thresh: float = 0.5,
         crop_reassign_iou_thresh: float = 0.3,
+        save_crop_movies: bool = False,
     ) -> None:
         """Initialize SAM2AutomaticCellTracker.
         
@@ -95,6 +96,7 @@ class SAM2AutomaticCellTracker:
         self.heatmap_topk = heatmap_topk
         self.segmentation_merge_iou_thresh = segmentation_merge_iou_thresh
         self.crop_reassign_iou_thresh = crop_reassign_iou_thresh
+        self.save_crop_movies = save_crop_movies
 
         self._transforms = SAM2Transforms(
             resolution=self.model.image_size,
@@ -757,11 +759,19 @@ class SAM2AutomaticCellTracker:
         for state in tiled_states:
             state["crop_assignments"] = {}
         
+        # Store crop tracking results if saving crop movies
+        crop_tracking_results = [[] for _ in tiled_states] if self.save_crop_movies else None
+        
         for frame_idx in tqdm(range(num_frames), desc="propagate in video"):
             crop_masks = []
             for gen in generators:
                 _, state, track_mask = next(gen)
                 crop_masks.append(track_mask)
+            
+            # Store crop masks for movie saving
+            if self.save_crop_movies:
+                for crop_idx, crop_mask in enumerate(crop_masks):
+                    crop_tracking_results[crop_idx].append(crop_mask)
 
             # Frame 0: Segmentation - merge all crop masks, then assign cells to crops
             if frame_idx == 0:
@@ -871,6 +881,39 @@ class SAM2AutomaticCellTracker:
         global_state["max_obj_id"] = max_obj_id
 
         self.save_tracking_results(global_state, tracking_results)
+        
+        # Save individual crop movies if requested
+        if self.save_crop_movies and crop_tracking_results:
+            for crop_idx, crop_results in enumerate(crop_tracking_results):
+                crop_box = tiled_states[crop_idx]["crop_box"]
+                x0, y0, x1, y1 = crop_box
+                crop_height = y1 - y0
+                crop_width = x1 - x0
+                
+                
+                crop_state = {
+                    "res_path": res_path / f"crop_{crop_idx}",
+                    "video_path": video_path,
+                    "video_height": crop_height,
+                    "video_width": crop_width,
+                    "max_obj_id": global_state.get("max_obj_id", 0),
+                    "frame_paths": tiled_states[crop_idx].get("frame_paths"),
+                    "crop_box": crop_box,
+                    "obj_ids": {},
+                    "parent_ids": {},
+                }
+                # Extract obj_ids and parent_ids for each frame from crop state
+                crop_state_obj = tiled_states[crop_idx]
+                for frame_idx in range(len(crop_results)):
+                    if "obj_ids" in crop_state_obj and crop_state_obj["obj_ids"] is not None:
+                        if frame_idx in crop_state_obj["obj_ids"]:
+                            crop_state["obj_ids"][frame_idx] = crop_state_obj["obj_ids"][frame_idx]
+                    if "parent_ids" in crop_state_obj and crop_state_obj["parent_ids"] is not None:
+                        if frame_idx in crop_state_obj["parent_ids"]:
+                            crop_state["parent_ids"][frame_idx] = crop_state_obj["parent_ids"][frame_idx]
+                
+                crop_state["res_path"].mkdir(parents=True, exist_ok=True)
+                self.save_tracking_results(crop_state, crop_results, crop_idx=crop_idx)
 
         return tracking_results
 
@@ -1834,7 +1877,7 @@ class SAM2AutomaticCellTracker:
 
             inference_state["res_track"] = res_track
 
-    def save_tracking_results(self, inference_state, tracking_results, alpha=0.3):
+    def save_tracking_results(self, inference_state, tracking_results, alpha=0.3, crop_idx=None):
         res_path = inference_state["res_path"]
 
         if self.segment:
@@ -1860,6 +1903,11 @@ class SAM2AutomaticCellTracker:
         for frame_idx, track_mask in enumerate(tracking_results):
             frame_path = inference_state["frame_paths"][frame_idx]
             img = read_image(str(frame_path), return_np=True)
+            
+            # Crop image if crop_box is specified (for crop movies)
+            if "crop_box" in inference_state:
+                x0, y0, x1, y1 = inference_state["crop_box"]
+                img = img[y0:y1, x0:x1]
 
             # Create a colored overlay image
             overlay = np.zeros_like(img)
@@ -1952,8 +2000,11 @@ class SAM2AutomaticCellTracker:
         # Save as video
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         mode = "segment" if self.segment else "track"
+        video_filename = f"pred_{mode}_video.mp4"
+        if crop_idx is not None:
+            video_filename = f"pred_{mode}_video_crop_{crop_idx}.mp4"
         out = cv2.VideoWriter(
-            str(res_path / f"pred_{mode}_video.mp4"),
+            str(res_path / video_filename),
             fourcc,
             10.0,  # 10 fps
             (inference_state["video_width"], inference_state["video_height"]),
