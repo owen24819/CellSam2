@@ -377,15 +377,20 @@ class SAM2AutomaticCellTracker:
         
         return full_mask
 
-    def _overlay_tracked_masks(self, tiled_states, crop_masks):
+    def _overlay_tracked_masks(self, tiled_states, crop_masks, prev_assignments=None):
         """Overlay full crop predictions for tracked cells.
         
         Unlike _merge_crop_masks which uses non-overlapping regions, this overlays
         the full prediction from each crop. Cells are already filtered to assigned ones.
         
+        When overlaying, if a cell from a later crop overlaps significantly with a cell
+        from an earlier crop, they are the same physical cell. We keep the ID from the
+        crop that was assigned to track it, and drop the other ID.
+        
         Args:
             tiled_states: List of inference states, one per crop
             crop_masks: List of filtered crop masks (only assigned cells)
+            prev_assignments: List of sets, one per crop, containing assigned cell IDs
             
         Returns:
             Merged full_mask with full cell predictions overlaid
@@ -394,13 +399,80 @@ class SAM2AutomaticCellTracker:
         full_width = tiled_states[0]["full_video_width"]
         full_mask = np.zeros((full_height, full_width), dtype=np.uint16)
         
+        # Track which cells have been merged (old_id -> new_id mapping)
+        # When two cells overlap, we keep the ID from the assigned crop
+        cell_id_mapping = {}
+        
         # Overlay each crop's full prediction
-        for state, crop_mask in zip(tiled_states, crop_masks, strict=False):
+        for crop_idx, (state, crop_mask) in enumerate(zip(tiled_states, crop_masks, strict=False)):
             x0, y0, x1, y1 = state["crop_box"]
-            # Overlay full crop mask (only non-zero pixels to avoid overwriting)
             crop_region = full_mask[y0:y1, x0:x1]
             crop_mask_nonzero = crop_mask > 0
-            crop_region[crop_mask_nonzero] = crop_mask[crop_mask_nonzero]
+            
+            # Get assigned cells for this crop (to prefer their IDs)
+            assigned_cells_this_crop = set()
+            if prev_assignments is not None and crop_idx < len(prev_assignments):
+                assigned_cells_this_crop = prev_assignments[crop_idx]
+            
+            # Check for overlaps with existing cells in this region
+            existing_cells = np.unique(crop_region[crop_mask_nonzero])
+            existing_cells = existing_cells[existing_cells != 0]
+            
+            # For each cell in current crop, check if it overlaps with existing cells
+            crop_cell_ids = np.unique(crop_mask[crop_mask_nonzero])
+            crop_cell_ids = crop_cell_ids[crop_cell_ids != 0]
+            
+            for crop_cell_id in crop_cell_ids:
+                crop_cell_mask = (crop_mask == crop_cell_id)
+                crop_cell_in_region = crop_cell_mask
+                
+                # Check overlap with existing cells in this region
+                for existing_cell_id in existing_cells:
+                    existing_cell_mask = (crop_region == existing_cell_id)
+                    overlap = np.logical_and(crop_cell_in_region, existing_cell_mask)
+                    overlap_area = overlap.sum()
+                    
+                    if overlap_area > 0:
+                        # Check if significant overlap (same physical cell)
+                        crop_cell_area = crop_cell_in_region.sum()
+                        existing_cell_area = existing_cell_mask.sum()
+                        overlap_ratio = overlap_area / min(crop_cell_area, existing_cell_area)
+                        
+                        if overlap_ratio >= 0.3:  # Significant overlap - same cell
+                            # Determine which ID to keep based on assignments
+                            # Prefer the ID from the crop that was assigned to track it
+                            crop_cell_assigned = crop_cell_id in assigned_cells_this_crop
+                            # Check if existing_cell_id was assigned to a previous crop
+                            existing_cell_assigned = False
+                            if prev_assignments is not None:
+                                for prev_crop_idx, prev_assigned in enumerate(prev_assignments):
+                                    if existing_cell_id in prev_assigned:
+                                        existing_cell_assigned = True
+                                        break
+                            
+                            # Keep the ID from the assigned crop, or current crop if both/neither assigned
+                            if crop_cell_assigned and not existing_cell_assigned:
+                                # Current crop's cell is assigned, keep it
+                                cell_id_mapping[existing_cell_id] = crop_cell_id
+                                # Update existing pixels
+                                full_mask[y0:y1, x0:x1][existing_cell_mask] = crop_cell_id
+                            elif existing_cell_assigned and not crop_cell_assigned:
+                                # Existing cell is assigned, keep it (map current to existing)
+                                cell_id_mapping[crop_cell_id] = existing_cell_id
+                            else:
+                                # Both or neither assigned - keep the one from later crop (current)
+                                cell_id_mapping[existing_cell_id] = crop_cell_id
+                                full_mask[y0:y1, x0:x1][existing_cell_mask] = crop_cell_id
+            
+            # Apply ID mappings to current crop mask before overlaying
+            mapped_crop_mask = crop_mask.copy()
+            for old_id, new_id in cell_id_mapping.items():
+                mapped_crop_mask[crop_mask == old_id] = new_id
+            
+            # Overlay the mapped crop mask
+            crop_region = full_mask[y0:y1, x0:x1]
+            mapped_crop_mask_nonzero = mapped_crop_mask > 0
+            crop_region[mapped_crop_mask_nonzero] = mapped_crop_mask[mapped_crop_mask_nonzero]
             full_mask[y0:y1, x0:x1] = crop_region
         
         return full_mask
@@ -491,6 +563,7 @@ class SAM2AutomaticCellTracker:
                 cell_ids_j = [c for c in edge_cells_j if c in overlap_cell_ids_j]
                 
                 # Check all pairs of cells in the overlap
+                # Only merge if they have the SAME cell ID (same physical cell detected in both crops)
                 for cell_id_i in cell_ids_i:
                     cell_in_overlap_i = (overlap_mask_i == cell_id_i)
                     
@@ -813,7 +886,23 @@ class SAM2AutomaticCellTracker:
                     filtered_masks.append(filtered_mask)
                 
                 # Merge tracked masks - overlay full predictions from each crop
-                tracked_mask = self._overlay_tracked_masks(tiled_states, filtered_masks)
+                # Pass prev_assignments to prefer IDs from assigned crops
+                tracked_mask = self._overlay_tracked_masks(tiled_states, filtered_masks, prev_assignments)
+                
+                # Get cells that were in previous frame (for spatial matching to fix misidentifications)
+                prev_frame_cell_ids = set()
+                prev_frame_masks = {}
+                if frame_idx > 0 and (frame_idx - 1) < len(tracking_results):
+                    prev_full_mask = tracking_results[frame_idx - 1]
+                    prev_cell_ids = np.unique(prev_full_mask)
+                    prev_cell_ids = prev_cell_ids[prev_cell_ids != 0]
+                    prev_frame_cell_ids = set(prev_cell_ids.tolist())
+                    for cell_id in prev_frame_cell_ids:
+                        prev_frame_masks[cell_id] = (prev_full_mask == cell_id)
+                
+                # Get cells that appear in tracked_mask
+                tracked_cell_ids = set(np.unique(tracked_mask))
+                tracked_cell_ids.discard(0)
                 
                 # Merge all crops (like frame 0) to get segmentation mask for new cells
                 seg_mask = self._merge_crop_masks(tiled_states, crop_masks)
@@ -836,10 +925,28 @@ class SAM2AutomaticCellTracker:
                             tracked_cell_id = np.bincount(overlapping_cells).argmax()
                             # Merge seg_cell into tracked cell
                             full_mask[seg_cell_mask] = tracked_cell_id
-                    else:  # Low overlap - add as new cell
-                        # Only add pixels that aren't already in tracked_mask
-                        new_cell_mask = np.logical_and(seg_cell_mask, tracked_mask == 0)
-                        full_mask[new_cell_mask] = seg_cell_id
+                    else:  # Low overlap
+                        # Check if this cell from seg_mask matches a missing assigned cell by spatial overlap
+                        # This handles cases where a crop misidentifies a cell (wrong ID)
+                        matched_missing_cell = None
+                        for prev_cell_id, prev_cell_mask in prev_frame_masks.items():
+                            if prev_cell_id not in tracked_cell_ids:
+                                # Check if this seg_cell spatially matches the missing cell
+                                intersection = np.logical_and(seg_cell_mask, prev_cell_mask).sum()
+                                union = np.logical_or(seg_cell_mask, prev_cell_mask).sum()
+                                if union > 0:
+                                    iou = intersection / union
+                                    if iou >= 0.3:  # Significant spatial overlap - same cell, wrong ID
+                                        matched_missing_cell = prev_cell_id
+                                        break
+                        
+                        if matched_missing_cell is not None:
+                            # Restore the correct cell ID (fix misidentification)
+                            full_mask[seg_cell_mask] = matched_missing_cell
+                        else:
+                            # Truly new cell - add as new
+                            new_cell_mask = np.logical_and(seg_cell_mask, tracked_mask == 0)
+                            full_mask[new_cell_mask] = seg_cell_id
                 
             if frame_idx < num_frames:
                 # Compute new assignments for current frame (to use in next frame)
