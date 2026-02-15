@@ -1778,7 +1778,7 @@ class SAM2AutomaticCellTracker:
             inference_state, frame_idx, current_out["pred_masks_high_res"].shape[0]
         )
 
-        if not self.segment:
+        if not self.segment and len(obj_ids) > 0:
             inference_state["memory_dict"] = self.model._update_memory_features(
                 current_vision_feats,
                 feat_sizes,
