@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -122,27 +123,28 @@ class SAM2AutomaticCellTracker:
         if height <= self.resize_threshold and width <= self.resize_threshold:
             return [(0, 0, width, height)]
         stride = max(1, target_size - overlap)
-        if height <= self.resize_threshold:
-            ys = [0]
-        else:
-            ys = list(range(0, max(1, height - target_size + 1), stride))
-        if width <= self.resize_threshold:
+        
+        # Compute number of crops needed per dimension
+        if width <= target_size:
             xs = [0]
         else:
-            xs = list(range(0, max(1, width - target_size + 1), stride))
-        if ys[-1] != height - target_size:
-            ys.append(max(0, height - target_size))
-        if xs[-1] != width - target_size:
-            xs.append(max(0, width - target_size))
+            num_cols = math.ceil((width - target_size) / stride) + 1
+            # Evenly space crops so non-overlap grid cells align within crop bounds
+            step_x = (width - target_size) / (num_cols - 1)
+            xs = [round(i * step_x) for i in range(num_cols)]
+        
+        if height <= target_size:
+            ys = [0]
+        else:
+            num_rows = math.ceil((height - target_size) / stride) + 1
+            step_y = (height - target_size) / (num_rows - 1)
+            ys = [round(i * step_y) for i in range(num_rows)]
+        
         boxes = []
         for y0 in ys:
             for x0 in xs:
                 x1 = min(width, x0 + target_size)
                 y1 = min(height, y0 + target_size)
-                if x1 - x0 < target_size:
-                    x0 = max(0, x1 - target_size)
-                if y1 - y0 < target_size:
-                    y0 = max(0, y1 - target_size)
                 boxes.append((x0, y0, x1, y1))
         return boxes
 
