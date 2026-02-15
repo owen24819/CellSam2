@@ -2083,7 +2083,11 @@ class SAM2AutomaticCellTracker:
         )
 
         if not self.segment:
-            parent_ids = inference_state["parent_ids"][frame_idx].cpu().numpy()
+            parent_ids_tensor = inference_state["parent_ids"].get(frame_idx)
+            if parent_ids_tensor is not None and len(parent_ids_tensor) == len(cell_ids):
+                parent_ids = parent_ids_tensor.cpu().numpy()
+            else:
+                parent_ids = np.zeros(len(cell_ids), dtype=np.int32)
             res_track = inference_state["res_track"]
 
             for cell_id, parent_id in zip(cell_ids, parent_ids, strict=False):
