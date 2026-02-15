@@ -968,6 +968,11 @@ class SAM2AutomaticCellTracker:
                             new_cell_mask = np.logical_and(seg_cell_mask, tracked_mask == 0)
                             full_mask[new_cell_mask] = seg_cell_id
                 
+            # Remove cells below area threshold
+            for cell_id in np.unique(full_mask):
+                if cell_id != 0 and (full_mask == cell_id).sum() < self.min_mask_area:
+                    full_mask[full_mask == cell_id] = 0
+
             if frame_idx < num_frames:
                 # Compute new assignments for current frame (to use in next frame)
                 crop_assignments, cell_id_map = self._assign_cells_to_crops(
