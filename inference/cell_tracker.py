@@ -218,7 +218,7 @@ class SAM2AutomaticCellTracker:
         """Assign cells to crops for tracking continuity.
         
         Frame 0: Assign all cells to nearest crop (initial assignment)
-        Frame 1+: Reassign only if cell overlaps (IoU > threshold) with cell in another crop
+        Frame 1+: Reassign based on centroid proximity + overlap confirmation
         
         Args:
             tiled_states: List of inference states, one per crop
@@ -228,11 +228,14 @@ class SAM2AutomaticCellTracker:
             frame_idx: Current frame index
             
         Returns:
-            crop_assignments: List of sets, one per crop, containing assigned cell IDs
+            crop_assignments: List of sets, one per crop, containing global cell IDs
+            cell_id_map: Dict mapping {global_id: local_id_in_assigned_crop}
+                         Only contains entries where global_id != local_id (i.e. reassigned cells)
         """
         crop_assignments = [set() for _ in tiled_states]
+        cell_id_map = {}  # {global_id: local_id_in_crop}
         if not tiled_states:
-            return crop_assignments
+            return crop_assignments, cell_id_map
 
         # Extract cell IDs from merged mask (only cells that appear in current frame)
         obj_ids = np.unique(full_mask)
@@ -250,34 +253,24 @@ class SAM2AutomaticCellTracker:
                 obj_id_list.append(int(obj_id))
                 obj_id_to_centroid[int(obj_id)] = centroid
 
-        # Frame 0: Assign all cells to nearest crop
+        # Frame 0: Assign all cells to nearest crop (global_id == local_id)
         if frame_idx == 0:
             assignments = self._assign_to_nearest_crop(centroids, crop_centers)
             for obj_id, assigned in zip(obj_id_list, assignments, strict=False):
                 crop_assignments[assigned].add(obj_id)
-            return crop_assignments
+            return crop_assignments, cell_id_map
         
-        # Frame 1+: only reassign if cell overlaps (IoU > threshold) with cell in another crop
-        # First, determine which crop each cell was previously assigned to
+        # Frame 1+: reassign based on centroid proximity + overlap
+        # Use saved crop assignments and id map from previous frame
         cell_to_prev_crop = {}
+        prev_cell_id_map = {}
         for crop_idx, state in enumerate(tiled_states):
-            # Check if this crop has memory for the cell (indicates it was tracking it)
-            if "memory_dict" in state:
-                for obj_id in state["memory_dict"].keys():
-                    if obj_id == "mask_mem_pos_enc":
-                        continue
-                    obj_id_int = int(obj_id)
-                    if obj_id_int not in cell_to_prev_crop:
-                        cell_to_prev_crop[obj_id_int] = crop_idx
-            
-            # Also check previous frame's obj_ids
-            if "obj_ids" in state and state["obj_ids"] is not None:
-                if frame_idx - 1 in state["obj_ids"]:
-                    prev_obj_ids = state["obj_ids"][frame_idx - 1].cpu().numpy()
-                    for obj_id in prev_obj_ids:
-                        obj_id_int = int(obj_id)
-                        if obj_id_int not in cell_to_prev_crop:
-                            cell_to_prev_crop[obj_id_int] = crop_idx
+            prev_assigned = state["crop_assignments"].get(frame_idx - 1, set())
+            for obj_id in prev_assigned:
+                cell_to_prev_crop[int(obj_id)] = crop_idx
+            # Carry forward previous id map
+            prev_map = state.get("cell_id_map", {}).get(frame_idx - 1, {})
+            prev_cell_id_map.update(prev_map)
         
         # For each cell that appears in the current mask
         for obj_id in obj_ids:
@@ -290,49 +283,63 @@ class SAM2AutomaticCellTracker:
                 assignments = self._assign_to_nearest_crop([centroid], crop_centers)
                 crop_assignments[assignments[0]].add(obj_id_int)
             else:
-                # Existing cell - only reassign if other crop has detected the SAME cell ID
-                # This prevents reassigning daughter cells to crops that haven't predicted the division yet
-                target_crop = prev_crop  # Default: keep in original crop
+                centroid = obj_id_to_centroid.get(obj_id_int)
+                if centroid is None:
+                    crop_assignments[prev_crop].add(obj_id_int)
+                    # Carry forward previous mapping if any
+                    if obj_id_int in prev_cell_id_map:
+                        cell_id_map[obj_id_int] = prev_cell_id_map[obj_id_int]
+                    continue
                 
-                # Check for reassignment (cell appears in mask, so obj_id_to_centroid exists)
-                if obj_id_int in obj_id_to_centroid:
+                nearest_crop = self._assign_to_nearest_crop([centroid], crop_centers)[0]
+                
+                if nearest_crop == prev_crop:
+                    # Already in nearest crop - keep existing mapping
+                    crop_assignments[prev_crop].add(obj_id_int)
+                    if obj_id_int in prev_cell_id_map:
+                        cell_id_map[obj_id_int] = prev_cell_id_map[obj_id_int]
+                else:
+                    # Check if cell overlaps with any cell in the nearest crop
                     current_cell_mask = (full_mask == obj_id_int)
+                    crop_box = tiled_states[nearest_crop]["crop_box"]
+                    x0, y0, x1, y1 = crop_box
+                    crop_mask = crop_masks[nearest_crop]
                     
-                    # Check if other crops have detected the same cell ID
-                    for crop_idx in range(len(tiled_states)):
-                        if crop_idx == prev_crop:
-                            continue
-                        
-                        # Get all cells in this crop
-                        crop_mask = crop_masks[crop_idx]
+                    current_cell_in_crop = current_cell_mask[y0:y1, x0:x1]
+                    cell_area = current_cell_in_crop.sum()
+                    
+                    if cell_area > 0:
+                        # Find the best overlapping cell in the new crop
+                        best_local_id = None
+                        best_overlap = 0
                         crop_cell_ids = np.unique(crop_mask)
                         crop_cell_ids = crop_cell_ids[crop_cell_ids != 0]
                         
-                        # Only reassign if the other crop has the SAME cell ID
-                        # (i.e., it has already detected/predicted this cell)
-                        if obj_id_int in crop_cell_ids:
-                            # Other crop has detected this cell - check IoU to confirm it's the same
-                            other_cell_mask = (crop_mask == obj_id_int)
-                            # Get the crop box to extract the relevant region
-                            crop_box = tiled_states[crop_idx]["crop_box"]
-                            x0, y0, x1, y1 = crop_box
-                            
-                            # Extract region from full_mask for current cell
-                            current_cell_in_crop = current_cell_mask[y0:y1, x0:x1]
-                            
-                            # Compute IoU
-                            iou = self._compute_mask_iou(current_cell_in_crop, other_cell_mask)
-                            
-                            if iou > self.crop_reassign_iou_thresh:
-                                target_crop = crop_idx
-                                break
-                
-                # Assign to target crop (either original or new if reassigned)
-                # If other crop hasn't detected this cell yet, keep it in original crop
-                # This ensures continuity - cell stays in its original crop even if not in mask
-                crop_assignments[target_crop].add(obj_id_int)
+                        for local_id in crop_cell_ids:
+                            local_mask = (crop_mask == local_id)
+                            overlap = np.logical_and(current_cell_in_crop, local_mask).sum()
+                            if overlap > best_overlap:
+                                best_overlap = overlap
+                                best_local_id = int(local_id)
+                        
+                        overlap_ratio = best_overlap / cell_area
+                        
+                        if overlap_ratio >= self.crop_reassign_iou_thresh and best_local_id is not None:
+                            # Reassign to nearest crop with ID mapping
+                            crop_assignments[nearest_crop].add(obj_id_int)
+                            if best_local_id != obj_id_int:
+                                cell_id_map[obj_id_int] = best_local_id
+                        else:
+                            # No sufficient overlap - keep in previous crop
+                            crop_assignments[prev_crop].add(obj_id_int)
+                            if obj_id_int in prev_cell_id_map:
+                                cell_id_map[obj_id_int] = prev_cell_id_map[obj_id_int]
+                    else:
+                        crop_assignments[prev_crop].add(obj_id_int)
+                        if obj_id_int in prev_cell_id_map:
+                            cell_id_map[obj_id_int] = prev_cell_id_map[obj_id_int]
 
-        return crop_assignments
+        return crop_assignments, cell_id_map
 
     def _merge_crop_masks(self, tiled_states, crop_masks):
         """Merge crop masks using non-overlapping regions, then merge cells at boundaries.
@@ -830,9 +837,10 @@ class SAM2AutomaticCellTracker:
         if "frame_paths" in tiled_states[0]:
             global_state["frame_paths"] = tiled_states[0]["frame_paths"]
 
-        # Initialize crop_assignments storage in each state
+        # Initialize crop_assignments and cell_id_map storage in each state
         for state in tiled_states:
             state["crop_assignments"] = {}
+            state["cell_id_map"] = {}
         
         # Store crop tracking results if saving crop movies
         crop_tracking_results = [[] for _ in tiled_states] if self.save_crop_movies else None
@@ -855,6 +863,12 @@ class SAM2AutomaticCellTracker:
                 # Frame 1+: Tracking - use previous frame's assignments to filter current predictions
                 prev_assignments = [state["crop_assignments"].get(frame_idx - 1, set()) for state in tiled_states]
                 
+                # Get previous cell_id_map (merged from all states)
+                prev_id_map = {}
+                for state in tiled_states:
+                    prev_map = state.get("cell_id_map", {}).get(frame_idx - 1, {})
+                    prev_id_map.update(prev_map)
+                
                 # Filter each crop: use assigned cells from previous frame, handle divisions
                 filtered_masks = []
                 for crop_idx, (state, track_mask) in enumerate(zip(tiled_states, crop_masks, strict=False)):
@@ -872,14 +886,18 @@ class SAM2AutomaticCellTracker:
                     
                     # For each assigned cell, find it or its daughters
                     for assigned_cell_id in assigned_cell_ids:
-                        # Check if assigned cell exists in current crop
-                        cell_mask = (track_mask == assigned_cell_id)
+                        # Look up the local cell ID in this crop (may differ if reassigned)
+                        local_cell_id = prev_id_map.get(assigned_cell_id, assigned_cell_id)
+                        
+                        # Check if local cell exists in current crop
+                        cell_mask = (track_mask == local_cell_id)
                         if cell_mask.sum() > 0:
+                            # Use the global ID in the filtered mask
                             filtered_mask[cell_mask] = assigned_cell_id
                         else:
                             # Cell doesn't exist - check for daughters (cells with this as parent)
                             daughter_ids = [obj_id for obj_id, parent_id in parent_map.items() 
-                                          if parent_id == assigned_cell_id]
+                                          if parent_id == local_cell_id]
                             for daughter_id in daughter_ids:
                                 daughter_mask = (track_mask == daughter_id)
                                 if daughter_mask.sum() > 0:
@@ -952,12 +970,13 @@ class SAM2AutomaticCellTracker:
                 
             if frame_idx < num_frames:
                 # Compute new assignments for current frame (to use in next frame)
-                crop_assignments = self._assign_cells_to_crops(
+                crop_assignments, cell_id_map = self._assign_cells_to_crops(
                     tiled_states, crop_centers, crop_masks, full_mask, frame_idx=frame_idx
                 )
-                # Store assignments for next frame
+                # Store assignments and id map for next frame
                 for crop_idx, state in enumerate(tiled_states):
                     state["crop_assignments"][frame_idx] = crop_assignments[crop_idx]
+                    state["cell_id_map"][frame_idx] = cell_id_map
             
             tracking_results.append(full_mask)
 
