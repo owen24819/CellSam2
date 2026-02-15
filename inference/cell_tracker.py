@@ -1,4 +1,5 @@
 import math
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -926,11 +927,92 @@ class SAM2AutomaticCellTracker:
                 
                 # Merge all crops (like frame 0) to get segmentation mask for new cells
                 seg_mask = self._merge_crop_masks(tiled_states, crop_masks)
+                seg_cell_ids = np.unique(seg_mask)
+                seg_cell_ids = seg_cell_ids[seg_cell_ids != 0]
+                
+                # Cross-crop division detection
+                # Build lookup: {parent_global_id: [(daughter_local_id, crop_idx), ...]}
+                division_lookup = {}
+                for crop_idx, state in enumerate(tiled_states):
+                    if frame_idx not in state.get("obj_ids", {}):
+                        continue
+                    local_ids = state["obj_ids"][frame_idx].cpu().numpy()
+                    local_parents = state["parent_ids"][frame_idx].cpu().numpy()
+                    for local_id, local_parent in zip(local_ids, local_parents, strict=False):
+                        if int(local_parent) == 0:
+                            continue
+                        # Resolve local parent to global parent via reverse cell_id_map lookup
+                        global_parent = int(local_parent)
+                        for gid, lid in prev_id_map.items():
+                            if lid == int(local_parent):
+                                global_parent = gid
+                                break
+                        division_lookup.setdefault(global_parent, []).append(
+                            (int(local_id), crop_idx)
+                        )
+                
+                # Check for divisions: parent must be in tracked_mask with 2+ daughters in some crop
+                division_parent_map = {}  # {daughter_id: parent_id}
+                division_crop_map = {}    # {daughter_id: crop_idx that detected it}
+                for div_parent_id, daughters in division_lookup.items():
+                    if div_parent_id not in tracked_cell_ids:
+                        continue
+                    # Group daughters by crop, find a crop with 2+ daughters
+                    by_crop = defaultdict(list)
+                    for d_id, c_idx in daughters:
+                        by_crop[c_idx].append(d_id)
+                    
+                    for crop_idx, daughter_ids in by_crop.items():
+                        if len(daughter_ids) < 2:
+                            continue
+                        # This crop detected a division - match daughters to tracked parent + new seg cells
+                        crop_box = tiled_states[crop_idx]["crop_box"]
+                        x0, y0, x1, y1 = crop_box
+                        matched_daughters = []
+                        
+                        for d_id in daughter_ids:
+                            d_mask_crop = (crop_masks[crop_idx] == d_id)
+                            d_mask_full = np.zeros_like(tracked_mask, dtype=bool)
+                            d_mask_full[y0:y1, x0:x1] = d_mask_crop
+                            
+                            # Check if daughter overlaps with tracked parent
+                            parent_mask = (tracked_mask == div_parent_id)
+                            inter = np.logical_and(d_mask_full, parent_mask).sum()
+                            union_val = np.logical_or(d_mask_full, parent_mask).sum()
+                            if union_val > 0 and inter / union_val >= 0.3:
+                                matched_daughters.append((d_id, div_parent_id, d_mask_full, "parent"))
+                                continue
+                            
+                            # Check against new seg_mask cells (low overlap with tracked)
+                            for seg_id in seg_cell_ids:
+                                seg_m = (seg_mask == seg_id)
+                                overlap_with_tracked = np.logical_and(seg_m, tracked_mask > 0).sum()
+                                if overlap_with_tracked / max(seg_m.sum(), 1) >= 0.3:
+                                    continue  # Not a new cell
+                                inter = np.logical_and(d_mask_full, seg_m).sum()
+                                union_val = np.logical_or(d_mask_full, seg_m).sum()
+                                if union_val > 0 and inter / union_val >= 0.3:
+                                    matched_daughters.append((d_id, seg_id, d_mask_full, "new"))
+                                    break
+                        
+                        if len(matched_daughters) >= 2:
+                            # Division confirmed - relabel parent and add new daughters
+                            for d_id, match_id, d_mask, match_type in matched_daughters:
+                                if match_type == "parent":
+                                    # Relabel parent cell -> daughter in tracked_mask
+                                    tracked_mask[tracked_mask == div_parent_id] = d_id
+                                else:
+                                    # Add new daughter to tracked_mask
+                                    tracked_mask[d_mask] = d_id
+                                division_parent_map[d_id] = div_parent_id
+                                division_crop_map[d_id] = crop_idx
+                            # Update tracked_cell_ids
+                            tracked_cell_ids.discard(div_parent_id)
+                            tracked_cell_ids.update(d_id for d_id, _, _, _ in matched_daughters)
+                            break  # Found division in this crop, stop checking others
                 
                 # Overlay: add new cells from seg_mask that don't overlap with tracked cells
                 full_mask = tracked_mask.copy()
-                seg_cell_ids = np.unique(seg_mask)
-                seg_cell_ids = seg_cell_ids[seg_cell_ids != 0]
                 
                 for seg_cell_id in seg_cell_ids:
                     seg_cell_mask = (seg_mask == seg_cell_id)
@@ -978,6 +1060,16 @@ class SAM2AutomaticCellTracker:
                 crop_assignments, cell_id_map = self._assign_cells_to_crops(
                     tiled_states, crop_centers, crop_masks, full_mask, frame_idx=frame_idx
                 )
+                # Override assignments for division daughters - force to detecting crop
+                if frame_idx > 0:
+                    for d_id, d_crop_idx in division_crop_map.items():
+                        # Remove from wherever it was assigned
+                        for ca in crop_assignments:
+                            ca.discard(d_id)
+                        # Force-assign to the crop that detected the division
+                        crop_assignments[d_crop_idx].add(d_id)
+                        # No cell_id_map needed - daughter ID is native to this crop
+                        cell_id_map.pop(d_id, None)
                 # Store assignments and id map for next frame
                 for crop_idx, state in enumerate(tiled_states):
                     state["crop_assignments"][frame_idx] = crop_assignments[crop_idx]
@@ -999,6 +1091,9 @@ class SAM2AutomaticCellTracker:
                 local_parents = state["parent_ids"][frame_idx].cpu().numpy()
                 for obj_id, parent_id in zip(local_ids, local_parents, strict=False):
                     parent_map[int(obj_id)] = int(parent_id)
+            # Merge cross-crop division parents (overrides per-crop parent_map)
+            if frame_idx > 0:
+                parent_map.update(division_parent_map)
             for i, obj_id in enumerate(obj_ids):
                 parent_ids[i] = parent_map.get(int(obj_id), 0)
             global_state["parent_ids"][frame_idx] = torch.tensor(
