@@ -1,5 +1,4 @@
 import math
-from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -869,7 +868,6 @@ class SAM2AutomaticCellTracker:
                 for state in tiled_states:
                     prev_map = state.get("cell_id_map", {}).get(frame_idx - 1, {})
                     prev_id_map.update(prev_map)
-                
                 # Filter each crop: use assigned cells from previous frame, handle divisions
                 filtered_masks = []
                 for crop_idx, (state, track_mask) in enumerate(zip(tiled_states, crop_masks, strict=False)):
@@ -930,87 +928,6 @@ class SAM2AutomaticCellTracker:
                 seg_cell_ids = np.unique(seg_mask)
                 seg_cell_ids = seg_cell_ids[seg_cell_ids != 0]
                 
-                # Cross-crop division detection
-                # Build lookup: {parent_global_id: [(daughter_local_id, crop_idx), ...]}
-                division_lookup = {}
-                for crop_idx, state in enumerate(tiled_states):
-                    if frame_idx not in state.get("obj_ids", {}):
-                        continue
-                    local_ids = state["obj_ids"][frame_idx].cpu().numpy()
-                    local_parents = state["parent_ids"][frame_idx].cpu().numpy()
-                    for local_id, local_parent in zip(local_ids, local_parents, strict=False):
-                        if int(local_parent) == 0:
-                            continue
-                        # Resolve local parent to global parent via reverse cell_id_map lookup
-                        global_parent = int(local_parent)
-                        for gid, lid in prev_id_map.items():
-                            if lid == int(local_parent):
-                                global_parent = gid
-                                break
-                        division_lookup.setdefault(global_parent, []).append(
-                            (int(local_id), crop_idx)
-                        )
-                
-                # Check for divisions: parent must be in tracked_mask with 2+ daughters in some crop
-                division_parent_map = {}  # {daughter_id: parent_id}
-                division_crop_map = {}    # {daughter_id: crop_idx that detected it}
-                for div_parent_id, daughters in division_lookup.items():
-                    if div_parent_id not in tracked_cell_ids:
-                        continue
-                    # Group daughters by crop, find a crop with 2+ daughters
-                    by_crop = defaultdict(list)
-                    for d_id, c_idx in daughters:
-                        by_crop[c_idx].append(d_id)
-                    
-                    for crop_idx, daughter_ids in by_crop.items():
-                        if len(daughter_ids) < 2:
-                            continue
-                        # This crop detected a division - match daughters to tracked parent + new seg cells
-                        crop_box = tiled_states[crop_idx]["crop_box"]
-                        x0, y0, x1, y1 = crop_box
-                        matched_daughters = []
-                        
-                        for d_id in daughter_ids:
-                            d_mask_crop = (crop_masks[crop_idx] == d_id)
-                            d_mask_full = np.zeros_like(tracked_mask, dtype=bool)
-                            d_mask_full[y0:y1, x0:x1] = d_mask_crop
-                            
-                            # Check if daughter overlaps with tracked parent
-                            parent_mask = (tracked_mask == div_parent_id)
-                            inter = np.logical_and(d_mask_full, parent_mask).sum()
-                            union_val = np.logical_or(d_mask_full, parent_mask).sum()
-                            if union_val > 0 and inter / union_val >= 0.3:
-                                matched_daughters.append((d_id, div_parent_id, d_mask_full, "parent"))
-                                continue
-                            
-                            # Check against new seg_mask cells (low overlap with tracked)
-                            for seg_id in seg_cell_ids:
-                                seg_m = (seg_mask == seg_id)
-                                overlap_with_tracked = np.logical_and(seg_m, tracked_mask > 0).sum()
-                                if overlap_with_tracked / max(seg_m.sum(), 1) >= 0.3:
-                                    continue  # Not a new cell
-                                inter = np.logical_and(d_mask_full, seg_m).sum()
-                                union_val = np.logical_or(d_mask_full, seg_m).sum()
-                                if union_val > 0 and inter / union_val >= 0.3:
-                                    matched_daughters.append((d_id, seg_id, d_mask_full, "new"))
-                                    break
-                        
-                        if len(matched_daughters) >= 2:
-                            # Division confirmed - relabel parent and add new daughters
-                            for d_id, match_id, d_mask, match_type in matched_daughters:
-                                if match_type == "parent":
-                                    # Relabel parent cell -> daughter in tracked_mask
-                                    tracked_mask[tracked_mask == div_parent_id] = d_id
-                                else:
-                                    # Add new daughter to tracked_mask
-                                    tracked_mask[d_mask] = d_id
-                                division_parent_map[d_id] = div_parent_id
-                                division_crop_map[d_id] = crop_idx
-                            # Update tracked_cell_ids
-                            tracked_cell_ids.discard(div_parent_id)
-                            tracked_cell_ids.update(d_id for d_id, _, _, _ in matched_daughters)
-                            break  # Found division in this crop, stop checking others
-                
                 # Overlay: add new cells from seg_mask that don't overlap with tracked cells
                 full_mask = tracked_mask.copy()
                 
@@ -1055,21 +972,28 @@ class SAM2AutomaticCellTracker:
                 if cell_id != 0 and (full_mask == cell_id).sum() < self.min_mask_area:
                     full_mask[full_mask == cell_id] = 0
 
+            # Build local-to-global mapping for each crop (for post-processing divisions)
+            for crop_idx, (state, crop_mask) in enumerate(zip(tiled_states, crop_masks, strict=False)):
+                x0, y0, x1, y1 = state["crop_box"]
+                crop_region = full_mask[y0:y1, x0:x1]
+                local_to_global = {}
+                for local_id in np.unique(crop_mask):
+                    if local_id == 0:
+                        continue
+                    local_mask = (crop_mask == local_id)
+                    overlapping = crop_region[local_mask]
+                    overlapping = overlapping[overlapping != 0]
+                    if len(overlapping) > 0:
+                        local_to_global[int(local_id)] = int(np.bincount(overlapping).argmax())
+                if "local_to_global" not in state:
+                    state["local_to_global"] = {}
+                state["local_to_global"][frame_idx] = local_to_global
+
             if frame_idx < num_frames:
                 # Compute new assignments for current frame (to use in next frame)
                 crop_assignments, cell_id_map = self._assign_cells_to_crops(
                     tiled_states, crop_centers, crop_masks, full_mask, frame_idx=frame_idx
                 )
-                # Override assignments for division daughters - force to detecting crop
-                if frame_idx > 0:
-                    for d_id, d_crop_idx in division_crop_map.items():
-                        # Remove from wherever it was assigned
-                        for ca in crop_assignments:
-                            ca.discard(d_id)
-                        # Force-assign to the crop that detected the division
-                        crop_assignments[d_crop_idx].add(d_id)
-                        # No cell_id_map needed - daughter ID is native to this crop
-                        cell_id_map.pop(d_id, None)
                 # Store assignments and id map for next frame
                 for crop_idx, state in enumerate(tiled_states):
                     state["crop_assignments"][frame_idx] = crop_assignments[crop_idx]
@@ -1091,9 +1015,6 @@ class SAM2AutomaticCellTracker:
                 local_parents = state["parent_ids"][frame_idx].cpu().numpy()
                 for obj_id, parent_id in zip(local_ids, local_parents, strict=False):
                     parent_map[int(obj_id)] = int(parent_id)
-            # Merge cross-crop division parents (overrides per-crop parent_map)
-            if frame_idx > 0:
-                parent_map.update(division_parent_map)
             for i, obj_id in enumerate(obj_ids):
                 parent_ids[i] = parent_map.get(int(obj_id), 0)
             global_state["parent_ids"][frame_idx] = torch.tensor(
@@ -1102,10 +1023,17 @@ class SAM2AutomaticCellTracker:
 
             self.save_ctc(full_mask, frame_idx, global_state)
 
+        # Post-process divisions across crops
+        if not self.segment:
+            self._postprocess_divisions(tiled_states, tracking_results, global_state)
+
         max_obj_id = 0
         for state in tiled_states:
             global_state_value = state.get("global_id_state", {}).get("value", 0)
             max_obj_id = max(max_obj_id, int(global_state_value))
+        # Account for new daughter IDs created during post-processing
+        if len(global_state["res_track"]) > 0:
+            max_obj_id = max(max_obj_id, int(global_state["res_track"][:, 0].max()))
         global_state["max_obj_id"] = max_obj_id
 
         self.save_tracking_results(global_state, tracking_results)
@@ -2063,6 +1991,187 @@ class SAM2AutomaticCellTracker:
             str(debug_dir / f"heatmap_raw_{frame_idx:03d}.png"), heatmap_overlay
         )
     
+    def _postprocess_divisions(self, tiled_states, tracking_results, global_state):
+        """Post-process to detect divisions across crops with ±1 frame tolerance.
+        
+        Uses local_to_global mappings (computed during main loop) to translate
+        each crop's parent_ids into global IDs. For each division where the parent
+        maps to a global cell and a daughter maps to a "new" cell, confirm it.
+        """
+        res_track = global_state["res_track"]
+        res_path = global_state["res_path"]
+        if len(res_track) == 0:
+            return
+        
+        next_id = int(res_track[:, 0].max()) + 1
+        
+        # Collect new cells: parent_id == 0 and starts after frame 0
+        new_cells = {}  # {cell_id: (row_idx, start_frame)}
+        for row_idx in range(len(res_track)):
+            cell_id, start_frame, _, parent_id = res_track[row_idx].astype(int)
+            if parent_id == 0 and start_frame > 0:
+                new_cells[cell_id] = (row_idx, start_frame)
+        
+        if not new_cells:
+            return
+        
+        # Find all divisions across all crops using local_to_global mapping
+        # {(div_frame, global_parent): set of global daughter IDs}
+        # Also store local daughter IDs for cross-frame matching
+        # {(div_frame, global_parent): (set of global daughters, crop_idx, set of local daughters)}
+        divisions = {}
+        division_local_info = {}  # {(div_frame, global_parent): (crop_idx, set of local_daughters)}
+        for frame_idx in range(len(tracking_results)):
+            for crop_idx, state in enumerate(tiled_states):
+                if frame_idx not in state.get("obj_ids", {}) or frame_idx not in state.get("parent_ids", {}):
+                    continue
+                l2g = state.get("local_to_global", {}).get(frame_idx, {})
+                local_ids = state["obj_ids"][frame_idx].cpu().numpy()
+                local_parents = state["parent_ids"][frame_idx].cpu().numpy()
+                
+                # Group global daughters by global parent
+                # If local parent not in current frame mapping, check previous frame
+                prev_l2g = state.get("local_to_global", {}).get(frame_idx - 1, {}) if frame_idx > 0 else {}
+                parent_to_daughters = {}
+                parent_to_local_daughters = {}  # Store local IDs too
+                # First pass: collect daughters by local parent
+                local_parent_to_daughters = {}
+                for lid, lpid in zip(local_ids, local_parents, strict=False):
+                    if int(lpid) == 0:
+                        continue
+                    local_parent_to_daughters.setdefault(int(lpid), []).append((int(lid), l2g.get(int(lid))))
+                
+                # Second pass: resolve global parents
+                for lpid, daughters in local_parent_to_daughters.items():
+                    if len(daughters) < 2:
+                        continue  # Need at least 2 daughters for division
+                    global_parent = l2g.get(lpid)
+                    # If not found in current frame, try previous frame
+                    if global_parent is None and frame_idx > 0:
+                        global_parent = prev_l2g.get(lpid)
+                    # If still None, check if all daughters map to same global cell (infer parent)
+                    if global_parent is None:
+                        global_daughters = [gid for _, gid in daughters if gid is not None]
+                        if len(set(global_daughters)) == 1 and len(global_daughters) >= 2:
+                            # All daughters map to same global cell - that's the parent
+                            global_parent = global_daughters[0]
+                    
+                    if global_parent is not None:
+                        for lid, gid in daughters:
+                            if gid is not None:
+                                parent_to_daughters.setdefault(global_parent, set()).add(gid)
+                                parent_to_local_daughters.setdefault(global_parent, set()).add(lid)
+                
+                for global_parent, daughters in parent_to_daughters.items():
+                    local_daughters_set = parent_to_local_daughters.get(global_parent, set())
+                    # Check if there are 2+ local daughters (even if they map to same global cell)
+                    if len(local_daughters_set) >= 2:
+                        key = (frame_idx, global_parent)
+                        if key not in divisions:
+                            divisions[key] = set()
+                        divisions[key].update(daughters)
+                        # Store local info for cross-frame matching
+                        division_local_info[key] = (crop_idx, local_daughters_set)
+        
+        # For divisions at frame 51, also check frame 52's mapping to find new cells
+        # This handles the case where global mask hasn't split yet at frame 51
+        # Check ALL crops at frame 52, not just the detecting crop (daughter might be in different crop)
+        for (div_frame, global_parent), daughter_ids in list(divisions.items()):
+            if div_frame == 51:  # Check next frame for new cells
+                next_frame = div_frame + 1
+                if next_frame < len(tracking_results):
+                    div_crop_idx, local_daughters = division_local_info.get((div_frame, global_parent), (None, set()))
+                    if div_crop_idx is not None:
+                        # Check ALL crops at next frame (daughter might appear in different crop)
+                        for check_crop_idx, state in enumerate(tiled_states):
+                            next_l2g = state.get("local_to_global", {}).get(next_frame, {})
+                            # See if any local daughters from frame 51 map to new cells at frame 52
+                            for local_daughter in local_daughters:
+                                if local_daughter in next_l2g:
+                                    mapped_global = next_l2g[local_daughter]
+                                    if mapped_global in new_cells:
+                                        # This local daughter maps to a new cell at frame 52!
+                                        divisions[(div_frame, global_parent)].add(mapped_global)
+        
+        if not divisions:
+            return
+        
+        found_divisions = False
+        processed_parents = set()
+        
+        for (div_frame, global_parent), daughter_ids in divisions.items():
+            if global_parent in processed_parents:
+                continue
+            
+            # Check if any daughter is a "new cell"
+            matched_new_cell = None
+            matched_row_idx = None
+            for daughter_id in daughter_ids:
+                if daughter_id in new_cells:
+                    start_frame = new_cells[daughter_id][1]
+                    frame_diff = abs(start_frame - div_frame)
+                    if frame_diff <= 1:
+                        matched_new_cell = daughter_id
+                        matched_row_idx = new_cells[daughter_id][0]
+                        break
+            
+            if matched_new_cell is None:
+                continue
+            
+            # Verify parent existed at div_frame - 1
+            prev_frame = div_frame - 1
+            if prev_frame < 0:
+                continue
+            parent_prev_count = (tracking_results[prev_frame] == global_parent).sum()
+            if parent_prev_count == 0:
+                continue
+            
+            # Verify parent still exists at div_frame (continued as one daughter)
+            parent_div_count = (tracking_results[div_frame] == global_parent).sum()
+            if parent_div_count == 0:
+                continue
+            
+            # Confirmed division
+            found_divisions = True
+            processed_parents.add(global_parent)
+            division_frame = max(div_frame, new_cells[matched_new_cell][1])
+            
+            # 1. Set parent for the new daughter
+            res_track[matched_row_idx, 3] = global_parent
+            del new_cells[matched_new_cell]
+            
+            # 2. Create new daughter ID for the continued parent
+            new_daughter_id = next_id
+            next_id += 1
+            
+            # 3. Truncate parent and add continued-daughter row
+            parent_rows = np.where(res_track[:, 0] == global_parent)[0]
+            if len(parent_rows) > 0:
+                parent_row = parent_rows[0]
+                old_end = int(res_track[parent_row, 2])
+                res_track[parent_row, 2] = division_frame - 1
+                new_row = np.array([[new_daughter_id, division_frame, old_end, global_parent]])
+                res_track = np.concatenate([res_track, new_row], axis=0)
+            
+            # 4. Update downstream parent refs: parent -> new_daughter_id
+            # Exclude matched_new_cell and new_daughter_id - they should keep global_parent as parent
+            for r in range(len(res_track)):
+                cell_id = int(res_track[r, 0])
+                if cell_id == matched_new_cell or cell_id == new_daughter_id:
+                    continue  # Keep global_parent as parent for these cells
+                if int(res_track[r, 3]) == global_parent and int(res_track[r, 1]) >= division_frame:
+                    res_track[r, 3] = new_daughter_id
+            
+            # 5. Relabel masks from division_frame onward
+            for f in range(division_frame, len(tracking_results)):
+                mask = tracking_results[f]
+                mask[mask == global_parent] = new_daughter_id
+                cv2.imwrite(str(res_path / f"mask{f:03d}.tif"), mask.astype(np.uint16))
+        
+        if found_divisions:
+            global_state["res_track"] = res_track
+            np.savetxt(res_path / "res_track.txt", res_track, fmt="%d")
+
     def save_ctc(self, track_mask, frame_idx, inference_state):
         res_path = inference_state["res_path"]
 
