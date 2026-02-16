@@ -2291,40 +2291,55 @@ class SAM2AutomaticCellTracker:
                 )
 
             if not self.segment:
-                parent_ids = inference_state["parent_ids"][frame_idx].cpu().numpy()
-                parent_ids_unique = np.unique(parent_ids)
-                parent_ids_unique = parent_ids_unique[parent_ids_unique != 0]
+                # Use res_track to find divisions (more reliable than inference_state)
+                res_track = inference_state.get("res_track")
+                if res_track is not None and len(res_track) > 0:
+                    # Find all cells that exist in this frame
+                    cells_in_frame = []
+                    cell_info = {}  # {cell_id: (start_frame, end_frame, parent_id)}
+                    for row in res_track:
+                        cell_id, start_frame, end_frame, parent_id = row.astype(int)
+                        if start_frame <= frame_idx <= end_frame:
+                            cells_in_frame.append((cell_id, parent_id))
+                            cell_info[cell_id] = (start_frame, end_frame, parent_id)
+                    
+                    # Group by parent_id
+                    parent_to_daughters = {}
+                    for cell_id, parent_id in cells_in_frame:
+                        if parent_id != 0:
+                            if parent_id not in parent_to_daughters:
+                                parent_to_daughters[parent_id] = []
+                            parent_to_daughters[parent_id].append(cell_id)
+                    
+                    # Draw line between daughter cells only on the division frame
+                    # (when both daughters start at this frame)
+                    for parent_id, dau_cell_ids in parent_to_daughters.items():
+                        if len(dau_cell_ids) == 2:
+                            # Check if this is the division frame (both daughters start here)
+                            dau1_start = cell_info[dau_cell_ids[0]][0]
+                            dau2_start = cell_info[dau_cell_ids[1]][0]
+                            if dau1_start == frame_idx and dau2_start == frame_idx:
+                                # Get centroids of both daughter cells
+                                mask1 = track_mask == dau_cell_ids[0]
+                                y1, x1 = np.where(mask1)
+                                if len(y1) > 0:
+                                    centroid1_y = int(np.mean(y1))
+                                    centroid1_x = int(np.mean(x1))
 
-                for parent_id in parent_ids_unique:
-                    dau_cell_ids = (
-                        inference_state["obj_ids"][frame_idx][parent_ids == parent_id]
-                        .cpu()
-                        .numpy()
-                    )
+                                    mask2 = track_mask == dau_cell_ids[1]
+                                    y2, x2 = np.where(mask2)
+                                    if len(y2) > 0:
+                                        centroid2_y = int(np.mean(y2))
+                                        centroid2_x = int(np.mean(x2))
 
-                    # Draw line between daughter cells
-                    if len(dau_cell_ids) == 2:
-                        # Get centroids of both daughter cells
-                        mask1 = track_mask == dau_cell_ids[0]
-                        y1, x1 = np.where(mask1)
-                        if len(y1) > 0:
-                            centroid1_y = int(np.mean(y1))
-                            centroid1_x = int(np.mean(x1))
-
-                            mask2 = track_mask == dau_cell_ids[1]
-                            y2, x2 = np.where(mask2)
-                            if len(y2) > 0:
-                                centroid2_y = int(np.mean(y2))
-                                centroid2_x = int(np.mean(x2))
-
-                                # Draw line connecting centroids
-                                cv2.line(
-                                    color_stack[frame_idx],
-                                    (centroid1_x, centroid1_y),
-                                    (centroid2_x, centroid2_y),
-                                    (0, 0, 0),  # Black color
-                                    1,
-                                )  # Line thickness
+                                        # Draw line connecting centroids
+                                        cv2.line(
+                                            color_stack[frame_idx],
+                                            (centroid1_x, centroid1_y),
+                                            (centroid2_x, centroid2_y),
+                                            (0, 0, 0),  # Black color
+                                            1,
+                                        )  # Line thickness
 
             # Add frame number to top of frame
             cv2.putText(
