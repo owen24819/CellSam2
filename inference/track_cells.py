@@ -80,6 +80,11 @@ def parse_args():
         action="store_true",
         help="Save individual movies for each crop (for debugging)",
     )
+    parser.add_argument(
+        "--postprocess_divisions",
+        action="store_true",
+        help="Enable post-processing to detect divisions across crops",
+    )
     return parser.parse_args()
 
 
@@ -180,6 +185,7 @@ def main():
         resize_threshold=args.resize_threshold,
         crop_overlap=args.crop_overlap,
         save_crop_movies=args.save_crop_movies,
+        postprocess_divisions=args.postprocess_divisions,
     )
 
     # Get input path

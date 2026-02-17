@@ -42,6 +42,7 @@ class SAM2AutomaticCellTracker:
         segmentation_merge_iou_thresh: float = 0.5,
         crop_reassign_iou_thresh: float = 0.3,
         save_crop_movies: bool = False,
+        postprocess_divisions: bool = False,
     ) -> None:
         """Initialize SAM2AutomaticCellTracker.
         
@@ -98,6 +99,7 @@ class SAM2AutomaticCellTracker:
         self.segmentation_merge_iou_thresh = segmentation_merge_iou_thresh
         self.crop_reassign_iou_thresh = crop_reassign_iou_thresh
         self.save_crop_movies = save_crop_movies
+        self.postprocess_divisions = postprocess_divisions
 
         self._transforms = SAM2Transforms(
             resolution=self.model.image_size,
@@ -1065,7 +1067,7 @@ class SAM2AutomaticCellTracker:
             self.save_ctc(full_mask, frame_idx, global_state)
 
         # Post-process divisions across crops
-        if not self.segment:
+        if not self.segment and self.postprocess_divisions:
             self._postprocess_divisions(tiled_states, tracking_results, global_state)
 
         max_obj_id = 0
