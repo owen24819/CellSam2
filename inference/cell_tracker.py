@@ -281,7 +281,25 @@ class SAM2AutomaticCellTracker:
                 # New cell (not tracked before) - assign to nearest crop
                 centroid = obj_id_to_centroid[obj_id_int]
                 assignments = self._assign_to_nearest_crop([centroid], crop_centers)
-                crop_assignments[assignments[0]].add(obj_id_int)
+                assigned_crop = assignments[0]
+                crop_assignments[assigned_crop].add(obj_id_int)
+                # Find which local ID this crop uses for the cell
+                crop_box = tiled_states[assigned_crop]["crop_box"]
+                x0, y0, x1, y1 = crop_box
+                cell_in_crop = (full_mask == obj_id_int)[y0:y1, x0:x1]
+                if cell_in_crop.sum() > 0:
+                    crop_mask = crop_masks[assigned_crop]
+                    best_local_id = None
+                    best_overlap = 0
+                    for local_id in np.unique(crop_mask[cell_in_crop]):
+                        if local_id == 0:
+                            continue
+                        overlap = np.logical_and(cell_in_crop, crop_mask == local_id).sum()
+                        if overlap > best_overlap:
+                            best_overlap = overlap
+                            best_local_id = int(local_id)
+                    if best_local_id is not None and best_local_id != obj_id_int:
+                        cell_id_map[obj_id_int] = best_local_id
             else:
                 centroid = obj_id_to_centroid.get(obj_id_int)
                 if centroid is None:
@@ -289,7 +307,7 @@ class SAM2AutomaticCellTracker:
                     # Carry forward previous mapping if any
                     if obj_id_int in prev_cell_id_map:
                         cell_id_map[obj_id_int] = prev_cell_id_map[obj_id_int]
-                    continue
+                        continue
                 
                 nearest_crop = self._assign_to_nearest_crop([centroid], crop_centers)[0]
                 
@@ -850,7 +868,7 @@ class SAM2AutomaticCellTracker:
             for gen in generators:
                 _, state, track_mask = next(gen)
                 crop_masks.append(track_mask)
-            
+
             # Store crop masks for movie saving
             if self.save_crop_movies:
                 for crop_idx, crop_mask in enumerate(crop_masks):
@@ -2194,7 +2212,7 @@ class SAM2AutomaticCellTracker:
         if found_divisions:
             global_state["res_track"] = res_track
             np.savetxt(res_path / "res_track.txt", res_track, fmt="%d")
-
+    
     def save_ctc(self, track_mask, frame_idx, inference_state):
         res_path = inference_state["res_path"]
 
