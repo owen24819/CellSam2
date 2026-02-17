@@ -938,12 +938,24 @@ class SAM2AutomaticCellTracker:
                     overlap_ratio = overlap_mask.sum() / seg_cell_mask.sum() if seg_cell_mask.sum() > 0 else 0
                     
                     if overlap_ratio >= 0.3:  # Significant overlap - merge into tracked cell
-                        # Find which tracked cell it overlaps with most
+                        # Find which tracked cells this seg cell overlaps with
                         overlapping_cells = tracked_mask[overlap_mask]
                         if len(overlapping_cells) > 0:
-                            tracked_cell_id = np.bincount(overlapping_cells).argmax()
-                            # Merge seg_cell into tracked cell
-                            full_mask[seg_cell_mask] = tracked_cell_id
+                            cell_counts = np.bincount(overlapping_cells)
+                            cell_counts[0] = 0  # ignore background
+                            # Count how many tracked cells have significant overlap
+                            seg_area = seg_cell_mask.sum()
+                            significant_cells = []
+                            for cid in range(len(cell_counts)):
+                                if cell_counts[cid] > 0 and cell_counts[cid] / seg_area >= 0.1:
+                                    significant_cells.append(cid)
+                            
+                            if len(significant_cells) == 1:
+                                # Overlaps with exactly one tracked cell - safe to merge
+                                tracked_cell_id = significant_cells[0]
+                                gap_mask = np.logical_and(seg_cell_mask, full_mask == 0)
+                                full_mask[gap_mask] = tracked_cell_id
+                            # else: overlaps multiple tracked cells (e.g. division) - skip
                     else:  # Low overlap
                         # Check if this cell from seg_mask matches a missing assigned cell by spatial overlap
                         # This handles cases where a crop misidentifies a cell (wrong ID)
