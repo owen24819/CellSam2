@@ -2114,25 +2114,22 @@ class SAM2AutomaticCellTracker:
                         # Store local info for cross-frame matching
                         division_local_info[key] = (crop_idx, local_daughters_set)
         
-        # For divisions at frame 51, also check frame 52's mapping to find new cells
-        # This handles the case where global mask hasn't split yet at frame 51
-        # Check ALL crops at frame 52, not just the detecting crop (daughter might be in different crop)
+        # For each division, also check the next frame's mapping to find new cells
+        # This handles the case where the global mask hasn't split yet at the division frame
+        # Check ALL crops at next frame, not just the detecting crop (daughter might be in different crop)
         for (div_frame, global_parent), daughter_ids in list(divisions.items()):
-            if div_frame == 51:  # Check next frame for new cells
-                next_frame = div_frame + 1
-                if next_frame < len(tracking_results):
-                    div_crop_idx, local_daughters = division_local_info.get((div_frame, global_parent), (None, set()))
-                    if div_crop_idx is not None:
-                        # Check ALL crops at next frame (daughter might appear in different crop)
-                        for check_crop_idx, state in enumerate(tiled_states):
-                            next_l2g = state.get("local_to_global", {}).get(next_frame, {})
-                            # See if any local daughters from frame 51 map to new cells at frame 52
-                            for local_daughter in local_daughters:
-                                if local_daughter in next_l2g:
-                                    mapped_global = next_l2g[local_daughter]
-                                    if mapped_global in new_cells:
-                                        # This local daughter maps to a new cell at frame 52!
-                                        divisions[(div_frame, global_parent)].add(mapped_global)
+            next_frame = div_frame + 1
+            if next_frame < len(tracking_results):
+                div_crop_idx, local_daughters = division_local_info.get((div_frame, global_parent), (None, set()))
+                if div_crop_idx is not None:
+                    # Check ALL crops at next frame (daughter might appear in different crop)
+                    for check_crop_idx, state in enumerate(tiled_states):
+                        next_l2g = state.get("local_to_global", {}).get(next_frame, {})
+                        for local_daughter in local_daughters:
+                            if local_daughter in next_l2g:
+                                mapped_global = next_l2g[local_daughter]
+                                if mapped_global in new_cells:
+                                    divisions[(div_frame, global_parent)].add(mapped_global)
         
         if not divisions:
             return
