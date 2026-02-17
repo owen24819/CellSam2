@@ -1023,10 +1023,21 @@ class SAM2AutomaticCellTracker:
             for state in tiled_states:
                 if state["obj_ids"] is None or frame_idx not in state["obj_ids"]:
                     continue
+                l2g = state.get("local_to_global", {}).get(frame_idx, {})
+                prev_l2g = state.get("local_to_global", {}).get(frame_idx - 1, {}) if frame_idx > 0 else {}
                 local_ids = state["obj_ids"][frame_idx].cpu().numpy()
                 local_parents = state["parent_ids"][frame_idx].cpu().numpy()
                 for obj_id, parent_id in zip(local_ids, local_parents, strict=False):
-                    parent_map[int(obj_id)] = int(parent_id)
+                    global_obj = l2g.get(int(obj_id), int(obj_id))
+                    if int(parent_id) == 0:
+                        parent_map.setdefault(global_obj, 0)
+                        continue
+                    # Convert local parent to global using current then previous frame mapping
+                    global_par = l2g.get(int(parent_id))
+                    if global_par is None:
+                        global_par = prev_l2g.get(int(parent_id))
+                    if global_par is not None and global_par != global_obj:
+                        parent_map[global_obj] = global_par
             for i, obj_id in enumerate(obj_ids):
                 parent_ids[i] = parent_map.get(int(obj_id), 0)
             global_state["parent_ids"][frame_idx] = torch.tensor(
