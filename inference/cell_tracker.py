@@ -409,6 +409,9 @@ class SAM2AutomaticCellTracker:
         # Step 3: Find adjacent crops and merge cells at boundaries
         full_mask = self._merge_cells_at_boundaries(full_mask, tiled_states, crop_masks)
         
+        # Step 4: Cleanup — fix any cells still badly clipped after boundary merge
+        full_mask = self._cleanup_clipped_cells(full_mask, tiled_states, crop_masks)
+        
         return full_mask
 
     def _overlay_tracked_masks(self, tiled_states, crop_masks, prev_assignments=None):
@@ -658,6 +661,58 @@ class SAM2AutomaticCellTracker:
                                     full_mask[full_cell_mask] = cell_id_i
                                 else:  # Closer to crop j
                                     full_mask[full_cell_mask] = cell_id_j
+        
+        return full_mask
+
+    def _cleanup_clipped_cells(self, full_mask, tiled_states, crop_masks):
+        """Cleanup pass: fix cells still badly clipped after boundary merging.
+        
+        For each cell in full_mask, compare to its original crop prediction.
+        If IoU < 0.3, merge with an overlapping cell or remove.
+        """
+        cell_ids = np.unique(full_mask)
+        cell_ids = cell_ids[cell_ids != 0]
+        
+        for cell_id in cell_ids:
+            cell_mask = (full_mask == cell_id)
+            if cell_mask.sum() == 0:
+                continue
+            
+            # Find source crop with best overlap
+            best_iou = 1.0
+            best_crop_cell = None
+            best_crop_box = None
+            for state, crop_mask in zip(tiled_states, crop_masks, strict=False):
+                crop_cell = (crop_mask == cell_id)
+                if crop_cell.sum() == 0:
+                    continue
+
+                x0, y0, x1, y1 = state["crop_box"]
+                cell_mask_crop = cell_mask[y0:y1, x0:x1]
+                if cell_mask_crop.sum() == 0:
+                    continue
+
+                intersection = np.logical_and(cell_mask_crop, crop_cell).sum()
+                union = np.logical_or(cell_mask_crop, crop_cell).sum()
+                iou = intersection / union if union > 0 else 0
+                if intersection > 0 and iou < best_iou:
+                    best_iou = iou
+                    best_crop_cell = crop_cell
+                    best_crop_box = (x0, y0, x1, y1)
+            
+            if best_crop_cell is None or best_iou >= 0.3:
+                continue
+            
+            # Cell is badly clipped — merge with overlapping cell or remove
+            x0, y0, x1, y1 = best_crop_box
+            crop_region = full_mask[y0:y1, x0:x1]
+            overlapping = crop_region[best_crop_cell]
+            overlapping = overlapping[(overlapping != 0) & (overlapping != cell_id)]
+            if len(overlapping) > 0:
+                merge_target = int(np.bincount(overlapping).argmax())
+                full_mask[cell_mask] = merge_target
+            else:
+                full_mask[cell_mask] = 0
         
         return full_mask
 
