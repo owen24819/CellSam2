@@ -571,8 +571,34 @@ class SAM2AutomaticCellTracker:
                 edge_cells_i = set()
                 edge_cells_j = set()
                 
-                # Check if crops share an edge (right-left or bottom-top)
-                if full_x1_i == full_x0_j:  # i's right edge touches j's left edge
+                # Check if crops share an edge or diagonal corner
+                # Diagonal cases first (both x and y boundaries meet at a corner)
+                if full_x1_i == full_x0_j and full_y1_i == full_y0_j:
+                    # i is top-left, j is bottom-right
+                    edge_mask_i = full_mask[full_y1_i-3:full_y1_i, full_x1_i-3:full_x1_i]
+                    edge_mask_j = full_mask[full_y0_j:full_y0_j+3, full_x0_j:full_x0_j+3]
+                    edge_cells_i.update(np.unique(edge_mask_i[edge_mask_i != 0]))
+                    edge_cells_j.update(np.unique(edge_mask_j[edge_mask_j != 0]))
+                elif full_x1_j == full_x0_i and full_y1_j == full_y0_i:
+                    # i is bottom-right, j is top-left
+                    edge_mask_i = full_mask[full_y0_i:full_y0_i+3, full_x0_i:full_x0_i+3]
+                    edge_mask_j = full_mask[full_y1_j-3:full_y1_j, full_x1_j-3:full_x1_j]
+                    edge_cells_i.update(np.unique(edge_mask_i[edge_mask_i != 0]))
+                    edge_cells_j.update(np.unique(edge_mask_j[edge_mask_j != 0]))
+                elif full_x1_j == full_x0_i and full_y1_i == full_y0_j:
+                    # i is top-right, j is bottom-left
+                    edge_mask_i = full_mask[full_y1_i-3:full_y1_i, full_x0_i:full_x0_i+3]
+                    edge_mask_j = full_mask[full_y0_j:full_y0_j+3, full_x1_j-3:full_x1_j]
+                    edge_cells_i.update(np.unique(edge_mask_i[edge_mask_i != 0]))
+                    edge_cells_j.update(np.unique(edge_mask_j[edge_mask_j != 0]))
+                elif full_x1_i == full_x0_j and full_y1_j == full_y0_i:
+                    # i is bottom-left, j is top-right
+                    edge_mask_i = full_mask[full_y0_i:full_y0_i+3, full_x1_i-3:full_x1_i]
+                    edge_mask_j = full_mask[full_y1_j-3:full_y1_j, full_x0_j:full_x0_j+3]
+                    edge_cells_i.update(np.unique(edge_mask_i[edge_mask_i != 0]))
+                    edge_cells_j.update(np.unique(edge_mask_j[edge_mask_j != 0]))
+                # Straight edge cases
+                elif full_x1_i == full_x0_j:  # i's right edge touches j's left edge
                     # Get cells at right edge of crop i and left edge of crop j
                     edge_mask_i = full_mask[full_y0_i:full_y1_i, full_x1_i-1:full_x1_i]
                     edge_mask_j = full_mask[full_y0_j:full_y1_j, full_x0_j:full_x0_j+1]
@@ -600,11 +626,8 @@ class SAM2AutomaticCellTracker:
                 # Only merge if they have the SAME cell ID (same physical cell detected in both crops)
                 for cell_id_i in cell_ids_i:
                     cell_in_overlap_i = (overlap_mask_i == cell_id_i)
-                    
                     for cell_id_j in cell_ids_j:
                         cell_in_overlap_j = (overlap_mask_j == cell_id_j)
-                        
-                        # Compute IoU in the overlapping area using original crop masks
                         intersection = np.logical_and(cell_in_overlap_i, cell_in_overlap_j).sum()
                         union = np.logical_or(cell_in_overlap_i, cell_in_overlap_j).sum()
                         if union == 0:
