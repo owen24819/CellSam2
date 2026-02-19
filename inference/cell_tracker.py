@@ -1194,7 +1194,7 @@ class SAM2AutomaticCellTracker:
                 
                 
                 crop_state = {
-                    "res_path": res_path / f"crop_{crop_idx}",
+                    "res_path": res_path / 'crops',
                     "video_path": video_path,
                     "video_height": crop_height,
                     "video_width": crop_width,
@@ -1214,8 +1214,44 @@ class SAM2AutomaticCellTracker:
                         if frame_idx in crop_state_obj["parent_ids"]:
                             crop_state["parent_ids"][frame_idx] = crop_state_obj["parent_ids"][frame_idx]
                 
+                # Build res_track for this crop so division lines appear in crop movies
+                crop_res_track = np.zeros((0, 4))
+                for frame_idx in range(len(crop_results)):
+                    crop_mask = crop_results[frame_idx]
+                    cell_ids = np.unique(crop_mask)
+                    cell_ids = cell_ids[cell_ids != 0]
+                    
+                    # Build parent lookup for this frame from the crop's local IDs
+                    parent_lookup = {}
+                    if (crop_state_obj.get("obj_ids") is not None
+                            and frame_idx in crop_state_obj["obj_ids"]
+                            and crop_state_obj.get("parent_ids") is not None
+                            and frame_idx in crop_state_obj["parent_ids"]):
+                        local_ids = crop_state_obj["obj_ids"][frame_idx].cpu().numpy()
+                        local_parents = crop_state_obj["parent_ids"][frame_idx].cpu().numpy()
+                        for lid, lpar in zip(local_ids, local_parents, strict=False):
+                            parent_lookup[int(lid)] = int(lpar)
+                    
+                    for cell_id in cell_ids:
+                        cell_id_int = int(cell_id)
+                        parent_id = parent_lookup.get(cell_id_int, 0)
+                        
+                        if len(crop_res_track) > 0 and cell_id_int in crop_res_track[:, 0].astype(int):
+                            # Existing cell — extend its end frame
+                            crop_res_track[crop_res_track[:, 0] == cell_id_int, 2] = frame_idx
+                        else:
+                            # New cell
+                            crop_res_track = np.concatenate(
+                                [crop_res_track, np.array([[cell_id_int, frame_idx, frame_idx, parent_id]])],
+                                axis=0,
+                            )
+                
+                crop_state["res_track"] = crop_res_track
+                
                 crop_state["res_path"].mkdir(parents=True, exist_ok=True)
                 self.save_tracking_results(crop_state, crop_results, crop_idx=crop_idx)
+
+                np.savetxt(crop_state["res_path"] / f"res_track_crop_{crop_idx}.txt", crop_res_track, fmt="%d")
 
         return tracking_results
 
