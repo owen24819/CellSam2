@@ -1138,8 +1138,15 @@ class SAM2AutomaticCellTracker:
                             continue
                         global_parent = l2g_prev.get(local_parent_int)
                         global_daughter = l2g_curr.get(int(local_obj))
-                        if global_parent is not None and global_daughter is not None:
+                        if global_parent is not None and global_daughter is not None and global_parent != global_daughter:
                             frame_divisions.setdefault(global_parent, set()).add(global_daughter)
+            
+            # Discard divisions that don't have exactly two daughter cells
+            frame_divisions = {
+                parent: daughters 
+                for parent, daughters in frame_divisions.items() 
+                if len(daughters) == 2
+            }
 
             if frame_idx < num_frames:
                 # Compute new assignments for current frame (to use in next frame)
@@ -1179,6 +1186,13 @@ class SAM2AutomaticCellTracker:
                         global_par = prev_l2g.get(int(parent_id))
                     if global_par is not None and global_par != global_obj:
                         parent_map[global_obj] = global_par
+
+            # If a cell has a parent, remove any assignments where it's assigned as parent to other cells
+            # (cells can't be both child and parent)
+            for obj_id, parent_id in parent_map.items():
+                if parent_id in parent_map.keys():
+                    parent_map[obj_id] = 0
+
             for i, obj_id in enumerate(obj_ids):
                 parent_ids[i] = parent_map.get(int(obj_id), 0)
             global_state["parent_ids"][frame_idx] = torch.tensor(
