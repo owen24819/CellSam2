@@ -1174,24 +1174,38 @@ class SAM2AutomaticCellTracker:
             )
             parent_ids = np.zeros_like(obj_ids, dtype=np.int32)
             parent_map = {}
-            for state in tiled_states:
+            
+            for crop_idx, state in enumerate(tiled_states):
                 if state["obj_ids"] is None or frame_idx not in state["obj_ids"]:
                     continue
+                
+                # Get cells assigned to this crop in previous frame
+                prev_assignments = state.get("crop_assignments", {}).get(frame_idx - 1, set()) if frame_idx > 0 else set()
+                
                 l2g = state.get("local_to_global", {}).get(frame_idx, {})
                 prev_l2g = state.get("local_to_global", {}).get(frame_idx - 1, {}) if frame_idx > 0 else {}
                 local_ids = state["obj_ids"][frame_idx].cpu().numpy()
                 local_parents = state["parent_ids"][frame_idx].cpu().numpy()
+                
                 for obj_id, parent_id in zip(local_ids, local_parents, strict=False):
                     global_obj = l2g.get(int(obj_id), int(obj_id))
                     if int(parent_id) == 0:
                         parent_map.setdefault(global_obj, 0)
                         continue
+                    
                     # Convert local parent to global using current then previous frame mapping
                     global_par = l2g.get(int(parent_id))
                     if global_par is None:
                         global_par = prev_l2g.get(int(parent_id))
+                    
+                    # Only assign parent if:
+                    # 1. Parent exists and is valid
+                    # 2. Parent was assigned to this crop in previous frame (predicted division)
                     if global_par is not None and global_par != global_obj:
-                        parent_map[global_obj] = global_par
+                        if frame_idx > 0 and global_par in prev_assignments:
+                            # Parent was assigned to this crop, so it predicted a division
+                            parent_map[global_obj] = global_par
+                        # Otherwise, let postprocess_divisions handle it
 
             # If a cell has a parent, remove any assignments where it's assigned as parent to other cells
             # (cells can't be both child and parent)
