@@ -171,7 +171,7 @@ class MaskDecoder(nn.Module):
 
         # Determine which cells are dividing
         if is_dividing is None:
-            is_dividing = (div_score_logits[:,0] > self.div_obj_score_thresh) & (object_score_logits[:,0] > self.obj_score_thresh) & (iou_pred[:,1:3] > self.pred_iou_thresh).all(1)
+            is_dividing = (div_score_logits[:,0].sigmoid() > self.div_obj_score_thresh) & (object_score_logits[:,0].sigmoid() > self.obj_score_thresh) & (iou_pred[:,1:3] > self.pred_iou_thresh).all(1)
         
         # Ensure is_dividing is a flat boolean tensor
         is_dividing = is_dividing.view(-1)

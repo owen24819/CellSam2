@@ -23,9 +23,9 @@ class SAM2AutomaticCellTracker:
         model: SAM2Base,
         points_per_side: int = 32,
         points_per_batch: int = 32,
-        obj_score_thresh: float = 0,
+        obj_score_thresh: float = 0.5,
         pred_iou_thresh: float = 0.7,
-        div_obj_score_thresh: float = 0,
+        div_obj_score_thresh: float = 0.5,
         box_nms_thresh: float = 0.5,
         max_hole_area: int = 0,
         max_sprinkle_area: int = 0,
@@ -83,7 +83,6 @@ class SAM2AutomaticCellTracker:
         self.obj_score_thresh = obj_score_thresh
 
         self.pred_iou_thresh = pred_iou_thresh
-        self.obj_score_thresh = obj_score_thresh
         self.div_obj_score_thresh = div_obj_score_thresh
         self.segment = segment
         self.use_heatmap = use_heatmap
@@ -1910,7 +1909,7 @@ class SAM2AutomaticCellTracker:
                 }
 
         keep_tokens = (
-            (object_score_logits_dict["post_div"][:, 0] > self.obj_score_thresh)
+            (object_score_logits_dict["post_div"][:, 0].sigmoid() > self.obj_score_thresh)
             * (ious[:, 0] > self.pred_iou_thresh)
             * (max_mask_area > self.min_mask_area)
         )
@@ -1945,7 +1944,7 @@ class SAM2AutomaticCellTracker:
 
         # Store which cells are predicted to be objects but are not kept by NMS or iou score or mask threshold
         valid_next_frame_mask = (
-            object_score_logits_dict["post_div"][:, 0] > self.obj_score_thresh
+            object_score_logits_dict["post_div"][:, 0].sigmoid() > self.obj_score_thresh
         )
 
         if heatmap_input:

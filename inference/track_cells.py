@@ -51,6 +51,18 @@ def parse_args():
         help="IoU threshold for predictions",
     )
     parser.add_argument(
+        "--div_obj_score_thresh",
+        type=float,
+        default=0.5,
+        help="Division object score threshold",
+    )
+    parser.add_argument(
+        "--obj_score_thresh",
+        type=float,
+        default=0.5,
+        help="Object score threshold",
+    )
+    parser.add_argument(
         "--segment",
         action="store_true",
         help="Whether to perform segmentation (default: False)",
@@ -177,8 +189,8 @@ def main():
     tracker = SAM2AutomaticCellTracker(
         sam2_model,
         pred_iou_thresh=args.pred_iou_thresh,
-        obj_score_thresh=0,
-        div_obj_score_thresh=0,
+        obj_score_thresh=args.obj_score_thresh,
+        div_obj_score_thresh=args.div_obj_score_thresh,
         box_nms_thresh=args.box_nms_thresh,
         segment=args.segment,
         use_heatmap=not args.no_heatmap,
