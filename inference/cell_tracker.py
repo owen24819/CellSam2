@@ -1082,6 +1082,24 @@ class SAM2AutomaticCellTracker:
                             new_cell_mask = np.logical_and(seg_cell_mask, tracked_mask == 0)
                             full_mask[new_cell_mask] = seg_cell_id
                 
+            # Ensure each cell is one blob (keep largest blob, remove smaller ones)
+            for cell_id in np.unique(full_mask):
+                if cell_id == 0:
+                    continue
+                cell_mask = (full_mask == cell_id)
+                # Find connected components (blobs) for this cell
+                num_labels, labels = cv2.connectedComponents(cell_mask.astype(np.uint8))
+                if num_labels > 2:  # More than background (0) and one component (1)
+                    # Find the largest blob
+                    blob_sizes = []
+                    for label in range(1, num_labels):  # Skip background (0)
+                        blob_sizes.append((labels == label).sum())
+                    largest_blob_idx = np.argmax(blob_sizes) + 1  # +1 because labels start at 1
+                    # Remove all smaller blobs
+                    for label in range(1, num_labels):
+                        if label != largest_blob_idx:
+                            full_mask[labels == label] = 0
+            
             # Remove cells below area threshold
             for cell_id in np.unique(full_mask):
                 if cell_id != 0 and (full_mask == cell_id).sum() < self.min_mask_area:
