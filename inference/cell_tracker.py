@@ -736,6 +736,8 @@ class SAM2AutomaticCellTracker:
         if count == 0:
             return torch.zeros(0, device=self.device, dtype=torch.int32)
         if "global_id_state" in inference_state:
+            # global_id_state is a shared dictionary reference across all crops
+            # Modifying it here updates the shared state visible to all crops
             start = inference_state["global_id_state"]["value"]
             obj_ids = torch.arange(
                 start + 1,
@@ -945,6 +947,9 @@ class SAM2AutomaticCellTracker:
             state["crop_assignments"] = {}
             state["cell_id_map"] = {}
         
+        # Track all global IDs ever used (to prevent reuse after cells disappear)
+        all_used_global_ids = set()
+        
         # Store crop tracking results if saving crop movies
         crop_tracking_results = [[] for _ in tiled_states] if self.save_crop_movies else None
         
@@ -1080,7 +1085,19 @@ class SAM2AutomaticCellTracker:
                         else:
                             # Truly new cell - add as new
                             new_cell_mask = np.logical_and(seg_cell_mask, tracked_mask == 0)
-                            full_mask[new_cell_mask] = seg_cell_id
+                            # Check if seg_cell_id is already in use (edge case: reused local ID after global ID was gone)
+                            # This can happen when a local cell ID was used as a global ID, then the global ID disappeared
+                            # (e.g., due to division), and later the local cell ID reappears in a different crop
+                            # Must also check all_used_global_ids - seg_cell_id may be free in current frame but
+                            # was used as a global ID in a previous frame (cell disappeared, now reappears)
+                            if seg_cell_id in all_used_global_ids:
+                                # ID conflict - use _allocate_obj_ids to get a new unique ID
+                                new_id_tensor = self._allocate_obj_ids(tiled_states[0], 1)
+                                new_cell_id = int(new_id_tensor[0].item())
+                                full_mask[new_cell_mask] = new_cell_id
+                            else:
+                                # No conflict - use seg_cell_id directly
+                                full_mask[new_cell_mask] = seg_cell_id
                 
             # Ensure each cell is one blob (keep largest blob, remove smaller ones)
             for cell_id in np.unique(full_mask):
@@ -1201,6 +1218,7 @@ class SAM2AutomaticCellTracker:
 
             obj_ids = np.unique(full_mask)
             obj_ids = obj_ids[obj_ids != 0]
+            all_used_global_ids.update(obj_ids.tolist())
             global_state["obj_ids"][frame_idx] = torch.tensor(
                 obj_ids, device=self.device, dtype=torch.int32
             )
