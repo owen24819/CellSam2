@@ -1128,24 +1128,50 @@ class SAM2AutomaticCellTracker:
                     state["local_to_global"] = {}
                 state["local_to_global"][frame_idx] = local_to_global
 
-            # Build global divisions dict for this frame using local_to_global mappings
+            # Build global divisions dict and parent_map for this frame using local_to_global mappings
             frame_divisions = {}  # {global_parent_id: set(global_daughter_ids)}
-            if frame_idx > 0:
-                for crop_idx, state in enumerate(tiled_states):
-                    if frame_idx not in state.get("obj_ids", {}) or frame_idx not in state.get("parent_ids", {}):
-                        continue
-                    l2g_prev = state.get("local_to_global", {}).get(frame_idx - 1, {})
-                    l2g_curr = state.get("local_to_global", {}).get(frame_idx, {})
-                    local_ids = state["obj_ids"][frame_idx].cpu().numpy()
-                    local_parents = state["parent_ids"][frame_idx].cpu().numpy()
-                    for local_obj, local_parent in zip(local_ids, local_parents):
-                        local_parent_int = int(local_parent)
-                        if local_parent_int == 0:
-                            continue
-                        global_parent = l2g_prev.get(local_parent_int)
-                        global_daughter = l2g_curr.get(int(local_obj))
-                        if global_parent is not None and global_daughter is not None and global_parent != global_daughter:
-                            frame_divisions.setdefault(global_parent, set()).add(global_daughter)
+            parent_map = {}
+            
+            for crop_idx, state in enumerate(tiled_states):
+                if state["obj_ids"] is None or frame_idx not in state["obj_ids"]:
+                    continue
+                if frame_idx not in state.get("parent_ids", {}):
+                    continue
+                
+                # Get cells assigned to this crop in previous frame
+                prev_assignments = state.get("crop_assignments", {}).get(frame_idx - 1, set()) if frame_idx > 0 else set()
+                
+                l2g = state.get("local_to_global", {}).get(frame_idx, {})
+                prev_l2g = state.get("local_to_global", {}).get(frame_idx - 1, {}) if frame_idx > 0 else {}
+                local_ids = state["obj_ids"][frame_idx].cpu().numpy()
+                local_parents = state["parent_ids"][frame_idx].cpu().numpy()
+                
+                for obj_id, parent_id in zip(local_ids, local_parents, strict=False):
+                    local_obj_int = int(obj_id)
+                    local_parent_int = int(parent_id)
+                    global_obj = l2g.get(local_obj_int, local_obj_int)
+                    
+                    # Build parent_map
+                    if local_parent_int == 0:
+                        parent_map.setdefault(global_obj, 0)
+                    else:
+                        # Convert local parent to global using current then previous frame mapping
+                        global_par = l2g.get(local_parent_int)
+                        if global_par is None:
+                            global_par = prev_l2g.get(local_parent_int)
+                        
+                        # Only process if parent exists and is valid
+                        if global_par is not None and global_par != global_obj:
+                            # Only assign parent if it was assigned to this crop in previous frame (predicted division)
+                            if frame_idx > 0 and global_par in prev_assignments:
+                                # Parent was assigned to this crop, so it predicted a division
+                                parent_map[global_obj] = global_par
+                                
+                                # Build frame_divisions: only add if parent was assigned to this crop
+                                # Use global_obj if it was mapped (not fallback), otherwise skip
+                                if local_obj_int in l2g:
+                                    frame_divisions.setdefault(global_par, set()).add(global_obj)
+                            # Otherwise, let postprocess_divisions handle it
             
             # Discard divisions that don't have exactly two daughter cells
             frame_divisions = {
@@ -1153,6 +1179,12 @@ class SAM2AutomaticCellTracker:
                 for parent, daughters in frame_divisions.items() 
                 if len(daughters) == 2
             }
+
+            # If a cell has a parent, remove any assignments where it's assigned as parent to other cells
+            # (cells can't be both child and parent)
+            for obj_id, parent_id in parent_map.items():
+                if parent_id in parent_map.keys():
+                    parent_map[obj_id] = 0
 
             if frame_idx < num_frames:
                 # Compute new assignments for current frame (to use in next frame)
@@ -1173,45 +1205,6 @@ class SAM2AutomaticCellTracker:
                 obj_ids, device=self.device, dtype=torch.int32
             )
             parent_ids = np.zeros_like(obj_ids, dtype=np.int32)
-            parent_map = {}
-            
-            for crop_idx, state in enumerate(tiled_states):
-                if state["obj_ids"] is None or frame_idx not in state["obj_ids"]:
-                    continue
-                
-                # Get cells assigned to this crop in previous frame
-                prev_assignments = state.get("crop_assignments", {}).get(frame_idx - 1, set()) if frame_idx > 0 else set()
-                
-                l2g = state.get("local_to_global", {}).get(frame_idx, {})
-                prev_l2g = state.get("local_to_global", {}).get(frame_idx - 1, {}) if frame_idx > 0 else {}
-                local_ids = state["obj_ids"][frame_idx].cpu().numpy()
-                local_parents = state["parent_ids"][frame_idx].cpu().numpy()
-                
-                for obj_id, parent_id in zip(local_ids, local_parents, strict=False):
-                    global_obj = l2g.get(int(obj_id), int(obj_id))
-                    if int(parent_id) == 0:
-                        parent_map.setdefault(global_obj, 0)
-                        continue
-                    
-                    # Convert local parent to global using current then previous frame mapping
-                    global_par = l2g.get(int(parent_id))
-                    if global_par is None:
-                        global_par = prev_l2g.get(int(parent_id))
-                    
-                    # Only assign parent if:
-                    # 1. Parent exists and is valid
-                    # 2. Parent was assigned to this crop in previous frame (predicted division)
-                    if global_par is not None and global_par != global_obj:
-                        if frame_idx > 0 and global_par in prev_assignments:
-                            # Parent was assigned to this crop, so it predicted a division
-                            parent_map[global_obj] = global_par
-                        # Otherwise, let postprocess_divisions handle it
-
-            # If a cell has a parent, remove any assignments where it's assigned as parent to other cells
-            # (cells can't be both child and parent)
-            for obj_id, parent_id in parent_map.items():
-                if parent_id in parent_map.keys():
-                    parent_map[obj_id] = 0
 
             for i, obj_id in enumerate(obj_ids):
                 parent_ids[i] = parent_map.get(int(obj_id), 0)
