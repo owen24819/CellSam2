@@ -1116,8 +1116,14 @@ class SAM2AutomaticCellTracker:
                     local_mask = (crop_mask == local_id)
                     overlapping = crop_region[local_mask]
                     overlapping = overlapping[overlapping != 0]
-                    if len(overlapping) > 0:
-                        local_to_global[int(local_id)] = int(np.bincount(overlapping).argmax())
+                    if len(overlapping) == 0:
+                        continue
+                    global_id = int(np.bincount(overlapping).argmax())
+                    intersection = np.logical_and(local_mask, crop_region == global_id).sum()
+                    union = np.logical_or(local_mask, crop_region == global_id).sum()
+                    iou = intersection / union if union > 0 else 0
+                    if iou > 0.3:
+                        local_to_global[int(local_id)] = global_id
                 if "local_to_global" not in state:
                     state["local_to_global"] = {}
                 state["local_to_global"][frame_idx] = local_to_global
