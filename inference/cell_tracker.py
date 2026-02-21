@@ -2347,7 +2347,7 @@ class SAM2AutomaticCellTracker:
                     frame_diff = abs(start_frame - div_frame)
                     if frame_diff <= 1 and daughter_id != global_parent:
                         matched_new_cell = daughter_id
-                        matched_row_idx = new_cells[daughter_id][0]
+                        matched_row_idx = np.where(res_track[:, 0] == daughter_id)[0][0]
                         break
             
             if matched_new_cell is None:
@@ -2406,6 +2406,61 @@ class SAM2AutomaticCellTracker:
                 mask = tracking_results[f]
                 mask[mask == global_parent] = new_daughter_id
                 cv2.imwrite(str(res_path / f"mask{f:03d}.tif"), mask.astype(np.uint16))
+
+            # Update l2g to reflect global_parent -> new_daughter_id
+            # Multiple crops can have local IDs mapping to the same global cell
+            for state in tiled_states:
+                for f in range(division_frame, len(tracking_results)):
+                    l2g_f = state["local_to_global"][f]
+                    for lid, g in list(l2g_f.items()):
+                        if g == global_parent:
+                            l2g_f[lid] = new_daughter_id
+
+            # Edge case: P->(A,B) then new_daughter_id->(C,D) next frame. Use local_to_global: get
+            # local IDs for A and B, check their global mapping in next frame. If it matches {C,D}, collapse.
+            div_crop, local_daughters = division_local_info.get((div_frame, global_parent), (None, set()))
+            child_rows = np.where(res_track[:, 3] == new_daughter_id)[0]
+            next_div_frame = division_frame + 1
+            if div_crop is not None and len(child_rows) == 2 and int(res_track[child_rows[0], 1]) == next_div_frame:
+                gc1, gc2 = int(res_track[child_rows[0], 0]), int(res_track[child_rows[1], 0])
+                if len(local_daughters) == 2:
+                    l2g_div = tiled_states[div_crop].get("local_to_global", {}).get(division_frame, {})
+                    l2g_next = tiled_states[div_crop].get("local_to_global", {}).get(next_div_frame, {})
+                    local_a = local_b = None
+                    for lid in local_daughters:
+                        if l2g_div.get(lid) == matched_new_cell:
+                            local_a = lid
+                        elif l2g_div.get(lid) == new_daughter_id:
+                            local_b = lid
+                    if local_a is not None and local_b is not None:
+                        global_a_next = l2g_next.get(local_a)
+                        global_b_next = l2g_next.get(local_b)
+                        if {global_a_next, global_b_next} == {gc1, gc2}:
+                            map_a = global_a_next
+                            res_track[matched_row_idx, 2] = res_track[child_rows[0] if map_a == gc1 else child_rows[1], 2]
+                            new_d_row = np.where(res_track[:, 0] == new_daughter_id)[0][0]
+                            res_track[new_d_row, 2] = res_track[child_rows[1] if map_a == gc1 else child_rows[0], 2]
+                            res_track[res_track[:, 3] == gc1, 3] = matched_new_cell if map_a == gc1 else new_daughter_id
+                            res_track[res_track[:, 3] == gc2, 3] = matched_new_cell if map_a == gc2 else new_daughter_id
+                            res_track = np.delete(res_track, child_rows, axis=0)
+                            for f in range(division_frame, len(tracking_results)):
+                                mask = tracking_results[f]
+                                if f > division_frame:
+                                    mask[mask == gc1] = matched_new_cell if map_a == gc1 else new_daughter_id
+                                    mask[mask == gc2] = matched_new_cell if map_a == gc2 else new_daughter_id
+                                cv2.imwrite(str(res_path / f"mask{f:03d}.tif"), mask.astype(np.uint16))
+                            # Update l2g so downstream code sees correct global IDs after collapse
+                            g1_new = matched_new_cell if map_a == gc1 else new_daughter_id
+                            g2_new = matched_new_cell if map_a == gc2 else new_daughter_id
+                            # Update the local to global mapping
+                            for state in tiled_states:
+                                for f in range(next_div_frame, len(tracking_results)):
+                                    l2g_f = state["local_to_global"][f]
+                                    for lid, g in list(l2g_f.items()):
+                                        if g == gc1:
+                                            l2g_f[lid] = g1_new
+                                        elif g == gc2:
+                                            l2g_f[lid] = g2_new
 
             found_divisions = True
             processed_parents.add(global_parent)
