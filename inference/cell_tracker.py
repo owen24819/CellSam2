@@ -2366,11 +2366,18 @@ class SAM2AutomaticCellTracker:
             if parent_div_count == 0:
                 continue
             
-            # Confirmed division
-            found_divisions = True
-            processed_parents.add(global_parent)
-            division_frame = max(div_frame, new_cells[matched_new_cell][1])
-            
+            division_frame = new_cells[matched_new_cell][1]
+
+            # Skip if global_parent is not in res_track
+            parent_rows = np.where(res_track[:, 0] == global_parent)[0]
+            if len(parent_rows) == 0:
+                continue
+            parent_row = parent_rows[0]
+
+            # Skip if parent didn't exist before division (start_frame > division_frame - 1)
+            if res_track[parent_row, 1] > division_frame - 1:
+                continue
+
             # 1. Set parent for the new daughter
             res_track[matched_row_idx, 3] = global_parent
             del new_cells[matched_new_cell]
@@ -2378,15 +2385,12 @@ class SAM2AutomaticCellTracker:
             # 2. Create new daughter ID for the continued parent
             new_daughter_id = next_id
             next_id += 1
-            
+
             # 3. Truncate parent and add continued-daughter row
-            parent_rows = np.where(res_track[:, 0] == global_parent)[0]
-            if len(parent_rows) > 0:
-                parent_row = parent_rows[0]
-                old_end = int(res_track[parent_row, 2])
-                res_track[parent_row, 2] = division_frame - 1
-                new_row = np.array([[new_daughter_id, division_frame, old_end, global_parent]])
-                res_track = np.concatenate([res_track, new_row], axis=0)
+            old_end = int(res_track[parent_row, 2])
+            res_track[parent_row, 2] = division_frame - 1
+            new_row = np.array([[new_daughter_id, division_frame, old_end, global_parent]])
+            res_track = np.concatenate([res_track, new_row], axis=0)
             
             # 4. Update downstream parent refs: parent -> new_daughter_id
             # Exclude matched_new_cell and new_daughter_id - they should keep global_parent as parent
@@ -2402,7 +2406,10 @@ class SAM2AutomaticCellTracker:
                 mask = tracking_results[f]
                 mask[mask == global_parent] = new_daughter_id
                 cv2.imwrite(str(res_path / f"mask{f:03d}.tif"), mask.astype(np.uint16))
-        
+
+            found_divisions = True
+            processed_parents.add(global_parent)
+
         if found_divisions:
             global_state["res_track"] = res_track
             np.savetxt(res_path / "res_track.txt", res_track, fmt="%d")
