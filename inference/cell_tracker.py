@@ -2351,7 +2351,7 @@ class SAM2AutomaticCellTracker:
                 if daughter_id in new_cells:
                     start_frame = new_cells[daughter_id][1]
                     frame_diff = abs(start_frame - div_frame)
-                    if frame_diff <= 1:
+                    if frame_diff <= 1 and daughter_id != global_parent:
                         matched_new_cell = daughter_id
                         matched_row_idx = new_cells[daughter_id][0]
                         break
