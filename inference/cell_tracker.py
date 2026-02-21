@@ -2254,7 +2254,7 @@ class SAM2AutomaticCellTracker:
         for row_idx in range(len(res_track)):
             cell_id, start_frame, _, parent_id = res_track[row_idx].astype(int)
             if parent_id == 0 and start_frame > 0:
-                new_cells[cell_id] = (row_idx, start_frame)
+                new_cells[int(cell_id)] = (row_idx, int(start_frame))
         
         if not new_cells:
             return
@@ -2287,18 +2287,12 @@ class SAM2AutomaticCellTracker:
                 
                 # Second pass: resolve global parents
                 for lpid, daughters in local_parent_to_daughters.items():
-                    if len(daughters) < 2:
+                    if len(daughters) != 2:
                         continue  # Need at least 2 daughters for division
                     global_parent = l2g.get(lpid)
                     # If not found in current frame, try previous frame
                     if global_parent is None and frame_idx > 0:
                         global_parent = prev_l2g.get(lpid)
-                    # If still None, check if all daughters map to same global cell (infer parent)
-                    if global_parent is None:
-                        global_daughters = [gid for _, gid in daughters if gid is not None]
-                        if len(set(global_daughters)) == 1 and len(global_daughters) >= 2:
-                            # All daughters map to same global cell - that's the parent
-                            global_parent = global_daughters[0]
                     
                     if global_parent is not None:
                         for lid, gid in daughters:
@@ -2309,7 +2303,7 @@ class SAM2AutomaticCellTracker:
                 for global_parent, daughters in parent_to_daughters.items():
                     local_daughters_set = parent_to_local_daughters.get(global_parent, set())
                     # Check if there are 2+ local daughters (even if they map to same global cell)
-                    if len(local_daughters_set) >= 2:
+                    if len(local_daughters_set) == 2:
                         key = (frame_idx, global_parent)
                         if key not in divisions:
                             divisions[key] = set()
