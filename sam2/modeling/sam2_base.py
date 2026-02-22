@@ -470,7 +470,7 @@ class SAM2Base(torch.nn.Module):
             )
         else:
             # produce an object pointer using the SAM decoder from the mask input
-            _, _, _, _, _, obj_ptr, _ = self._forward_sam_heads(
+            _, _, _, obj_ptr, _, _, _ = self._forward_sam_heads(
                 backbone_features=backbone_features,
                 mask_inputs=self.mask_downsample(mask_inputs_float),
                 high_res_features=high_res_features,
@@ -488,13 +488,13 @@ class SAM2Base(torch.nn.Module):
             obj_ptr = obj_ptr + (1 - lambda_is_obj_appearing) * self.no_obj_ptr
 
         return (
-            low_res_masks,
-            high_res_masks,
             ious,
             low_res_masks,
             high_res_masks,
             obj_ptr,
             object_score_logits,
+            None,
+            None
         )
 
     def forward_image(self, img_batch: torch.Tensor):
