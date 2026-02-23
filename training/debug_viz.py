@@ -52,7 +52,7 @@ def get_largest_blob(mask: torch.Tensor) -> torch.Tensor:
         return mask
     
     # Simple connected component analysis using morphological approach
-    mask_np = mask.cpu().numpy().astype(np.uint8)
+    mask_np = mask.detach().cpu().numpy().astype(np.uint8)
     
     # Use scipy for connected components if available, otherwise use simple approach
     try:
@@ -197,7 +197,7 @@ def create_debug_visualization(
     
     for t in range(T):
         # Get image for this frame and convert to numpy [H, W, 3]
-        img = images[t, video_idx].cpu()
+        img = images[t, video_idx].detach().cpu()
         
         # Denormalize image (assuming ImageNet normalization)
         mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
@@ -225,9 +225,9 @@ def create_debug_visualization(
         # In collate_fn, masks are ordered as:
         # 1. Masks for non-dividing cells (in object order, skipping cells with 2 daughters)
         # 2. Daughter masks appended at the end (2 per dividing cell)
-        cell_ids_raw = batch.metadata.unique_objects_identifier[t][is_real_t][:, 1].cpu()
-        cell_divides_t = batch.cell_divides[t][is_real_t].cpu()
-        daughter_ids_t = batch.daughter_ids[t][is_real_t].cpu()
+        cell_ids_raw = batch.metadata.unique_objects_identifier[t][is_real_t][:, 1].detach().cpu()
+        cell_divides_t = batch.cell_divides[t][is_real_t].detach().cpu()
+        daughter_ids_t = batch.daughter_ids[t][is_real_t].detach().cpu()
         
         gt_cell_ids = []
         daughter_ids_to_add = []
@@ -263,7 +263,7 @@ def create_debug_visualization(
                 # Get predicted cell IDs from model's tracking (accounts for divisions)
                 pred_cell_ids = outputs[output_idx].get("tracking_object_ids", None)
                 if pred_cell_ids is not None:
-                    pred_cell_ids = pred_cell_ids.cpu().numpy()
+                    pred_cell_ids = pred_cell_ids.detach().cpu().numpy()
                 else:
                     # Fallback: use gt_cell_ids if tracking_object_ids not available
                     pred_cell_ids = gt_cell_ids[:len(pred_masks_t)] if len(pred_masks_t) <= len(gt_cell_ids) else gt_cell_ids
@@ -271,7 +271,7 @@ def create_debug_visualization(
                 # Get object score logits (post-division)
                 pred_obj_score_logits = outputs[output_idx].get("pred_object_score_logits", None)
                 assert pred_obj_score_logits is not None, "pred_object_score_logits must be present in outputs for visualization"
-                pred_obj_scores = pred_obj_score_logits.cpu().numpy().flatten()
+                pred_obj_scores = pred_obj_score_logits.detach().cpu().numpy().flatten()
                 
                 # Resize predictions to image size if needed  
                 if pred_masks_t.shape[-2:] != (H, W) and pred_masks_t.numel() > 0:
@@ -287,7 +287,7 @@ def create_debug_visualization(
                 # Overlay predictions on image
                 num_pred_cells = pred_masks_t.shape[0]
                 for cell_idx in range(num_pred_cells):
-                    mask = pred_masks_t[cell_idx].cpu()
+                    mask = pred_masks_t[cell_idx].detach().cpu()
                     # Get largest blob only
                     mask = get_largest_blob(mask)
                     if mask.sum() > 0:
@@ -301,7 +301,7 @@ def create_debug_visualization(
         # Overlay ground truths on image
         num_gt_cells = gt_masks_t.shape[0] if gt_masks_t.numel() > 0 else 0
         for cell_idx in range(num_gt_cells):
-            mask = gt_masks_t[cell_idx].cpu()
+            mask = gt_masks_t[cell_idx].detach().cpu()
             # Get largest blob only
             mask = get_largest_blob(mask)
             if mask.sum() > 0:
