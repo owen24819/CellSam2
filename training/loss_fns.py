@@ -141,6 +141,20 @@ def compute_weighted_heatmap_loss(target_masks, heatmap_predictions, target_heat
         weight=weight
     )
 
+def temporal_matching_loss(match_logits, match_targets):
+    """Cross-entropy loss over N_k + 1 classes for the temporal matcher.
+
+    Args:
+        match_logits:  [N_q, N_k + 1]
+        match_targets: [N_q]  (indices in 0..N_k, where N_k = NO_MATCH)
+    Returns:
+        Scalar loss (mean over queries).
+    """
+    if match_logits.numel() == 0:
+        return match_logits.new_tensor(0.0)
+    return F.cross_entropy(match_logits, match_targets)
+
+
 class MultiStepMultiMasksAndIous(nn.Module):
     def __init__(
         self,
@@ -227,12 +241,20 @@ class MultiStepMultiMasksAndIous(nn.Module):
             target_heatmaps
         )
 
+        # Temporal matching loss (if present for this frame)
+        loss_match = torch.tensor(0.0, device=target_masks.device)
+        if "temporal_match_logits" in outputs:
+            loss_match = temporal_matching_loss(
+                outputs["temporal_match_logits"],
+                outputs["temporal_match_targets"],
+            )
+
         assert len(src_masks_list) == len(ious_list)
         assert len(object_score_logits_list) == len(ious_list)
         assert len(div_score_logits_list) == len(ious_list)
 
         # accumulate the loss over prediction steps
-        losses = {"loss_mask": 0, "loss_dice": 0, "loss_iou": 0, "loss_div": 0, "loss_class": 0, "loss_heatmap": loss_heatmap}
+        losses = {"loss_mask": 0, "loss_dice": 0, "loss_iou": 0, "loss_div": 0, "loss_class": 0, "loss_heatmap": loss_heatmap, "loss_match": loss_match}
         for src_masks, ious, object_score_logits, div_score_logits, is_point_used, pre_div_target_obj, post_div_target_obj, target_obj_divides in zip(src_masks_list, ious_list, object_score_logits_list, div_score_logits_list, is_point_used_list, pre_div_target_obj_list, post_div_target_obj_list, target_obj_divides_list):
             target_masks_used = target_masks[is_point_used]
 

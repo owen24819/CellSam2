@@ -20,6 +20,110 @@ from sam2.modeling.sam2_utils import MLP, get_1d_sine_pe
 NO_OBJ_SCORE = -1024.0
 
 
+class TemporalMatchingHead(torch.nn.Module):
+    """Small cross-attention matcher: frame t+1 queries vs frame t keys + NULL."""
+
+    def __init__(self, hidden_dim=256, num_heads=4):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+
+        # obj_ptr (hidden_dim) + ROI pooled feat (hidden_dim) → matching token
+        self.token_proj = MLP(hidden_dim * 2, hidden_dim, hidden_dim, 2)
+
+        self.q_proj = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.k_proj = torch.nn.Linear(hidden_dim, hidden_dim)
+
+        # Learned NULL key for NO_MATCH class
+        self.null_key = torch.nn.Parameter(torch.zeros(1, hidden_dim))
+        torch.nn.init.trunc_normal_(self.null_key, std=0.02)
+
+        # (dx, dy, log_area_ratio) → per-head bias
+        self.rel_pos_bias_mlp = MLP(3, hidden_dim // 4, num_heads, 2)
+
+    # ------------------------------------------------------------------
+    def build_matching_tokens(self, obj_ptr, pix_feat, mask_logits):
+        """Build per-cell matching tokens via masked-average ROI pooling.
+
+        Args:
+            obj_ptr:     [N, C]
+            pix_feat:    [N, C, H, W]  (memory-conditioned features)
+            mask_logits: [N, 1, H_mask, W_mask]  (raw logits, will be sigmoided)
+
+        Returns:
+            tokens:    [N, C]
+            centroids: [N, 2]  normalised (cx, cy) in [0, 1]
+            areas:     [N]
+        """
+        N, C, H, W = pix_feat.shape
+        device = pix_feat.device
+
+        mask_prob = F.interpolate(
+            mask_logits.float().sigmoid(),
+            size=(H, W),
+            mode="bilinear",
+            align_corners=False,
+        )  # [N, 1, H, W]
+
+        mask_sum = mask_prob.sum(dim=(2, 3)).clamp(min=1e-6)  # [N, 1]
+        roi_feat = (pix_feat * mask_prob).sum(dim=(2, 3)) / mask_sum  # [N, C]
+
+        # Normalised centroids
+        grid_y = torch.arange(H, device=device).float() / max(H - 1, 1)
+        grid_x = torch.arange(W, device=device).float() / max(W - 1, 1)
+        grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing="ij")
+        cx = (mask_prob[:, 0] * grid_x).sum(dim=(1, 2)) / mask_sum[:, 0]
+        cy = (mask_prob[:, 0] * grid_y).sum(dim=(1, 2)) / mask_sum[:, 0]
+        centroids = torch.stack([cx, cy], dim=1)  # [N, 2]
+        areas = mask_sum[:, 0]  # [N]
+
+        token = self.token_proj(torch.cat([obj_ptr, roi_feat], dim=1))
+        return token, centroids, areas
+
+    # ------------------------------------------------------------------
+    def forward(self, query_tokens, key_tokens,
+                query_centroids, key_centroids,
+                query_areas, key_areas):
+        """
+        Args:
+            query_tokens:    [N_q, D]
+            key_tokens:      [N_k, D]
+            query_centroids: [N_q, 2]
+            key_centroids:   [N_k, 2]
+            query_areas:     [N_q]
+            key_areas:       [N_k]
+        Returns:
+            match_logits: [N_q, N_k + 1]  (last col = NO_MATCH)
+        """
+        N_q = query_tokens.shape[0]
+        N_k = key_tokens.shape[0]
+        H = self.num_heads
+        D = self.head_dim
+
+        Q = self.q_proj(query_tokens).view(N_q, H, D)
+
+        keys_with_null = torch.cat([key_tokens, self.null_key], dim=0)
+        K = self.k_proj(keys_with_null).view(N_k + 1, H, D)
+
+        attn = torch.einsum("qhd,khd->qkh", Q, K) / (D ** 0.5)  # [N_q, N_k+1, H]
+
+        if N_k > 0:
+            dx = query_centroids[:, 0:1] - key_centroids[:, 0:1].T  # [N_q, N_k]
+            dy = query_centroids[:, 1:2] - key_centroids[:, 1:2].T
+            log_ar = torch.log(
+                (query_areas[:, None] + 1e-6) / (key_areas[None, :] + 1e-6)
+            )
+            rel_pos = torch.stack([dx, dy, log_ar], dim=-1)        # [N_q, N_k, 3]
+            pos_bias = self.rel_pos_bias_mlp(rel_pos)               # [N_q, N_k, H]
+            null_bias = pos_bias.new_zeros(N_q, 1, H)
+            pos_bias = torch.cat([pos_bias, null_bias], dim=1)      # [N_q, N_k+1, H]
+            attn = attn + pos_bias
+
+        match_logits = attn.mean(dim=-1)  # [N_q, N_k+1]
+        return match_logits
+
+
 class SAM2Base(torch.nn.Module):
     def __init__(
         self,
@@ -101,6 +205,13 @@ class SAM2Base(torch.nn.Module):
         pred_iou_thresh: float = 0.7,
         obj_score_thresh: float = 0.5,
         div_obj_score_thresh: float = 0.5,
+        # Temporal auxiliary matcher
+        enable_temporal_aux_matcher: bool = False,
+        temporal_aux_matcher_num_heads: int = 4,
+        temporal_aux_match_query_k: int = 0,
+        temporal_aux_match_w_daughter: float = 3.0,
+        temporal_aux_match_w_new: float = 2.0,
+        temporal_aux_match_w_track: float = 0.5,
     ):
         super().__init__()
 
@@ -191,6 +302,13 @@ class SAM2Base(torch.nn.Module):
         self.pred_iou_thresh = pred_iou_thresh
         self.obj_score_thresh = obj_score_thresh
         self.div_obj_score_thresh = div_obj_score_thresh
+
+        self.enable_temporal_aux_matcher = enable_temporal_aux_matcher
+        self.temporal_aux_match_query_k = temporal_aux_match_query_k
+        self.temporal_aux_match_w_daughter = temporal_aux_match_w_daughter
+        self.temporal_aux_match_w_new = temporal_aux_match_w_new
+        self.temporal_aux_match_w_track = temporal_aux_match_w_track
+        self._temporal_aux_matcher_num_heads = temporal_aux_matcher_num_heads
 
         self._build_sam_heads()
         self.max_cond_frames_in_attn = max_cond_frames_in_attn
@@ -291,6 +409,12 @@ class SAM2Base(torch.nn.Module):
             torch.nn.Conv2d(self.hidden_dim // 4, self.hidden_dim // 8, kernel_size=1), 
             torch.nn.Conv2d(self.hidden_dim, self.hidden_dim // 8, kernel_size=1)
         ])
+
+        if self.enable_temporal_aux_matcher:
+            self.temporal_matching_head = TemporalMatchingHead(
+                hidden_dim=self.hidden_dim,
+                num_heads=self._temporal_aux_matcher_num_heads,
+            )
 
     def _forward_sam_heads(
         self,

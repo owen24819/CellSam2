@@ -361,11 +361,83 @@ class SAM2Train(SAM2Base):
 
             all_frame_outputs[stage_id] = current_out
 
+        # Compute temporal matching for consecutive frame pairs
+        if self.enable_temporal_aux_matcher:
+            # daughter_id → mother_id across the whole sequence (for GT and sampling).
+            # Keys are post-div (daughters have own tokens), but queries are detection-mode
+            # (no division info). Daughters D,E in frame t+1 must match mother C's key in
+            # frame t, so child_to_parent is required.
+            child_to_parent = self._build_child_to_parent_map(input, processing_order)
+            active_frames = [t for t in processing_order if not input.no_inputs[t]]
+            for i in range(len(active_frames) - 1):
+                t0 = active_frames[i]
+                t1 = active_frames[i + 1]
+                out_t0 = all_frame_outputs.get(t0)
+                out_t1 = all_frame_outputs.get(t1)
+                if out_t0 is None or out_t1 is None:
+                    continue
+                if "key_tokens" not in out_t0 or "key_tokens" not in out_t1:
+                    continue
+
+                # Keys: post-div tokens from frame t.
+                key_ids = out_t0["key_ids"]
+                key_tokens = out_t0["key_tokens"]
+                key_centroids = out_t0["key_centroids"]
+                key_areas = out_t0["key_areas"]
+
+                # Queries: post-div tokens for frame t+1 (tracking_object_ids order).
+                query_valid = out_t1["query_valid_mask"]
+                query_ids = out_t1["query_ids"][query_valid]
+
+                if key_ids.numel() == 0 or query_ids.numel() == 0:
+                    continue
+
+                # Subsample query indices before the expensive SAM pass.
+                selected_positions = self._subsample_matching_query_indices(
+                    query_ids, key_ids, child_to_parent,
+                )
+                if selected_positions is not None:
+                    valid_indices = query_valid.nonzero(as_tuple=False).squeeze(1)
+                    selected_full = valid_indices[selected_positions]
+                    query_valid_sub = torch.zeros_like(query_valid)
+                    query_valid_sub[selected_full] = True
+                    query_valid = query_valid_sub
+                    query_ids = query_ids[selected_positions]
+
+                # Run detection-mode SAM pass only on subsampled queries.
+                query_tokens, query_centroids, query_areas = (
+                    self._compute_detection_query_tokens(
+                        out_t1, query_valid,
+                    )
+                )
+                if query_tokens is None or query_tokens.shape[0] == 0:
+                    continue
+
+                match_logits = self.temporal_matching_head(
+                    query_tokens, key_tokens,
+                    query_centroids, key_centroids,
+                    query_areas, key_areas,
+                )
+                match_targets = self._build_matching_targets(
+                    query_ids, key_ids, child_to_parent,
+                )
+
+                all_frame_outputs[t1]["temporal_match_logits"] = match_logits
+                all_frame_outputs[t1]["temporal_match_targets"] = match_targets
+
         # turn `output_dict` into a list for loss function
         all_frame_outputs = [all_frame_outputs[t] for t in range(num_frames) if not input.no_inputs[t]]
-        # Make DDP happy with activation checkpointing by removing unused keys
+        # Remove per-frame metadata used only during matching (not needed for loss)
+        _matching_scratch_keys = {
+            "key_tokens", "key_centroids", "key_areas", "key_ids",
+            "query_ids", "query_valid_mask",
+            "_raw_vision_feats", "_high_res_features",
+            "_feat_sizes", "_query_masks",
+        }
         all_frame_outputs = [
-            {k: v for k, v in d.items() if k != "obj_ptr"} for d in all_frame_outputs
+            {k: v for k, v in d.items()
+             if k != "obj_ptr" and k not in _matching_scratch_keys}
+            for d in all_frame_outputs
         ]
 
         return all_frame_outputs
@@ -440,6 +512,14 @@ class SAM2Train(SAM2Base):
             is_dividing,
         ) = sam_outputs
 
+        # Cache raw backbone features for the temporal matcher (used by
+        # _compute_detection_query_tokens).
+        if self.enable_temporal_aux_matcher:
+            # Raw backbone features for detection-mode query token generation.
+            current_out["_raw_vision_feats"] = current_vision_feats
+            current_out["_high_res_features"] = high_res_features
+            current_out["_feat_sizes"] = feat_sizes
+
         # Store prediction results
         self._store_prediction_results(
             current_out,
@@ -465,6 +545,49 @@ class SAM2Train(SAM2Base):
             tracking_object_ids,
             obj_ptr
         )
+
+        # Build post-division key tokens for the temporal matcher.
+        # Using post-div obj_ptr and masks means:
+        #   - Non-dividing cells (A, B): get their own tracked token (pre-div == post-div)
+        #   - Dividing cells (C → D, E): each daughter gets its OWN predicted token/mask
+        # This is correct because the combined "mother" pre-div token is NOT representative
+        # of the individual daughters that will appear in the next frame.
+        # For frame T keys, post-div IDs include daughters (D, E from C dividing).
+        # Queries use post-div tracking_object_ids; child_to_parent in _build_matching_targets
+        # maps D→C and E→C where C is in frame T-1 keys.
+        if self.enable_temporal_aux_matcher and current_out.get("obj_ptr") is not None:
+            N_postdiv = tracking_object_ids.shape[0]
+            if N_postdiv > 0:
+                raw_feat = current_vision_feats[-1]          # (HW, 1, C)
+                H_feat, W_feat = feat_sizes[-1]
+                C_feat = raw_feat.size(2)
+                pix_feat_keys = (
+                    raw_feat[:, 0, :]
+                    .view(H_feat, W_feat, C_feat)
+                    .permute(2, 0, 1)
+                    .unsqueeze(0)
+                    .expand(N_postdiv, -1, -1, -1)
+                    .contiguous()
+                )
+                key_tokens, key_centroids, key_areas = (
+                    self.temporal_matching_head.build_matching_tokens(
+                        current_out["obj_ptr"],
+                        pix_feat_keys,
+                        current_out["pred_masks"],
+                    )
+                )
+                current_out["key_tokens"] = key_tokens
+                current_out["key_centroids"] = key_centroids
+                current_out["key_areas"] = key_areas
+                current_out["key_ids"] = tracking_object_ids.clone()
+
+                # Post-div query masks and IDs. tracking_object_ids > 0 = real cells (valid).
+                current_out["_query_masks"] = current_out["pred_masks"]
+                current_out["query_ids"] = tracking_object_ids.clone()
+                current_out["query_valid_mask"] = tracking_object_ids > 0
+            else:
+                current_out["query_ids"] = tracking_object_ids
+                current_out["query_valid_mask"] = tracking_object_ids > 0
 
         # Apply iterative correction points if needed
         if frame_idx in frames_to_add_correction_pt and is_used.sum() > 0:
@@ -657,6 +780,197 @@ class SAM2Train(SAM2Base):
         bkgd_points = points[top_bkgd_pt_indices]  # Shape: [num_bkgd_pts, 1, 2]
 
         return bkgd_points
+
+    # ------------------------------------------------------------------
+    # Temporal matching helpers
+    # ------------------------------------------------------------------
+
+    def _compute_detection_query_tokens(self, out_t1, query_valid):
+        """Build detection-mode query tokens for frame t+1.
+
+        Runs the SAM decoder on raw (non-memory-conditioned) backbone features with
+        GT centroid point prompts. This matches the inference scenario where a new or
+        mismatched cell is freshly detected (no tracking history), so the matcher
+        trains on the same token distribution it will see at test time.
+
+        Args:
+            out_t1:      Output dict from track_step for frame t+1 (has cached raw feats).
+            query_valid: Boolean mask [N] of which cells have valid GT masks.
+
+        Returns:
+            tokens:    [N_valid, C] or None on failure
+            centroids: [N_valid, 2]
+            areas:     [N_valid]
+        """
+        raw_vision_feats = out_t1.get("_raw_vision_feats")
+        high_res_features = out_t1.get("_high_res_features")
+        feat_sizes = out_t1.get("_feat_sizes")
+        # Post-div masks indexed by GT cell order — used to compute centroid point
+        # prompts for the detection SAM pass.  Built in track_step after
+        # _handle_cell_tracking so daughters D/E have their own masks, not the
+        # combined mother mask.
+        query_masks = out_t1.get("_query_masks")
+
+        if raw_vision_feats is None or query_masks is None:
+            return None, None, None
+
+        # Use cells that pass the valid-mask filter
+        valid_mask_idx = query_valid.nonzero(as_tuple=False).squeeze(1)
+        if valid_mask_idx.numel() == 0:
+            return None, None, None
+
+        device = query_masks.device
+        N_valid = valid_mask_idx.numel()
+
+        # ── Raw backbone features: [1, C, H, W] → broadcast to [N_valid, C, H, W]
+        # current_vision_feats is a list of [(HW, 1, C), ...]; last entry is lowest res.
+        raw_feat = raw_vision_feats[-1]           # (HW, 1, C)
+        H_feat, W_feat = feat_sizes[-1]
+        C_feat = raw_feat.size(2)
+        raw_feat_bchw = (
+            raw_feat[:, 0, :]                     # (HW, C)
+            .view(H_feat, W_feat, C_feat)
+            .permute(2, 0, 1)                     # (C, H, W)
+            .unsqueeze(0)                         # (1, C, H, W)
+            .expand(N_valid, -1, -1, -1)          # (N_valid, C, H, W)
+            .contiguous()
+        )
+
+        # ── High-res features: each is (HW, 1, C) → broadcast to (N_valid, C, H, W)
+        det_high_res = None
+        if high_res_features is not None and self.use_high_res_features_in_sam:
+            det_high_res = []
+            for hr_feat in high_res_features:
+                det_high_res.append(
+                    hr_feat[0]                    # (C, H, W)  — already BCHW from _track_step
+                    .unsqueeze(0)
+                    .expand(N_valid, -1, -1, -1)
+                    .contiguous()
+                )
+
+        # ── GT centroid point prompts: one positive point per cell
+        # query_masks: post-div masks in GT cell order [N_gt, 1, H_mask, W_mask]
+        valid_masks = query_masks[valid_mask_idx]  # [N_valid, 1, H, W]
+        mask_bin = (valid_masks.sigmoid() > 0.5).squeeze(1).float()  # [N_valid, H, W]
+        mask_sum = mask_bin.sum(dim=(1, 2)).clamp(min=1)
+        H_m, W_m = mask_bin.shape[1], mask_bin.shape[2]
+
+        gy = torch.arange(H_m, device=device).float() / max(H_m - 1, 1)
+        gx = torch.arange(W_m, device=device).float() / max(W_m - 1, 1)
+        gy, gx = torch.meshgrid(gy, gx, indexing="ij")
+
+        # Centroids in [0,1] → scale to model image size in pixels
+        img_sz = float(self.image_size)
+        cx = (mask_bin * gx).sum(dim=(1, 2)) / mask_sum * img_sz   # [N_valid]
+        cy = (mask_bin * gy).sum(dim=(1, 2)) / mask_sum * img_sz
+
+        # SAM wants coords in (x, y) absolute pixel space
+        point_coords = torch.stack([cx, cy], dim=1).unsqueeze(1)    # [N_valid, 1, 2]
+        point_labels = torch.ones(N_valid, 1, dtype=torch.int32, device=device)
+        point_inputs = {"point_coords": point_coords, "point_labels": point_labels}
+
+        # ── Run SAM decoder on raw (no-memory) features.
+        # Detection mode never predicts divisions (is_dividing=False for all cells),
+        # so pre-div and post-div tokens are always identical here.
+        # Gradients flow normally so the SAM decoder and matching head weights
+        # are updated jointly via the matching loss.
+        # Detection mode always has is_dividing=False so pre-div == post-div.
+        is_div_query = torch.zeros(N_valid, dtype=torch.bool, device=device)
+        (
+            _ious, _low_res, _high_res, _obj_ptr,
+            _obj_score, _div_score, _is_div,
+        ) = self._forward_sam_heads(
+            backbone_features=raw_feat_bchw,
+            point_inputs=point_inputs,
+            high_res_features=det_high_res,
+            is_dividing=is_div_query,
+        )
+
+        tokens, centroids, areas = self.temporal_matching_head.build_matching_tokens(
+            _obj_ptr, raw_feat_bchw, _low_res,
+        )
+        return tokens, centroids, areas
+
+    def _build_child_to_parent_map(self, input, processing_order):
+        """Build {daughter_id: mother_id} across all frames.
+
+        Used for ground-truth targets (detection query D matches mother C's key) and
+        for sampling priority (daughter queries are highest priority).
+        """
+        child_to_parent = {}
+        if not hasattr(input, 'daughter_ids') or input.daughter_ids is None:
+            return child_to_parent
+        if not hasattr(input, 'cell_divides') or input.cell_divides is None:
+            return child_to_parent
+        for t in processing_order:
+            if input.no_inputs[t]:
+                continue
+            real_mask = input.is_real[t]
+            gt_ids = input.metadata.unique_objects_identifier[t][real_mask][:, 1]
+            cell_divides_t = input.cell_divides[t][real_mask]
+            daughter_ids_t = input.daughter_ids[t][real_mask]
+            for i, (is_div, parent_id) in enumerate(zip(cell_divides_t, gt_ids)):
+                if not is_div:
+                    continue
+                for d_id in daughter_ids_t[i]:
+                    d_id_val = d_id.item()
+                    if d_id_val > 0:
+                        child_to_parent[d_id_val] = parent_id.item()
+        return child_to_parent
+
+    def _build_matching_targets(self, query_ids, key_ids, child_to_parent):
+        """For each query, return the index into keys (or N_keys for NO_MATCH).
+
+        Keys are post-div. Queries are detection-mode (no divisions).
+        - Direct tracked cells: query ID found in key_ids → direct match.
+        - Daughters: query ID in child_to_parent and parent in key_ids → match parent.
+        - New FOV cells: no match → NO_MATCH (index N_keys).
+        """
+        key_id_to_idx = {kid.item(): idx for idx, kid in enumerate(key_ids)}
+        N_keys = len(key_ids)
+        targets = []
+        for qid in query_ids:
+            qid_val = qid.item()
+            if qid_val in key_id_to_idx:
+                targets.append(key_id_to_idx[qid_val])
+            elif qid_val in child_to_parent and child_to_parent[qid_val] in key_id_to_idx:
+                targets.append(key_id_to_idx[child_to_parent[qid_val]])
+            else:
+                targets.append(N_keys)
+        return torch.tensor(targets, device=query_ids.device, dtype=torch.long)
+
+    def _subsample_matching_query_indices(self, ids, key_ids, child_to_parent):
+        """Return indices of queries to use, or None if all should be used.
+
+        Weighted subsample: higher prob for daughters & new FOV, lower for tracked.
+        Call before _compute_detection_query_tokens to avoid running SAM on unused queries.
+        """
+        k = self.temporal_aux_match_query_k
+        N = ids.shape[0]
+        if k <= 0 or k >= N:
+            return None
+
+        key_id_set = set(kid.item() for kid in key_ids)
+        w_daughter = self.temporal_aux_match_w_daughter
+        w_new = self.temporal_aux_match_w_new
+        w_track = self.temporal_aux_match_w_track
+
+        weights = ids.new_ones(N)
+        for i, qid in enumerate(ids):
+            qid_val = qid.item()
+            if qid_val in child_to_parent and child_to_parent[qid_val] in key_id_set:
+                weights[i] = w_daughter
+            elif qid_val not in key_id_set:
+                weights[i] = w_new
+            else:
+                weights[i] = w_track
+
+        probs = weights / weights.sum()
+        num_sample = min(k, N)
+        try:
+            return torch.multinomial(probs, num_sample, replacement=False)
+        except RuntimeError:
+            return torch.randperm(N, device=ids.device)[:num_sample]
 
     def _iter_correct_pt_sampling(
         self,
