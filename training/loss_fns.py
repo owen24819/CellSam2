@@ -141,17 +141,20 @@ def compute_weighted_heatmap_loss(target_masks, heatmap_predictions, target_heat
         weight=weight
     )
 
-def temporal_matching_loss(match_logits, match_targets):
+def temporal_matching_loss(match_logits, match_targets, temperature=1.0):
     """Cross-entropy loss over N_k + 1 classes for the temporal matcher.
 
     Args:
         match_logits:  [N_q, N_k + 1]
         match_targets: [N_q]  (indices in 0..N_k, where N_k = NO_MATCH)
+        temperature:   scale logits by 1/temperature to avoid saturated softmax (default 1.0).
     Returns:
         Scalar loss (mean over queries).
     """
     if match_logits.numel() == 0:
         return match_logits.new_tensor(0.0)
+    if temperature != 1.0:
+        match_logits = match_logits / temperature
     return F.cross_entropy(match_logits, match_targets)
 
 
@@ -166,6 +169,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
         pred_obj_scores=False,
         focal_gamma_obj_score=0.0,
         focal_alpha_obj_score=-1,
+        temporal_match_temperature=1.0,
     ):
         """
         This class computes the multi-step multi-mask and IoU losses.
@@ -178,6 +182,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
             pred_obj_scores: if True, compute loss for object scores
             focal_gamma_obj_score: gamma for sigmoid focal loss on object scores
             focal_alpha_obj_score: alpha for sigmoid focal loss on object scores
+            temporal_match_temperature: scale matching logits (e.g. 2.0–4.0) to soften softmax.
         """
 
         super().__init__()
@@ -195,6 +200,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
         self.supervise_all_iou = supervise_all_iou
         self.iou_use_l1_loss = iou_use_l1_loss
         self.pred_obj_scores = pred_obj_scores
+        self.temporal_match_temperature = temporal_match_temperature
 
     def forward(self, outs_batch: List[Dict], targets_batch: torch.Tensor, target_heatmaps_batch: torch.Tensor):
         assert len(outs_batch) == len(targets_batch)
@@ -247,6 +253,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
             loss_match = temporal_matching_loss(
                 outputs["temporal_match_logits"],
                 outputs["temporal_match_targets"],
+                temperature=self.temporal_match_temperature,
             )
 
         assert len(src_masks_list) == len(ious_list)
