@@ -1,6 +1,6 @@
 import math
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import cv2
 import numpy as np
@@ -43,6 +43,7 @@ class SAM2AutomaticCellTracker:
         crop_reassign_iou_thresh: float = 0.7,
         save_crop_movies: bool = False,
         postprocess_divisions: bool = False,
+        aux_matching: Literal["off", "new_cells_only", "segment_then_aux_track"] = "off",
     ) -> None:
         """Initialize SAM2AutomaticCellTracker.
         
@@ -68,7 +69,19 @@ class SAM2AutomaticCellTracker:
             heatmap_topk: Top-k points from heatmap
             segmentation_merge_iou_thresh: IoU threshold for merging cells in segmentation
             crop_reassign_iou_thresh: IoU threshold for reassigning cells between crops
+            postprocess_divisions: Enable post-processing to detect divisions across crops
+            aux_matching: Temporal auxiliary matching mode: "off", "new_cells_only",
+                or "segment_then_aux_track". Requires a model trained with the temporal
+                matching head.
         """
+        if aux_matching != "off":
+            if not getattr(model, "enable_temporal_aux_matcher", False) or not hasattr(
+                model, "temporal_matching_head"
+            ) or model.temporal_matching_head is None:
+                raise ValueError(
+                    f"aux_matching={aux_matching!r} requires a model trained with the "
+                    "temporal auxiliary matching head (enable_temporal_aux_matcher=True)."
+                )
         self.model = model
         self.model.sam_mask_decoder.pred_iou_thresh = pred_iou_thresh
         self.model.sam_mask_decoder.obj_score_thresh = obj_score_thresh
@@ -99,6 +112,10 @@ class SAM2AutomaticCellTracker:
         self.crop_reassign_iou_thresh = crop_reassign_iou_thresh
         self.save_crop_movies = save_crop_movies
         self.postprocess_divisions = postprocess_divisions
+        self.aux_matching = aux_matching
+
+        if self.aux_matching == "segment_then_aux_track":
+            self.segment = True
 
         self._transforms = SAM2Transforms(
             resolution=self.model.image_size,
@@ -215,7 +232,7 @@ class SAM2AutomaticCellTracker:
             assignments.append(int(np.argmin(dists)))
         return assignments
 
-    def _assign_cells_to_crops(self, tiled_states, crop_centers, crop_masks, full_mask, frame_idx=0, divisions=None):
+    def _assign_cells_to_crops(self, tiled_states, crop_centers, crop_masks, full_mask, frame_idx=0, divisions=None, relink_map=None):
         """Assign cells to crops for tracking continuity.
         
         Frame 0: Assign all cells to nearest crop (initial assignment)
@@ -227,6 +244,7 @@ class SAM2AutomaticCellTracker:
             crop_masks: List of crop masks (numpy arrays)
             full_mask: Already merged full mask
             frame_idx: Current frame index
+            relink_map: Optional {seg_id: global_id} from aux matcher; used to set cell_id_map so local→global is correct.
             
         Returns:
             crop_assignments: List of sets, one per crop, containing global cell IDs
@@ -281,10 +299,24 @@ class SAM2AutomaticCellTracker:
                     for d_id in daughter_ids:
                         if d_id not in cell_to_prev_crop:
                             cell_to_prev_crop[d_id] = parent_crop
+
+        # Pre-populate cell_id_map and crop_assignments for cells linked by aux matcher (seg_id → global_id)
+        relinked_global_ids = set()
+        if relink_map:
+            for seg_id, global_id in relink_map.items():
+                global_id = int(global_id)
+                relinked_global_ids.add(global_id)
+                for crop_idx, cm in enumerate(crop_masks):
+                    if seg_id in np.unique(cm):
+                        cell_id_map[global_id] = int(seg_id)
+                        crop_assignments[crop_idx].add(global_id)
+                        break
         
         # For each cell that appears in the current mask
         for obj_id in obj_ids:
             obj_id_int = int(obj_id)
+            if obj_id_int in relinked_global_ids:
+                continue
             prev_crop = cell_to_prev_crop.get(obj_id_int)
             
             if prev_crop is None:
@@ -953,6 +985,9 @@ class SAM2AutomaticCellTracker:
         crop_tracking_results = [[] for _ in tiled_states] if self.save_crop_movies else None
         
         for frame_idx in tqdm(range(num_frames), desc="propagate in video"):
+            aux_parent_map = {}
+            aux_frame_divisions = {}
+            relink_map = {}
             crop_masks = []
             for gen in generators:
                 _, state, track_mask = next(gen)
@@ -963,9 +998,29 @@ class SAM2AutomaticCellTracker:
                 for crop_idx, crop_mask in enumerate(crop_masks):
                     crop_tracking_results[crop_idx].append(crop_mask)
 
+            new_cell_candidates = []
+
+            # Get cells that were in previous frame
+            if frame_idx > 0 and (not self.segment or self.aux_matching == "segment_then_aux_track"):
+                prev_frame_cell_ids = set()
+                if frame_idx > 0 and (frame_idx - 1) < len(tracking_results):
+                    prev_full_mask = tracking_results[frame_idx - 1]
+                    prev_cell_ids = np.unique(prev_full_mask)
+                    prev_cell_ids = prev_cell_ids[prev_cell_ids != 0]
+                    prev_frame_cell_ids = set(prev_cell_ids.tolist())
+
             # Frame 0: Segmentation - merge all crop masks, then assign cells to crops
             if frame_idx == 0 or self.segment:
                 full_mask = self._merge_crop_masks(tiled_states, crop_masks)
+
+                if frame_idx > 0 and self.aux_matching == "segment_then_aux_track":
+                    seg_cell_ids = np.unique(full_mask)
+                    seg_cell_ids = seg_cell_ids[seg_cell_ids != 0]
+
+                    for seg_cell_id in seg_cell_ids:
+                        new_cell_candidates.append(seg_cell_id)
+
+                    seg_mask = full_mask
             else:
                 # Frame 1+: Tracking - use previous frame's assignments to filter current predictions
                 prev_assignments = [state["crop_assignments"].get(frame_idx - 1, set()) for state in tiled_states]
@@ -1014,18 +1069,7 @@ class SAM2AutomaticCellTracker:
                 # Merge tracked masks - overlay full predictions from each crop
                 # Pass prev_assignments to prefer IDs from assigned crops
                 tracked_mask = self._overlay_tracked_masks(tiled_states, filtered_masks, prev_assignments)
-                
-                # Get cells that were in previous frame (for spatial matching to fix misidentifications)
-                prev_frame_cell_ids = set()
-                prev_frame_masks = {}
-                if frame_idx > 0 and (frame_idx - 1) < len(tracking_results):
-                    prev_full_mask = tracking_results[frame_idx - 1]
-                    prev_cell_ids = np.unique(prev_full_mask)
-                    prev_cell_ids = prev_cell_ids[prev_cell_ids != 0]
-                    prev_frame_cell_ids = set(prev_cell_ids.tolist())
-                    for cell_id in prev_frame_cell_ids:
-                        prev_frame_masks[cell_id] = (prev_full_mask == cell_id)
-                
+            
                 # Get cells that appear in tracked_mask
                 tracked_cell_ids = set(np.unique(tracked_mask))
                 tracked_cell_ids.discard(0)
@@ -1037,7 +1081,7 @@ class SAM2AutomaticCellTracker:
                 
                 # Overlay: add new cells from seg_mask that don't overlap with tracked cells
                 full_mask = tracked_mask.copy()
-                
+
                 for seg_cell_id in seg_cell_ids:
                     seg_cell_mask = (seg_mask == seg_cell_id)
                     # Check overlap with tracked cells
@@ -1063,19 +1107,127 @@ class SAM2AutomaticCellTracker:
                                 gap_mask = np.logical_and(seg_cell_mask, full_mask == 0)
                                 full_mask[gap_mask] = tracked_cell_id
                             # else: overlaps multiple tracked cells (e.g. division) - skip
-                    else: 
-                        # Truly new cell - add as new
-                        new_cell_mask = np.logical_and(seg_cell_mask, tracked_mask == 0)
-                        # Check if seg_cell_id is already in use (edge case: reused local ID after global ID was gone)
+
+                    else:
+                        new_cell_mask = np.logical_and(seg_cell_mask, full_mask == 0)
                         if seg_cell_id in all_used_global_ids:
-                            # ID conflict - use _allocate_obj_ids to get a new unique ID
-                            new_id_tensor = self._allocate_obj_ids(tiled_states[0], 1)
-                            new_cell_id = int(new_id_tensor[0].item())
-                            full_mask[new_cell_mask] = new_cell_id
+                            full_mask[new_cell_mask] = int(
+                                self._allocate_obj_ids(tiled_states[0], 1)[0].item()
+                            )
                         else:
-                            # No conflict - use seg_cell_id directly
                             full_mask[new_cell_mask] = seg_cell_id
-                
+
+                        new_cell_candidates.append(seg_cell_id)
+
+            if frame_idx > 0 and len(new_cell_candidates) > 0:
+
+                # Run aux matcher for new-cell candidates; build relink_map {seg_id: gid}
+                if (
+                    new_cell_candidates
+                    and self.aux_matching in ("new_cells_only", "segment_then_aux_track")
+                ):
+                    query_tokens, query_centroids, query_areas, seg_ids_order = (
+                        self._get_query_tokens_for_new_cells(
+                            frame_idx, new_cell_candidates, tiled_states
+                        )
+                    )
+                    if (
+                        query_tokens is not None
+                        and query_tokens.shape[0] > 0
+                        and prev_frame_cell_ids
+                    ):
+                        prev_assignments = [
+                            s["crop_assignments"].get(frame_idx - 1, set())
+                            for s in tiled_states
+                        ]
+                        prev_cell_id_map = {}
+                        for s in tiled_states:
+                            prev_cell_id_map.update(
+                                s.get("cell_id_map", {}).get(frame_idx - 1, {})
+                            )
+                        key_tokens_list, key_centroids_list, key_areas_list, key_ids_list = (
+                            [],
+                            [],
+                            [],
+                            [],
+                        )
+                        for gid in sorted(prev_frame_cell_ids):
+                            for crop_idx, state in enumerate(tiled_states):
+                                if gid not in prev_assignments[crop_idx]:
+                                    continue
+                                aux = state.get("aux_key_data", {}).get(frame_idx - 1)
+                                if aux is None:
+                                    continue
+                                local_id = prev_cell_id_map.get(gid, gid)
+                                try:
+                                    idx = aux["key_ids"].index(local_id)
+                                except ValueError:
+                                    idx = aux["key_ids"].index(gid)
+                                key_tokens_list.append(aux["key_tokens"][idx : idx + 1])
+                                key_centroids_list.append(aux["key_centroids"][idx : idx + 1])
+                                key_areas_list.append(aux["key_areas"][idx : idx + 1])
+                                key_ids_list.append(gid)
+                                break
+                        if key_tokens_list:
+                            key_tokens = torch.cat(key_tokens_list, dim=0).to(
+                                query_tokens.device
+                            )
+                            key_centroids = torch.cat(
+                                key_centroids_list, dim=0
+                            ).to(query_centroids.device)
+                            key_areas = torch.cat(
+                                key_areas_list, dim=0
+                            ).to(query_areas.device)
+                            match_logits = self.model.temporal_matching_head.forward(
+                                query_tokens,
+                                key_tokens,
+                                query_centroids,
+                                key_centroids,
+                                query_areas,
+                                key_areas,
+                            )
+                            # Sparsify: keep only the max per query row (each row has one non-zero).
+                            best_col = match_logits.argmax(dim=1)
+                            mask = torch.nn.functional.one_hot(
+                                best_col, num_classes=match_logits.shape[1]
+                            ).to(match_logits.dtype)
+                            match_logits = match_logits * mask
+                            # Division-aware: each key (parent) can match up to 2 queries (daughters).
+                            # Assign per-key using the sparsified scores.
+                            num_queries = match_logits.shape[0]
+                            num_keys = len(key_ids_list)
+                            for key_j in range(num_keys):
+                                key_id = key_ids_list[key_j]
+                                scores_j = match_logits[:, key_j]
+                                candidates = [
+                                    (i, scores_j[i].item())
+                                    for i in range(num_queries)
+                                    if scores_j[i].item() > 0.0
+                                ]
+                                candidates.sort(key=lambda x: -x[1])
+                                top2 = candidates[:2]
+                                if not top2:
+                                    continue
+                                if len(top2) == 1:
+                                    (i, _) = top2[0]
+                                    relink_map[seg_ids_order[i]] = key_id
+                                else:
+                                    (i0, _), (i1, _) = top2[0], top2[1]
+                                    daughter_ids = self._allocate_obj_ids(tiled_states[0], 2)
+                                    new_id1 = int(daughter_ids[0].item())
+                                    new_id2 = int(daughter_ids[1].item())
+                                    relink_map[seg_ids_order[i0]] = new_id1
+                                    relink_map[seg_ids_order[i1]] = new_id2
+                                    aux_parent_map[new_id1] = key_id
+                                    aux_parent_map[new_id2] = key_id
+                                    aux_frame_divisions.setdefault(key_id, set()).add(new_id1)
+                                    aux_frame_divisions.setdefault(key_id, set()).add(new_id2)
+
+                # Single assignment block for all new cells
+                for seg_cell_id in new_cell_candidates:
+                    if seg_cell_id in relink_map:
+                        full_mask[full_mask == seg_cell_id] = relink_map[seg_cell_id]
+
             # Ensure each cell is one blob (keep largest blob, remove smaller ones)
             for cell_id in np.unique(full_mask):
                 if cell_id == 0:
@@ -1099,7 +1251,7 @@ class SAM2AutomaticCellTracker:
                 if cell_id != 0 and (full_mask == cell_id).sum() < self.min_mask_area:
                     full_mask[full_mask == cell_id] = 0
 
-            if not self.segment:
+            if not self.segment or self.aux_matching == "segment_then_aux_track":
                 # Build local-to-global mapping for each crop (for post-processing divisions)
                 for crop_idx, (state, crop_mask) in enumerate(zip(tiled_states, crop_masks, strict=False)):
                     x0, y0, x1, y1 = state["crop_box"]
@@ -1124,9 +1276,9 @@ class SAM2AutomaticCellTracker:
                     state["local_to_global"][frame_idx] = local_to_global
 
                 # Build global divisions dict and parent_map for this frame using local_to_global mappings
-                frame_divisions = {}  # {global_parent_id: set(global_daughter_ids)}
-                parent_map = {}
-                
+                # Start with divisions from aux matcher (two new cells matched same parent)
+                frame_divisions = {k: set(v) for k, v in aux_frame_divisions.items()}
+                parent_map = dict(aux_parent_map)
                 for crop_idx, state in enumerate(tiled_states):
                     if state["obj_ids"] is None or frame_idx not in state["obj_ids"]:
                         continue
@@ -1180,18 +1332,21 @@ class SAM2AutomaticCellTracker:
                 for obj_id, parent_id in parent_map.items():
                     if parent_id in parent_map.keys():
                         parent_map[obj_id] = 0
+            else:
+                frame_divisions = None
 
-                if frame_idx < num_frames:
-                    # Compute new assignments for current frame (to use in next frame)
-                    crop_assignments, cell_id_map = self._assign_cells_to_crops(
-                        tiled_states, crop_centers, crop_masks, full_mask,
-                        frame_idx=frame_idx, divisions=frame_divisions,
-                    )
-                    # Store assignments and id map for next frame
-                    for crop_idx, state in enumerate(tiled_states):
-                        state["crop_assignments"][frame_idx] = crop_assignments[crop_idx]
-                        state["cell_id_map"][frame_idx] = cell_id_map
-            
+            if frame_idx < num_frames:
+                # Compute new assignments for current frame (to use in next frame)
+                crop_assignments, cell_id_map = self._assign_cells_to_crops(
+                    tiled_states, crop_centers, crop_masks, full_mask,
+                    frame_idx=frame_idx, divisions=frame_divisions,
+                    relink_map=relink_map,
+                )
+                # Store assignments and id map for next frame
+                for crop_idx, state in enumerate(tiled_states):
+                    state["crop_assignments"][frame_idx] = crop_assignments[crop_idx]
+                    state["cell_id_map"][frame_idx] = cell_id_map
+        
             tracking_results.append(full_mask)
 
             obj_ids = np.unique(full_mask)
@@ -1202,7 +1357,7 @@ class SAM2AutomaticCellTracker:
             )
             parent_ids = np.zeros_like(obj_ids, dtype=np.int32)
 
-            if not self.segment:
+            if not self.segment or self.aux_matching == "segment_then_aux_track":
                 for i, obj_id in enumerate(obj_ids):
                     parent_ids[i] = parent_map.get(int(obj_id), 0)
             global_state["parent_ids"][frame_idx] = torch.tensor(
@@ -1482,6 +1637,7 @@ class SAM2AutomaticCellTracker:
                     sam_outputs,
                     current_out,
                     tracking_object_ids,
+                    pix_feat=pix_feat if self.aux_matching != "off" else None,
                 )
 
                 if not self.segment and frame_idx > 0 and self.use_heatmap:
@@ -1561,6 +1717,7 @@ class SAM2AutomaticCellTracker:
                                 sam_outputs,
                                 current_out,
                                 heatmap_input=True,
+                                pix_feat=pix_feat if self.aux_matching != "off" else None,
                             )
 
                             if detected_mask.sum() > 0:
@@ -1814,6 +1971,7 @@ class SAM2AutomaticCellTracker:
         current_out,
         tracking_object_ids=None,
         heatmap_input=False,
+        pix_feat=None,
     ):
         """Update the cell tracks based on the current output and SAM outputs."""
         obj_ids = tracking_object_ids
@@ -2037,6 +2195,80 @@ class SAM2AutomaticCellTracker:
                 "iou_pred": data["iou_preds"][i],
             }
 
+        # Build and store aux key tokens for temporal matching (used next frame)
+        if (
+            self.aux_matching != "off"
+            and pix_feat is not None
+            and len(obj_ids) > 0
+            and hasattr(self.model, "temporal_matching_head")
+            and self.model.temporal_matching_head is not None
+        ):
+            num_non_dividing = (
+                (~is_dividing).sum().item()
+                if is_dividing is not None
+                else high_res_masks.shape[0]
+            )
+            # Use unconditioned (raw) backbone features for keys to match training.
+            # Training uses current_vision_feats (raw) for key_tokens; inference must not use conditioned pix_feat.
+            N_obj = len(obj_ids)
+            device = self.device
+            pix_feat_for_keys = None
+            cached = inference_state.get("cached_features", {}).get(frame_idx, (None, None))
+            if cached[0] is not None and cached[1] is not None:
+                _, backbone_out = cached
+                expanded_backbone_out = {
+                    "backbone_fpn": [f.to(device).expand(N_obj, -1, -1, -1).contiguous() for f in backbone_out["backbone_fpn"]],
+                    "vision_pos_enc": [p.to(device).expand(N_obj, -1, -1, -1).contiguous() for p in backbone_out["vision_pos_enc"]],
+                }
+                _, vision_feats, _, feat_sizes = self.model._prepare_backbone_features(expanded_backbone_out)
+                raw_feat = vision_feats[-1]
+                H_f, W_f = feat_sizes[-1]
+                C_f = raw_feat.size(2)
+                pix_feat_for_keys = raw_feat.permute(1, 2, 0).view(N_obj, C_f, H_f, W_f)
+            if pix_feat_for_keys is None:
+                orig_idxs = torch.nonzero(keep_tokens).squeeze(-1)[keep_by_nms]
+                pix_feat_indices = []
+                for idx in orig_idxs.cpu().tolist():
+                    if idx < num_non_dividing:
+                        pix_feat_indices.append(idx)
+                    else:
+                        pix_feat_indices.append(
+                            num_non_dividing + (idx - num_non_dividing) // 2
+                        )
+                pix_feat_indices = torch.tensor(
+                    pix_feat_indices, device=pix_feat.device, dtype=torch.long
+                )
+                pix_feat_for_keys = pix_feat[pix_feat_indices]
+            mask_logits = data["masks"].to(pix_feat_for_keys.device)
+            if mask_logits.ndim == 2:
+                mask_logits = mask_logits.unsqueeze(0).unsqueeze(0)
+            elif mask_logits.ndim == 3:
+                mask_logits = mask_logits.unsqueeze(1)
+            key_tokens, key_centroids, key_areas = (
+                self.model.temporal_matching_head.build_matching_tokens(
+                    data["obj_ptr"], pix_feat_for_keys, mask_logits
+                )
+            )
+            if "aux_key_data" not in inference_state:
+                inference_state["aux_key_data"] = {}
+            inference_state["aux_key_data"][frame_idx] = {
+                "key_tokens": key_tokens,
+                "key_centroids": key_centroids,
+                "key_areas": key_areas,
+                "key_ids": obj_ids.cpu().numpy().tolist(),
+            }
+            # Per-cell lookup for query tokens (avoids rerunning model for new cells)
+            if "aux_cell_tokens" not in inference_state:
+                inference_state["aux_cell_tokens"] = {}
+            inference_state["aux_cell_tokens"][frame_idx] = {
+                int(obj_ids[i].item()): (
+                    key_tokens[i : i + 1],
+                    key_centroids[i : i + 1],
+                    key_areas[i : i + 1],
+                )
+                for i in range(len(obj_ids))
+            }
+
         if not heatmap_input:
             assert current_out["pred_masks_high_res"].shape[0] == len(obj_ids)
 
@@ -2109,6 +2341,118 @@ class SAM2AutomaticCellTracker:
             masks = masks.transpose(2, 0, 1)
 
         return masks
+
+    def _compute_detection_query_tokens_for_state(
+        self,
+        state: dict,
+        frame_idx: int,
+        cells_with_aux: list,
+    ):
+        """Build detection-mode query tokens for one crop (aligns with training).
+
+        Runs SAM decoder on raw backbone features with centroid point prompts,
+        then build_matching_tokens. Same distribution as training's _compute_detection_query_tokens.
+        """
+        cached = state.get("cached_features", {}).get(frame_idx, (None, None))
+        if cached[0] is None or cached[1] is None:
+            return None, None, None, []
+        image, backbone_out = cached
+        N = len(cells_with_aux)
+        if N == 0:
+            return None, None, None, []
+        device = self.device
+        expanded_backbone_out = {
+            "backbone_fpn": [f.to(device).expand(N, -1, -1, -1).contiguous() for f in backbone_out["backbone_fpn"]],
+            "vision_pos_enc": [p.to(device).expand(N, -1, -1, -1).contiguous() for p in backbone_out["vision_pos_enc"]],
+        }
+        _, vision_feats, _, feat_sizes = self.model._prepare_backbone_features(expanded_backbone_out)
+        raw_feat = vision_feats[-1]
+        H_feat, W_feat = feat_sizes[-1]
+        C_feat = raw_feat.size(2)
+        backbone_bchw = raw_feat.permute(1, 2, 0).view(N, C_feat, H_feat, W_feat)
+        img_sz = float(getattr(self.model, "image_size", 512))
+        centroids_n01 = torch.cat([c[1] for c in cells_with_aux], dim=0).to(device)
+        point_coords = (centroids_n01 * img_sz).unsqueeze(1)
+        point_labels = torch.ones(N, 1, dtype=torch.int32, device=device)
+        point_inputs = {"point_coords": point_coords, "point_labels": point_labels}
+        high_res_list = None
+        if getattr(self.model, "use_high_res_features_in_sam", False) and len(expanded_backbone_out["backbone_fpn"]) >= 2:
+            high_res_list = [
+                expanded_backbone_out["backbone_fpn"][0],
+                expanded_backbone_out["backbone_fpn"][1],
+            ]
+        is_div = torch.zeros(N, dtype=torch.bool, device=device)
+        (_, low_res_masks, _, obj_ptr, _, _, _) = self.model._forward_sam_heads(
+            backbone_features=backbone_bchw,
+            point_inputs=point_inputs,
+            high_res_features=high_res_list,
+            is_dividing=is_div,
+        )
+        if low_res_masks.ndim == 2:
+            low_res_masks = low_res_masks.unsqueeze(0).unsqueeze(0)
+        elif low_res_masks.ndim == 3:
+            low_res_masks = low_res_masks.unsqueeze(1)
+        tokens, centroids, areas = self.model.temporal_matching_head.build_matching_tokens(
+            obj_ptr, backbone_bchw, low_res_masks
+        )
+        seg_ids = [c[0] for c in cells_with_aux]
+        return tokens, centroids, areas, seg_ids
+
+    def _get_query_tokens_for_new_cells(
+        self,
+        frame_idx: int,
+        new_cell_candidates: list,
+        tiled_states: list,
+    ):
+        """Build query tokens for temporal matcher (detection-mode to align with training).
+
+        Uses raw backbone + centroid point → SAM → build_matching_tokens so the matcher
+        sees the same query distribution as during training. Falls back to aux_cell_tokens
+        lookup if detection-mode fails (e.g. cache miss).
+
+        Looks up precomputed aux_cell_tokens from each crop's segmentation output.
+        Returns: (query_tokens, query_centroids, query_areas, seg_cell_ids_in_order).
+        """
+        if not new_cell_candidates or not hasattr(
+            self.model, "temporal_matching_head"
+        ) or self.model.temporal_matching_head is None:
+            return None, None, None, []
+
+        # Group new candidates by state (crop) and collect centroid/area from aux_cell_tokens
+        state_to_cells = {}
+        for seg_cell_id in new_cell_candidates:
+            for state in tiled_states:
+                tok = state.get("aux_cell_tokens", {}).get(frame_idx, {}).get(seg_cell_id)
+                if tok is not None:
+                    # tok = (token, centroid [1,2], area [1])
+                    state_to_cells.setdefault(id(state), (state, []))[1].append((seg_cell_id, tok[1], tok[2]))
+                    break
+
+        qt_list, qc_list, qa_list, seg_ids_order = [], [], [], []
+        for _state_id, (state, cells_with_aux) in state_to_cells.items():
+            out = self._compute_detection_query_tokens_for_state(state, frame_idx, cells_with_aux)
+            if out[0] is not None:
+                qt_list.append(out[0])
+                qc_list.append(out[1])
+                qa_list.append(out[2])
+                seg_ids_order.extend(out[3])
+        if not qt_list:
+            # Fallback: use precomputed tracking tokens (e.g. cache miss)
+            for seg_cell_id in new_cell_candidates:
+                for state in tiled_states:
+                    tok = state.get("aux_cell_tokens", {}).get(frame_idx, {}).get(seg_cell_id)
+                    if tok is not None:
+                        qt_list.append(tok[0])
+                        qc_list.append(tok[1])
+                        qa_list.append(tok[2])
+                        seg_ids_order.append(seg_cell_id)
+                        break
+        if not qt_list:
+            return None, None, None, []
+        query_tokens = torch.cat(qt_list, dim=0).to(self.device)
+        query_centroids = torch.cat(qc_list, dim=0).to(self.device)
+        query_areas = torch.cat(qa_list, dim=0).to(self.device)
+        return query_tokens, query_centroids, query_areas, seg_ids_order
 
     def get_input_points_from_heatmap(self, inference_state, frame_idx):
         (
@@ -2468,7 +2812,7 @@ class SAM2AutomaticCellTracker:
             str(res_path / f"mask{frame_idx:03d}.tif"), track_mask.astype(np.uint16)
         )
 
-        if not self.segment:
+        if not self.segment or self.aux_matching == "segment_then_aux_track":
             parent_ids_tensor = inference_state["parent_ids"].get(frame_idx)
             if parent_ids_tensor is not None and len(parent_ids_tensor) == len(cell_ids):
                 parent_ids = parent_ids_tensor.cpu().numpy()
@@ -2498,7 +2842,7 @@ class SAM2AutomaticCellTracker:
     def save_tracking_results(self, inference_state, tracking_results, alpha=0.3, crop_idx=None):
         res_path = inference_state["res_path"]
 
-        if self.segment:
+        if self.segment or self.aux_matching == "segment_then_aux_track":
             num_colors = 1000
         else:
             num_colors = (
@@ -2567,7 +2911,7 @@ class SAM2AutomaticCellTracker:
                     cv2.LINE_AA,
                 )
 
-            if not self.segment:
+            if not self.segment or self.aux_matching == "segment_then_aux_track":
                 # Use res_track to find divisions (more reliable than inference_state)
                 res_track = inference_state.get("res_track")
                 if res_track is not None and len(res_track) > 0:

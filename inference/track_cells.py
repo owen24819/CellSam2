@@ -97,6 +97,14 @@ def parse_args():
         action="store_true",
         help="Enable post-processing to detect divisions across crops",
     )
+    parser.add_argument(
+        "--aux_matching",
+        type=str,
+        default="segment_then_aux_track",
+        choices=["off", "new_cells_only", "segment_then_aux_track"],
+        help="Temporal auxiliary matching: off, new_cells_only (relink new cells via aux head), "
+        "segment_then_aux_track (segment each frame + aux track).",
+    )
     return parser.parse_args()
 
 
@@ -198,6 +206,7 @@ def main():
         crop_overlap=args.crop_overlap,
         save_crop_movies=args.save_crop_movies,
         postprocess_divisions=args.postprocess_divisions,
+        aux_matching=args.aux_matching,
     )
 
     # Get input path
