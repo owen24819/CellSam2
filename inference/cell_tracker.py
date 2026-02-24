@@ -1063,40 +1063,18 @@ class SAM2AutomaticCellTracker:
                                 gap_mask = np.logical_and(seg_cell_mask, full_mask == 0)
                                 full_mask[gap_mask] = tracked_cell_id
                             # else: overlaps multiple tracked cells (e.g. division) - skip
-                    else:  # Low overlap
-                        # Check if this cell from seg_mask matches a missing assigned cell by spatial overlap
-                        # This handles cases where a crop misidentifies a cell (wrong ID)
-                        matched_missing_cell = None
-                        for prev_cell_id, prev_cell_mask in prev_frame_masks.items():
-                            if prev_cell_id not in tracked_cell_ids:
-                                # Check if this seg_cell spatially matches the missing cell
-                                intersection = np.logical_and(seg_cell_mask, prev_cell_mask).sum()
-                                union = np.logical_or(seg_cell_mask, prev_cell_mask).sum()
-                                if union > 0:
-                                    iou = intersection / union
-                                    if iou >= 0.3:  # Significant spatial overlap - same cell, wrong ID
-                                        matched_missing_cell = prev_cell_id
-                                        break
-                        
-                        if matched_missing_cell is not None:
-                            # Restore the correct cell ID (fix misidentification)
-                            full_mask[seg_cell_mask] = matched_missing_cell
+                    else: 
+                        # Truly new cell - add as new
+                        new_cell_mask = np.logical_and(seg_cell_mask, tracked_mask == 0)
+                        # Check if seg_cell_id is already in use (edge case: reused local ID after global ID was gone)
+                        if seg_cell_id in all_used_global_ids:
+                            # ID conflict - use _allocate_obj_ids to get a new unique ID
+                            new_id_tensor = self._allocate_obj_ids(tiled_states[0], 1)
+                            new_cell_id = int(new_id_tensor[0].item())
+                            full_mask[new_cell_mask] = new_cell_id
                         else:
-                            # Truly new cell - add as new
-                            new_cell_mask = np.logical_and(seg_cell_mask, tracked_mask == 0)
-                            # Check if seg_cell_id is already in use (edge case: reused local ID after global ID was gone)
-                            # This can happen when a local cell ID was used as a global ID, then the global ID disappeared
-                            # (e.g., due to division), and later the local cell ID reappears in a different crop
-                            # Must also check all_used_global_ids - seg_cell_id may be free in current frame but
-                            # was used as a global ID in a previous frame (cell disappeared, now reappears)
-                            if seg_cell_id in all_used_global_ids:
-                                # ID conflict - use _allocate_obj_ids to get a new unique ID
-                                new_id_tensor = self._allocate_obj_ids(tiled_states[0], 1)
-                                new_cell_id = int(new_id_tensor[0].item())
-                                full_mask[new_cell_mask] = new_cell_id
-                            else:
-                                # No conflict - use seg_cell_id directly
-                                full_mask[new_cell_mask] = seg_cell_id
+                            # No conflict - use seg_cell_id directly
+                            full_mask[new_cell_mask] = seg_cell_id
                 
             # Ensure each cell is one blob (keep largest blob, remove smaller ones)
             for cell_id in np.unique(full_mask):
