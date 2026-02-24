@@ -1128,7 +1128,10 @@ class SAM2AutomaticCellTracker:
                 ):
                     query_tokens, query_centroids, query_areas, seg_ids_order = (
                         self._get_query_tokens_for_new_cells(
-                            frame_idx, new_cell_candidates, tiled_states
+                            frame_idx,
+                            new_cell_candidates,
+                            tiled_states,
+                            seg_mask=seg_mask,
                         )
                     )
                     if (
@@ -2208,45 +2211,28 @@ class SAM2AutomaticCellTracker:
                 if is_dividing is not None
                 else high_res_masks.shape[0]
             )
-            # Use unconditioned (raw) backbone features for keys to match training.
-            # Training uses current_vision_feats (raw) for key_tokens; inference must not use conditioned pix_feat.
-            N_obj = len(obj_ids)
-            device = self.device
-            pix_feat_for_keys = None
-            cached = inference_state.get("cached_features", {}).get(frame_idx, (None, None))
-            if cached[0] is not None and cached[1] is not None:
-                _, backbone_out = cached
-                expanded_backbone_out = {
-                    "backbone_fpn": [f.to(device).expand(N_obj, -1, -1, -1).contiguous() for f in backbone_out["backbone_fpn"]],
-                    "vision_pos_enc": [p.to(device).expand(N_obj, -1, -1, -1).contiguous() for p in backbone_out["vision_pos_enc"]],
-                }
-                _, vision_feats, _, feat_sizes = self.model._prepare_backbone_features(expanded_backbone_out)
-                raw_feat = vision_feats[-1]
-                H_f, W_f = feat_sizes[-1]
-                C_f = raw_feat.size(2)
-                pix_feat_for_keys = raw_feat.permute(1, 2, 0).view(N_obj, C_f, H_f, W_f)
-            if pix_feat_for_keys is None:
-                orig_idxs = torch.nonzero(keep_tokens).squeeze(-1)[keep_by_nms]
-                pix_feat_indices = []
-                for idx in orig_idxs.cpu().tolist():
-                    if idx < num_non_dividing:
-                        pix_feat_indices.append(idx)
-                    else:
-                        pix_feat_indices.append(
-                            num_non_dividing + (idx - num_non_dividing) // 2
-                        )
-                pix_feat_indices = torch.tensor(
-                    pix_feat_indices, device=pix_feat.device, dtype=torch.long
-                )
-                pix_feat_for_keys = pix_feat[pix_feat_indices]
-            mask_logits = data["masks"].to(pix_feat_for_keys.device)
+            # Use memory-conditioned pix_feat for keys (same as training).
+            orig_idxs = torch.nonzero(keep_tokens).squeeze(-1)[keep_by_nms]
+            pix_feat_indices = []
+            for idx in orig_idxs.cpu().tolist():
+                if idx < num_non_dividing:
+                    pix_feat_indices.append(idx)
+                else:
+                    pix_feat_indices.append(
+                        num_non_dividing + (idx - num_non_dividing) // 2
+                    )
+            pix_feat_indices = torch.tensor(
+                pix_feat_indices, device=pix_feat.device, dtype=torch.long
+            )
+            kept_pix_feat = pix_feat[pix_feat_indices]
+            mask_logits = data["masks"].to(kept_pix_feat.device)
             if mask_logits.ndim == 2:
                 mask_logits = mask_logits.unsqueeze(0).unsqueeze(0)
             elif mask_logits.ndim == 3:
                 mask_logits = mask_logits.unsqueeze(1)
             key_tokens, key_centroids, key_areas = (
                 self.model.temporal_matching_head.build_matching_tokens(
-                    data["obj_ptr"], pix_feat_for_keys, mask_logits
+                    data["obj_ptr"], kept_pix_feat, mask_logits
                 )
             )
             if "aux_key_data" not in inference_state:
@@ -2403,14 +2389,13 @@ class SAM2AutomaticCellTracker:
         frame_idx: int,
         new_cell_candidates: list,
         tiled_states: list,
+        seg_mask: Optional[np.ndarray] = None,
     ):
-        """Build query tokens for temporal matcher (detection-mode to align with training).
+        """Build query tokens for temporal matcher: use precomputed when available, else compute.
 
-        Uses raw backbone + centroid point → SAM → build_matching_tokens so the matcher
-        sees the same query distribution as during training. Falls back to aux_cell_tokens
-        lookup if detection-mode fails (e.g. cache miss).
-
-        Looks up precomputed aux_cell_tokens from each crop's segmentation output.
+        Precomputed (conditioned) tokens come from aux_cell_tokens. When not available,
+        falls back to detection-mode query tokens (SAM on raw features + centroid prompt)
+        if seg_mask is provided so we can compute centroid and run the decoder per crop.
         Returns: (query_tokens, query_centroids, query_areas, seg_cell_ids_in_order).
         """
         if not new_cell_candidates or not hasattr(
@@ -2418,40 +2403,77 @@ class SAM2AutomaticCellTracker:
         ) or self.model.temporal_matching_head is None:
             return None, None, None, []
 
-        # Group new candidates by state (crop) and collect centroid/area from aux_cell_tokens
-        state_to_cells = {}
+        device = self.device
+        precomputed = {}
+        need_compute = []
+        crop_centers = [self._crop_center(state["crop_box"]) for state in tiled_states] if seg_mask is not None else None
+
         for seg_cell_id in new_cell_candidates:
+            tok = None
             for state in tiled_states:
                 tok = state.get("aux_cell_tokens", {}).get(frame_idx, {}).get(seg_cell_id)
                 if tok is not None:
-                    # tok = (token, centroid [1,2], area [1])
-                    state_to_cells.setdefault(id(state), (state, []))[1].append((seg_cell_id, tok[1], tok[2]))
                     break
+            if tok is not None:
+                precomputed[int(seg_cell_id)] = (tok[0], tok[1], tok[2])
+            elif seg_mask is not None and crop_centers is not None:
+                cell_mask = seg_mask == seg_cell_id
+                if not np.any(cell_mask):
+                    continue
+                ys, xs = np.where(cell_mask)
+                cy, cx = float(ys.mean()), float(xs.mean())
+                crop_idx = self._assign_to_nearest_crop([(cx, cy)], crop_centers)[0]
+                state = tiled_states[crop_idx]
+                x0, y0, x1, y1 = state["crop_box"]
+                cx_n01 = (cx - x0) / max(x1 - x0, 1)
+                cy_n01 = (cy - y0) / max(y1 - y0, 1)
+                cent = torch.tensor(
+                    [cx_n01, cy_n01],
+                    dtype=torch.float32,
+                    device=device,
+                )
+                need_compute.append((int(seg_cell_id), crop_idx, cent))
+
+        computed_results = {}
+        if need_compute:
+            by_crop = {}
+            for seg_id, crop_idx, cent in need_compute:
+                by_crop.setdefault(crop_idx, []).append((seg_id, cent))
+            for crop_idx, cells_with_aux in by_crop.items():
+                state = tiled_states[crop_idx]
+                out = self._compute_detection_query_tokens_for_state(
+                    state, frame_idx, cells_with_aux
+                )
+                if out[0] is not None and out[0].shape[0] > 0:
+                    tokens, centroids, areas, seg_ids = out
+                    for i, seg_id in enumerate(seg_ids):
+                        computed_results[int(seg_id)] = (
+                            tokens[i : i + 1],
+                            centroids[i : i + 1],
+                            areas[i : i + 1],
+                        )
 
         qt_list, qc_list, qa_list, seg_ids_order = [], [], [], []
-        for _state_id, (state, cells_with_aux) in state_to_cells.items():
-            out = self._compute_detection_query_tokens_for_state(state, frame_idx, cells_with_aux)
-            if out[0] is not None:
-                qt_list.append(out[0])
-                qc_list.append(out[1])
-                qa_list.append(out[2])
-                seg_ids_order.extend(out[3])
-        if not qt_list:
-            # Fallback: use precomputed tracking tokens (e.g. cache miss)
-            for seg_cell_id in new_cell_candidates:
-                for state in tiled_states:
-                    tok = state.get("aux_cell_tokens", {}).get(frame_idx, {}).get(seg_cell_id)
-                    if tok is not None:
-                        qt_list.append(tok[0])
-                        qc_list.append(tok[1])
-                        qa_list.append(tok[2])
-                        seg_ids_order.append(seg_cell_id)
-                        break
+        for seg_cell_id in new_cell_candidates:
+            sid = int(seg_cell_id)
+            if sid in precomputed:
+                t, c, a = precomputed[sid]
+                qt_list.append(t)
+                qc_list.append(c)
+                qa_list.append(a)
+                seg_ids_order.append(seg_cell_id)
+            elif sid in computed_results:
+                t, c, a = computed_results[sid]
+                qt_list.append(t)
+                qc_list.append(c)
+                qa_list.append(a)
+                seg_ids_order.append(seg_cell_id)
+
         if not qt_list:
             return None, None, None, []
-        query_tokens = torch.cat(qt_list, dim=0).to(self.device)
-        query_centroids = torch.cat(qc_list, dim=0).to(self.device)
-        query_areas = torch.cat(qa_list, dim=0).to(self.device)
+        query_tokens = torch.cat(qt_list, dim=0).to(device)
+        query_centroids = torch.cat(qc_list, dim=0).to(device)
+        query_areas = torch.cat(qa_list, dim=0).to(device)
         return query_tokens, query_centroids, query_areas, seg_ids_order
 
     def get_input_points_from_heatmap(self, inference_state, frame_idx):

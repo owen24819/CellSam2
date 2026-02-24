@@ -364,8 +364,7 @@ class SAM2Train(SAM2Base):
         # Compute temporal matching for consecutive frame pairs
         if self.enable_temporal_aux_matcher:
             # daughter_id → mother_id across the whole sequence (for GT and sampling).
-            # Keys are post-div (daughters have own tokens), but queries are detection-mode
-            # (no division info). Daughters D,E in frame t+1 must match mother C's key in
+            # Keys and queries use memory-conditioned (tracking) tokens. Daughters D,E in frame t+1 must match mother C's key in
             # frame t, so child_to_parent is required.
             child_to_parent = self._build_child_to_parent_map(input, processing_order)
             active_frames = [t for t in processing_order if not input.no_inputs[t]]
@@ -392,7 +391,7 @@ class SAM2Train(SAM2Base):
                 if key_ids.numel() == 0 or query_ids.numel() == 0:
                     continue
 
-                # Subsample query indices before the expensive SAM pass.
+                # Subsample query indices before the expensive SAM pass (when using detection queries).
                 selected_positions = self._subsample_matching_query_indices(
                     query_ids, key_ids, child_to_parent,
                 )
@@ -404,12 +403,17 @@ class SAM2Train(SAM2Base):
                     query_valid = query_valid_sub
                     query_ids = query_ids[selected_positions]
 
-                # Run detection-mode SAM pass only on subsampled queries.
-                query_tokens, query_centroids, query_areas = (
-                    self._compute_detection_query_tokens(
-                        out_t1, query_valid,
+                # Query tokens: use conditioned only when _temporal_aux_use_conditioned_queries (never if keys were unconditioned).
+                if out_t1.get("_temporal_aux_use_conditioned_queries", True):
+                    query_tokens = out_t1["key_tokens"][query_valid]
+                    query_centroids = out_t1["key_centroids"][query_valid]
+                    query_areas = out_t1["key_areas"][query_valid]
+                else:
+                    query_tokens, query_centroids, query_areas = (
+                        self._compute_detection_query_tokens(
+                            out_t1, query_valid,
+                        )
                     )
-                )
                 if query_tokens is None or query_tokens.shape[0] == 0:
                     continue
 
@@ -433,6 +437,7 @@ class SAM2Train(SAM2Base):
             "query_ids", "query_valid_mask",
             "_raw_vision_feats", "_high_res_features",
             "_feat_sizes", "_query_masks",
+            "_temporal_aux_use_conditioned_keys", "_temporal_aux_use_conditioned_queries",
         }
         all_frame_outputs = [
             {k: v for k, v in d.items()
@@ -558,17 +563,31 @@ class SAM2Train(SAM2Base):
         if self.enable_temporal_aux_matcher and current_out.get("obj_ptr") is not None:
             N_postdiv = tracking_object_ids.shape[0]
             if N_postdiv > 0:
-                raw_feat = current_vision_feats[-1]          # (HW, 1, C)
-                H_feat, W_feat = feat_sizes[-1]
-                C_feat = raw_feat.size(2)
-                pix_feat_keys = (
-                    raw_feat[:, 0, :]
-                    .view(H_feat, W_feat, C_feat)
-                    .permute(2, 0, 1)
-                    .unsqueeze(0)
-                    .expand(N_postdiv, -1, -1, -1)
-                    .contiguous()
+                # Key mode: 50% conditioned, 50% unconditioned.
+                # Query mode when keys are conditioned: 50% conditioned queries, 50% unconditioned → 25% cond+uncond.
+                # When keys are unconditioned: always unconditioned queries.
+                use_conditioned_keys = (torch.rand(1, device=pix_feat.device).item() < 0.5)
+                use_conditioned_queries = (
+                    (torch.rand(1, device=pix_feat.device).item() < 0.5)
+                    if use_conditioned_keys
+                    else False
                 )
+                current_out["_temporal_aux_use_conditioned_keys"] = use_conditioned_keys
+                current_out["_temporal_aux_use_conditioned_queries"] = use_conditioned_queries
+                if use_conditioned_keys:
+                    pix_feat_keys = pix_feat[keep_tokens_mask]
+                else:
+                    raw_feat = current_vision_feats[-1]
+                    H_feat, W_feat = feat_sizes[-1]
+                    C_feat = raw_feat.size(2)
+                    pix_feat_keys = (
+                        raw_feat[:, 0, :]
+                        .view(H_feat, W_feat, C_feat)
+                        .permute(2, 0, 1)
+                        .unsqueeze(0)
+                        .expand(N_postdiv, -1, -1, -1)
+                        .contiguous()
+                    )
                 key_tokens, key_centroids, key_areas = (
                     self.temporal_matching_head.build_matching_tokens(
                         current_out["obj_ptr"],
