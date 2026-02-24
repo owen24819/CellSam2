@@ -7,7 +7,7 @@ scratch:
   num_train_workers: 2
   num_frames: 4
   max_num_objects: 80
-  max_num_bkgd_objects: ${scatch.max_num_objects // 2}
+  max_num_bkgd_objects: 40
   base_lr: 5.0e-6
   vision_lr: 3.0e-06
   num_epochs: 10
