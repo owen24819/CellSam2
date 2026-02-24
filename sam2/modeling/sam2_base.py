@@ -53,7 +53,7 @@ class TemporalMatchingHead(torch.nn.Module):
 
         Returns:
             tokens:    [N, C]
-            centroids: [N, 2]  normalised (cx, cy) in [0, 1]
+            centroids: [N, 2]  normalised (cx, cy) in [0, 1] relative to crop
             areas:     [N]
         """
         N, C, H, W = pix_feat.shape
@@ -69,7 +69,7 @@ class TemporalMatchingHead(torch.nn.Module):
         mask_sum = mask_prob.sum(dim=(2, 3)).clamp(min=1e-6)  # [N, 1]
         roi_feat = (pix_feat * mask_prob).sum(dim=(2, 3)) / mask_sum  # [N, C]
 
-        # Normalised centroids
+        # Normalised centroids in [0, 1] range relative to crop
         grid_y = torch.arange(H, device=device).float() / max(H - 1, 1)
         grid_x = torch.arange(W, device=device).float() / max(W - 1, 1)
         grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing="ij")
@@ -89,8 +89,8 @@ class TemporalMatchingHead(torch.nn.Module):
         Args:
             query_tokens:    [N_q, D]
             key_tokens:      [N_k, D]
-            query_centroids: [N_q, 2]
-            key_centroids:   [N_k, 2]
+            query_centroids: [N_q, 2]  normalized coordinates (with crop offsets added during inference)
+            key_centroids:   [N_k, 2]  normalized coordinates (with crop offsets added during inference)
             query_areas:     [N_q]
             key_areas:       [N_k]
         Returns:
@@ -109,8 +109,15 @@ class TemporalMatchingHead(torch.nn.Module):
         attn = torch.einsum("qhd,khd->qkh", Q, K) / (D ** 0.5)  # [N_q, N_k+1, H]
 
         if N_k > 0:
+            # Compute difference in normalized coordinates
             dx = query_centroids[:, 0:1] - key_centroids[:, 0:1].T  # [N_q, N_k]
             dy = query_centroids[:, 1:2] - key_centroids[:, 1:2].T
+            
+            # Clip each component to [-1, 1] range
+            # This caps the effective distance: differences > 1 crop are treated as 1.0
+            dx = torch.clamp(dx, min=-1.0, max=1.0)
+            dy = torch.clamp(dy, min=-1.0, max=1.0)
+            
             log_ar = torch.log(
                 (query_areas[:, None] + 1e-6) / (key_areas[None, :] + 1e-6)
             )

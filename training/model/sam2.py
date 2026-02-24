@@ -410,13 +410,12 @@ class SAM2Train(SAM2Base):
                     query_areas = out_t1["key_areas"][query_valid]
                 else:
                     query_tokens, query_centroids, query_areas = (
-                        self._compute_detection_query_tokens(
-                            out_t1, query_valid,
-                        )
+                        self._compute_detection_query_tokens(out_t1, query_valid)
                     )
                 if query_tokens is None or query_tokens.shape[0] == 0:
                     continue
 
+                # Training uses global [0,1] centroids (single crop = global).
                 match_logits = self.temporal_matching_head(
                     query_tokens, key_tokens,
                     query_centroids, key_centroids,
@@ -808,32 +807,16 @@ class SAM2Train(SAM2Base):
         """Build detection-mode query tokens for frame t+1.
 
         Runs the SAM decoder on raw (non-memory-conditioned) backbone features with
-        GT centroid point prompts. This matches the inference scenario where a new or
-        mismatched cell is freshly detected (no tracking history), so the matcher
-        trains on the same token distribution it will see at test time.
-
-        Args:
-            out_t1:      Output dict from track_step for frame t+1 (has cached raw feats).
-            query_valid: Boolean mask [N] of which cells have valid GT masks.
-
-        Returns:
-            tokens:    [N_valid, C] or None on failure
-            centroids: [N_valid, 2]
-            areas:     [N_valid]
+        GT centroid point prompts. Returns centroids in [0,1] (global in single-crop training).
         """
         raw_vision_feats = out_t1.get("_raw_vision_feats")
         high_res_features = out_t1.get("_high_res_features")
         feat_sizes = out_t1.get("_feat_sizes")
-        # Post-div masks indexed by GT cell order — used to compute centroid point
-        # prompts for the detection SAM pass.  Built in track_step after
-        # _handle_cell_tracking so daughters D/E have their own masks, not the
-        # combined mother mask.
         query_masks = out_t1.get("_query_masks")
 
         if raw_vision_feats is None or query_masks is None:
             return None, None, None
 
-        # Use cells that pass the valid-mask filter
         valid_mask_idx = query_valid.nonzero(as_tuple=False).squeeze(1)
         if valid_mask_idx.numel() == 0:
             return None, None, None
@@ -841,59 +824,39 @@ class SAM2Train(SAM2Base):
         device = query_masks.device
         N_valid = valid_mask_idx.numel()
 
-        # ── Raw backbone features: [1, C, H, W] → broadcast to [N_valid, C, H, W]
-        # current_vision_feats is a list of [(HW, 1, C), ...]; last entry is lowest res.
-        raw_feat = raw_vision_feats[-1]           # (HW, 1, C)
+        valid_masks = query_masks[valid_mask_idx]  # [N_valid, 1, H, W]
+        mask_bin = (valid_masks.sigmoid() > 0.5).squeeze(1).float()
+        mask_sum = mask_bin.sum(dim=(1, 2)).clamp(min=1)
+        H_m, W_m = mask_bin.shape[1], mask_bin.shape[2]
+        gy = torch.arange(H_m, device=device).float() / max(H_m - 1, 1)
+        gx = torch.arange(W_m, device=device).float() / max(W_m - 1, 1)
+        gy, gx = torch.meshgrid(gy, gx, indexing="ij")
+        cx_full = (mask_bin * gx).sum(dim=(1, 2)) / mask_sum
+        cy_full = (mask_bin * gy).sum(dim=(1, 2)) / mask_sum
+
+        raw_feat = raw_vision_feats[-1]
         H_feat, W_feat = feat_sizes[-1]
         C_feat = raw_feat.size(2)
         raw_feat_bchw = (
-            raw_feat[:, 0, :]                     # (HW, C)
+            raw_feat[:, 0, :]
             .view(H_feat, W_feat, C_feat)
-            .permute(2, 0, 1)                     # (C, H, W)
-            .unsqueeze(0)                         # (1, C, H, W)
-            .expand(N_valid, -1, -1, -1)          # (N_valid, C, H, W)
+            .permute(2, 0, 1)
+            .unsqueeze(0)
+            .expand(N_valid, -1, -1, -1)
             .contiguous()
         )
-
-        # ── High-res features: each is (HW, 1, C) → broadcast to (N_valid, C, H, W)
         det_high_res = None
         if high_res_features is not None and self.use_high_res_features_in_sam:
             det_high_res = []
             for hr_feat in high_res_features:
                 det_high_res.append(
-                    hr_feat[0]                    # (C, H, W)  — already BCHW from _track_step
-                    .unsqueeze(0)
-                    .expand(N_valid, -1, -1, -1)
-                    .contiguous()
+                    hr_feat[0].unsqueeze(0).expand(N_valid, -1, -1, -1).contiguous()
                 )
-
-        # ── GT centroid point prompts: one positive point per cell
-        # query_masks: post-div masks in GT cell order [N_gt, 1, H_mask, W_mask]
-        valid_masks = query_masks[valid_mask_idx]  # [N_valid, 1, H, W]
-        mask_bin = (valid_masks.sigmoid() > 0.5).squeeze(1).float()  # [N_valid, H, W]
-        mask_sum = mask_bin.sum(dim=(1, 2)).clamp(min=1)
-        H_m, W_m = mask_bin.shape[1], mask_bin.shape[2]
-
-        gy = torch.arange(H_m, device=device).float() / max(H_m - 1, 1)
-        gx = torch.arange(W_m, device=device).float() / max(W_m - 1, 1)
-        gy, gx = torch.meshgrid(gy, gx, indexing="ij")
-
-        # Centroids in [0,1] → scale to model image size in pixels
         img_sz = float(self.image_size)
-        cx = (mask_bin * gx).sum(dim=(1, 2)) / mask_sum * img_sz   # [N_valid]
-        cy = (mask_bin * gy).sum(dim=(1, 2)) / mask_sum * img_sz
-
-        # SAM wants coords in (x, y) absolute pixel space
-        point_coords = torch.stack([cx, cy], dim=1).unsqueeze(1)    # [N_valid, 1, 2]
+        point_coords = torch.stack([cx_full * img_sz, cy_full * img_sz], dim=1).unsqueeze(1)
         point_labels = torch.ones(N_valid, 1, dtype=torch.int32, device=device)
         point_inputs = {"point_coords": point_coords, "point_labels": point_labels}
 
-        # ── Run SAM decoder on raw (no-memory) features.
-        # Detection mode never predicts divisions (is_dividing=False for all cells),
-        # so pre-div and post-div tokens are always identical here.
-        # Gradients flow normally so the SAM decoder and matching head weights
-        # are updated jointly via the matching loss.
-        # Detection mode always has is_dividing=False so pre-div == post-div.
         is_div_query = torch.zeros(N_valid, dtype=torch.bool, device=device)
         (
             _ious, _low_res, _high_res, _obj_ptr,

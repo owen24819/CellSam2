@@ -953,6 +953,7 @@ class SAM2AutomaticCellTracker:
         return self._predict_from_states(tiled_states, crop_centers, res_path, video_path)
 
     def _predict_from_states(self, tiled_states, crop_centers, res_path, video_path):
+
         generators = []
         for state in tiled_states:
             if not self.use_heatmap:
@@ -2235,6 +2236,12 @@ class SAM2AutomaticCellTracker:
                     data["obj_ptr"], kept_pix_feat, mask_logits
                 )
             )
+            # Add crop offset to centroids: divide crop_box x0, y0 by image_size
+            crop_box = inference_state.get("crop_box", (0, 0, 0, 0))
+            x0, y0 = crop_box[0], crop_box[1]
+            img_sz = float(getattr(self.model, "image_size", 512))
+            crop_offset = torch.tensor([x0 / img_sz, y0 / img_sz], device=key_centroids.device, dtype=key_centroids.dtype)
+            key_centroids = key_centroids + crop_offset
             if "aux_key_data" not in inference_state:
                 inference_state["aux_key_data"] = {}
             inference_state["aux_key_data"][frame_idx] = {
@@ -2381,6 +2388,12 @@ class SAM2AutomaticCellTracker:
         tokens, centroids, areas = self.model.temporal_matching_head.build_matching_tokens(
             obj_ptr, backbone_bchw, low_res_masks
         )
+        # Add crop offset to centroids: divide crop_box x0, y0 by image_size
+        crop_box = state.get("crop_box", (0, 0, 0, 0))
+        x0, y0 = crop_box[0], crop_box[1]
+        img_sz = float(getattr(self.model, "image_size"))
+        crop_offset = torch.tensor([x0 / img_sz, y0 / img_sz], device=centroids.device, dtype=centroids.dtype)
+        centroids = centroids + crop_offset
         seg_ids = [c[0] for c in cells_with_aux]
         return tokens, centroids, areas, seg_ids
 
@@ -2459,13 +2472,13 @@ class SAM2AutomaticCellTracker:
             if sid in precomputed:
                 t, c, a = precomputed[sid]
                 qt_list.append(t)
-                qc_list.append(c)
+                qc_list.append(c.to(device))
                 qa_list.append(a)
                 seg_ids_order.append(seg_cell_id)
             elif sid in computed_results:
                 t, c, a = computed_results[sid]
                 qt_list.append(t)
-                qc_list.append(c)
+                qc_list.append(c.to(device))
                 qa_list.append(a)
                 seg_ids_order.append(seg_cell_id)
 
