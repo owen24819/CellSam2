@@ -1617,7 +1617,7 @@ class SAM2AutomaticCellTracker:
                 ) = self._get_image_feature(inference_state, frame_idx, batch_size)
 
                 # Run the core tracking step
-                current_out, sam_outputs, high_res_features, pix_feat = (
+                current_out, sam_outputs, high_res_features, _ = (
                     self.model._track_step(
                         is_init_cond_frame=is_init_cond_frame,
                         current_vision_feats=current_vision_feats,
@@ -1641,7 +1641,6 @@ class SAM2AutomaticCellTracker:
                     sam_outputs,
                     current_out,
                     tracking_object_ids,
-                    pix_feat=pix_feat if self.aux_matching != "off" else None,
                 )
 
                 if not self.segment and frame_idx > 0 and self.use_heatmap:
@@ -1698,7 +1697,7 @@ class SAM2AutomaticCellTracker:
                             )
 
                             # Run the core tracking step
-                            current_out, sam_outputs, high_res_features, pix_feat = (
+                            current_out, sam_outputs, high_res_features, _ = (
                                 self.model._track_step(
                                     is_init_cond_frame=True,
                                     current_vision_feats=current_vision_feats,
@@ -1721,7 +1720,6 @@ class SAM2AutomaticCellTracker:
                                 sam_outputs,
                                 current_out,
                                 heatmap_input=True,
-                                pix_feat=pix_feat if self.aux_matching != "off" else None,
                             )
 
                             if detected_mask.sum() > 0:
@@ -1975,7 +1973,6 @@ class SAM2AutomaticCellTracker:
         current_out,
         tracking_object_ids=None,
         heatmap_input=False,
-        pix_feat=None,
     ):
         """Update the cell tracks based on the current output and SAM outputs."""
         obj_ids = tracking_object_ids
@@ -2199,41 +2196,39 @@ class SAM2AutomaticCellTracker:
                 "iou_pred": data["iou_preds"][i],
             }
 
+        if not heatmap_input:
+            assert current_out["pred_masks_high_res"].shape[0] == len(obj_ids)
+
+        # Retrieve image features (only need to compute once for all objects)
+        (
+            _,
+            _,
+            current_vision_feats,
+            current_vision_pos_embeds,
+            feat_sizes,
+        ) = self._get_image_feature(
+            inference_state, frame_idx, current_out["pred_masks_high_res"].shape[0]
+        )
+
         # Build and store aux key tokens for temporal matching (used next frame)
         if (
             self.aux_matching != "off"
-            and pix_feat is not None
             and len(obj_ids) > 0
             and hasattr(self.model, "temporal_matching_head")
             and self.model.temporal_matching_head is not None
         ):
-            num_non_dividing = (
-                (~is_dividing).sum().item()
-                if is_dividing is not None
-                else high_res_masks.shape[0]
-            )
-            # Use memory-conditioned pix_feat for keys (same as training).
-            orig_idxs = torch.nonzero(keep_tokens).squeeze(-1)[keep_by_nms]
-            pix_feat_indices = []
-            for idx in orig_idxs.cpu().tolist():
-                if idx < num_non_dividing:
-                    pix_feat_indices.append(idx)
-                else:
-                    pix_feat_indices.append(
-                        num_non_dividing + (idx - num_non_dividing) // 2
-                    )
-            pix_feat_indices = torch.tensor(
-                pix_feat_indices, device=pix_feat.device, dtype=torch.long
-            )
-            kept_pix_feat = pix_feat[pix_feat_indices]
-            mask_logits = data["masks"].to(kept_pix_feat.device)
-            if mask_logits.ndim == 2:
-                mask_logits = mask_logits.unsqueeze(0).unsqueeze(0)
-            elif mask_logits.ndim == 3:
-                mask_logits = mask_logits.unsqueeze(1)
+            # Use non-conditioned raw backbone features (reuse current_vision_feats)
+            raw_feat = current_vision_feats[-1]
+            H_feat, W_feat = feat_sizes[-1]
+            C_feat = raw_feat.size(2)
+            N = len(obj_ids)
+            raw_pix_feat = raw_feat.permute(1, 2, 0).view(N, C_feat, H_feat, W_feat)
+            
+            # data["masks"] has shape [N, H, W] after flatten(0, 1), need [N, 1, H, W] for build_matching_tokens
+            mask_logits = data["masks"].to(raw_pix_feat.device).unsqueeze(1)
             key_tokens, key_centroids, key_areas = (
                 self.model.temporal_matching_head.build_matching_tokens(
-                    data["obj_ptr"], kept_pix_feat, mask_logits
+                    data["obj_ptr"], raw_pix_feat, mask_logits
                 )
             )
             # Add crop offset to centroids: divide crop_box x0, y0 by image_size
@@ -2261,20 +2256,6 @@ class SAM2AutomaticCellTracker:
                 )
                 for i in range(len(obj_ids))
             }
-
-        if not heatmap_input:
-            assert current_out["pred_masks_high_res"].shape[0] == len(obj_ids)
-
-        # Retrieve image features (only need to compute once for all objects)
-        (
-            _,
-            _,
-            current_vision_feats,
-            current_vision_pos_embeds,
-            feat_sizes,
-        ) = self._get_image_feature(
-            inference_state, frame_idx, current_out["pred_masks_high_res"].shape[0]
-        )
 
         if not self.segment and len(obj_ids) > 0:
             inference_state["memory_dict"] = self.model._update_memory_features(
