@@ -53,7 +53,7 @@ def parse_args():
     parser.add_argument(
         "--div_obj_score_thresh",
         type=float,
-        default=0.5,
+        default=0.4,
         help="Division object score threshold",
     )
     parser.add_argument(
