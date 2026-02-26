@@ -100,7 +100,7 @@ def parse_args():
     parser.add_argument(
         "--aux_matching",
         type=str,
-        default="segment_then_aux_track",
+        default="off",
         choices=["off", "new_cells_only", "segment_then_aux_track"],
         help="Temporal auxiliary matching: off, new_cells_only (relink new cells via aux head), "
         "segment_then_aux_track (segment each frame + aux track).",
