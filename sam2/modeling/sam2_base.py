@@ -89,8 +89,8 @@ class TemporalMatchingHead(torch.nn.Module):
         Args:
             query_tokens:    [N_q, D]
             key_tokens:      [N_k, D]
-            query_centroids: [N_q, 2]  normalized coordinates (with crop offsets added during inference)
-            key_centroids:   [N_k, 2]  normalized coordinates (with crop offsets added during inference)
+            query_centroids: [N_q, 2]  normalized (cx, cy) in [0, 1] relative to crop
+            key_centroids:   [N_k, 2]  normalized (cx, cy) in [0, 1] relative to crop
             query_areas:     [N_q]
             key_areas:       [N_k]
         Returns:
@@ -112,11 +112,6 @@ class TemporalMatchingHead(torch.nn.Module):
             # Compute difference in normalized coordinates
             dx = query_centroids[:, 0:1] - key_centroids[:, 0:1].T  # [N_q, N_k]
             dy = query_centroids[:, 1:2] - key_centroids[:, 1:2].T
-            
-            # Clip each component to [-1, 1] range
-            # This caps the effective distance: differences > 1 crop are treated as 1.0
-            dx = torch.clamp(dx, min=-1.0, max=1.0)
-            dy = torch.clamp(dy, min=-1.0, max=1.0)
             
             log_ar = torch.log(
                 (query_areas[:, None] + 1e-6) / (key_areas[None, :] + 1e-6)
