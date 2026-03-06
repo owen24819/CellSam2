@@ -2832,8 +2832,8 @@ class SAM2AutomaticCellTracker:
     def save_tracking_results(self, inference_state, tracking_results, alpha=0.3, crop_idx=None):
         res_path = inference_state["res_path"]
 
-        if self.segment and self.aux_matching != "off":
-            num_colors = 1000
+        if self.segment and self.aux_matching != "segment_then_aux_track":
+            num_colors = 10000
         else:
             num_colors = (
                 inference_state["max_obj_id"] + 1
