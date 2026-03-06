@@ -1136,50 +1136,93 @@ class SAM2AutomaticCellTracker:
             # Extract relink_map from per-crop temporal matching results for new cells
             if frame_idx > 0 and len(new_cell_candidates) > 0 and self.aux_matching == "new_cells_only":
                 # Temporal matching already ran per-crop in propagate_in_video.
-                # Extract which new cells got matched by checking crop_masks vs seg_mask.
-                for crop_idx, (state, crop_mask) in enumerate(zip(tiled_states, crop_masks, strict=False)):
-                    tm = state.get("temporal_matching_results", {}).get(frame_idx, {})
-                    crop_relink_map = tm.get("relink_map", {})
-                    if not crop_relink_map:
-                        continue
-                    
-                    x0, y0, x1, y1 = state["crop_box"]
-                    crop_seg_region = seg_mask[y0:y1, x0:x1] if seg_mask is not None else None
-                    if crop_seg_region is None:
-                        continue
-                    
-                    # For each new cell candidate, check if it's in this crop and what it got matched to
-                    for seg_cell_id in new_cell_candidates:
-                        if seg_cell_id in relink_map:  # Already matched
+                temp_relink_map = {}
+                # First, collect all potential matches
+                for seg_cell_id in new_cell_candidates:
+                    for state, crop_mask in zip(tiled_states, crop_masks, strict=False):
+                        tm = state.get("temporal_matching_results", {}).get(frame_idx, {})
+                        crop_relink_map = tm.get("relink_map", {})
+                        if not crop_relink_map:
+                            continue
+                        x0, y0, x1, y1 = state["crop_box"]
+                        crop_seg_region = seg_mask[y0:y1, x0:x1] if seg_mask is not None else None
+                        if crop_seg_region is None:
                             continue
                         seg_cell_in_crop = (crop_seg_region == seg_cell_id)
                         if not np.any(seg_cell_in_crop):
                             continue
+                        # Check if any local ID in relink_map overlaps with seg_cell_id region
+                        for local_id, matched_id in crop_relink_map.items():
+                            local_id_mask = (crop_mask == local_id)
+                            overlap = np.logical_and(local_id_mask, seg_cell_in_crop)
+                            if np.any(overlap):
+                                # Check overlap ratio - must be > 0.7 to match
+                                overlap_ratio = overlap.sum() / local_id_mask.sum() if local_id_mask.sum() > 0 else 0
+                                if overlap_ratio > 0.7:
+                                    # Map matched_id (local ID from prev frame) to global ID
+                                    prev_l2g = state.get("local_to_global", {}).get(frame_idx - 1, {})
+                                    
+                                    # If matched_id is not in prev_l2g, check if it has a parent in current frame (just divided)
+                                    if matched_id not in prev_l2g:
+                                        # Check if matched_id has a parent in current frame
+                                        current_parent_ids = state["parent_ids"][frame_idx]
+                                        current_obj_ids = state.get("obj_ids", {}).get(frame_idx)
+                                        if matched_id not in current_obj_ids:
+                                            continue
+                                        parent_id = current_parent_ids[current_obj_ids == matched_id][0].item()
+                                        if parent_id == 0:
+                                            continue
+                                        global_matched_id = parent_id
+                                    
+                                    else:
+                                        global_matched_id = prev_l2g.get(matched_id, matched_id)
+                                    
+                                    temp_relink_map[seg_cell_id] = global_matched_id
+                                    break
+                        if seg_cell_id in temp_relink_map:
+                            break
+                
+                # Check which previous frame cells are already being tracked
+                # tracked_mask contains cells that were successfully tracked, their IDs = previous frame IDs
+                already_tracked_prev_ids = set(tracked_cell_ids) if 'tracked_cell_ids' in locals() else set()
+                
+                # Check for divisions: if multiple cells match to same previous frame cell
+                matched_id_counts = {}
+                for seg_id, matched_id in temp_relink_map.items():
+                    matched_id_counts[matched_id] = matched_id_counts.get(matched_id, []) + [seg_id]
+                
+                # Process matches: handle divisions and skip cells that already divided
+                for seg_cell_id, global_matched_id in temp_relink_map.items():
+                    # Count how many cells are already tracking from this previous frame cell
+                    already_tracked = 1 if global_matched_id in already_tracked_prev_ids else 0
+                    new_matches = len(matched_id_counts.get(global_matched_id, []))
+                    total_matches = already_tracked + new_matches
+                    
+                    # Skip if total matches would exceed division limit (2 daughters max)
+                    if total_matches > 2:
+                        continue
+                    
+                    # If this previous frame cell is already tracked, this is a division
+                    if global_matched_id in already_tracked_prev_ids:
+                        # Allocate new ID for the already-tracked cell that's becoming a daughter
+                        new_daughter_id = int(self._allocate_obj_ids(tiled_states[0], 1)[0].item())
+                        # Relabel the already-tracked cell in full_mask
+                        full_mask[full_mask == global_matched_id] = new_daughter_id
+                        # Update division set with new daughter ID
+                        aux_frame_divisions.setdefault(global_matched_id, set()).add(seg_cell_id)
+                        aux_frame_divisions[global_matched_id].add(new_daughter_id)
                         
-                        # Find which local ID(s) in crop_mask overlap with this seg_id region
-                        overlapping_local_ids = crop_mask[seg_cell_in_crop]
-                        overlapping_local_ids = overlapping_local_ids[overlapping_local_ids != 0]
-                        if len(overlapping_local_ids) == 0:
-                            continue
+                        # Add to aux_parent_map for later use in building parent_map
+                        aux_parent_map[new_daughter_id] = global_matched_id
+                        aux_parent_map[seg_cell_id] = global_matched_id
                         
-                        # Use the most common local ID (in case of multiple)
-                        local_id = int(np.bincount(overlapping_local_ids).argmax())
-                        
-                        # Check if this local_id was matched (relinked) in the crop
-                        if local_id in crop_relink_map:
-                            relink_map[seg_cell_id] = crop_relink_map[local_id]
-                            # Also collect parent_map and divisions if this was a division
-                            matched_id = crop_relink_map[local_id]
-                            if matched_id in tm.get("parent_map", {}):
-                                aux_parent_map[matched_id] = tm["parent_map"][matched_id]
-                            for parent, daughters in tm.get("divisions", {}).items():
-                                if matched_id in daughters:
-                                    aux_frame_divisions.setdefault(parent, set()).add(matched_id)
-
-                # Apply relink_map to full_mask for new cells
-                for seg_cell_id in new_cell_candidates:
-                    if seg_cell_id in relink_map:
-                        full_mask[full_mask == seg_cell_id] = relink_map[seg_cell_id]
+                    # If multiple new cells match same parent, it's also a division
+                    elif new_matches > 1:
+                        aux_frame_divisions.setdefault(global_matched_id, set()).add(seg_cell_id)
+                    else:
+                        # Regular tracking (not a division) - relink to parent ID and apply to full_mask
+                        relink_map[seg_cell_id] = global_matched_id
+                        full_mask[full_mask == seg_cell_id] = global_matched_id
 
             # Ensure each cell is one blob (keep largest blob, remove smaller ones)
             for cell_id in np.unique(full_mask):
@@ -1872,7 +1915,7 @@ class SAM2AutomaticCellTracker:
                                     ]
                                 )
 
-                elif self.aux_matching in ("segment_then_aux_track", "new_cells_only"):
+                if self.aux_matching != "off":
                     track_mask = self._apply_temporal_matching_to_crop(
                         inference_state, frame_idx, track_mask
                     )
@@ -2256,12 +2299,14 @@ class SAM2AutomaticCellTracker:
     def _apply_temporal_matching_to_crop(self, inference_state, frame_idx, track_mask):
         """Apply per-crop temporal matching: match current frame cells to prev frame cells.
 
-        Runs the temporal matching head within a single crop. Modifies track_mask
-        so that matched cells inherit the previous frame's IDs. Stores parent_map
-        and divisions in inference_state for later global compilation.
+        Runs the temporal matching head within a single crop. For "segment_then_aux_track",
+        modifies track_mask so that matched cells inherit the previous frame's IDs. For
+        "new_cells_only", preserves SAM2's track_mask and only stores relink_map for
+        later use. Stores parent_map and divisions in inference_state for later global
+        compilation.
 
         Returns:
-            track_mask with relinked cell IDs.
+            track_mask (modified for "segment_then_aux_track", unchanged for "new_cells_only").
         """
         parent_map = {}
         divisions = {}
@@ -2271,7 +2316,7 @@ class SAM2AutomaticCellTracker:
             # For "segment_then_aux_track", store in parent_ids (done below)
             if self.aux_matching == "new_cells_only":
                 inference_state.setdefault("temporal_matching_results", {})[frame_idx] = {
-                    "relink_map": {}, "parent_map": parent_map, "divisions": divisions,
+                    "relink_map": {},
                 }
             return track_mask
 
@@ -2338,62 +2383,61 @@ class SAM2AutomaticCellTracker:
                 relink_map[query_ids[i]] = key_id
             else:
                 (i0, _), (i1, _) = top2[0], top2[1]
-                daughter_ids_alloc = self._allocate_obj_ids(inference_state, 2)
-                new_id1 = int(daughter_ids_alloc[0].item())
-                new_id2 = int(daughter_ids_alloc[1].item())
-                relink_map[query_ids[i0]] = new_id1
-                relink_map[query_ids[i1]] = new_id2
-                parent_map[new_id1] = key_id
-                parent_map[new_id2] = key_id
-                divisions.setdefault(key_id, set()).add(new_id1)
-                divisions.setdefault(key_id, set()).add(new_id2)
+                if self.aux_matching == "segment_then_aux_track":
+                    # Create two new daughter IDs for divisions
+                    daughter_ids_alloc = self._allocate_obj_ids(inference_state, 2)
+                    new_id1 = int(daughter_ids_alloc[0].item())
+                    new_id2 = int(daughter_ids_alloc[1].item())
+                    relink_map[query_ids[i0]] = new_id1
+                    relink_map[query_ids[i1]] = new_id2
+                    parent_map[new_id1] = key_id
+                    parent_map[new_id2] = key_id
+                    divisions.setdefault(key_id, set()).add(new_id1)
+                    divisions.setdefault(key_id, set()).add(new_id2)
+                else:
+                    # For "new_cells_only", just relink both to parent (no new IDs, no parent_map/divisions tracking)
+                    relink_map[query_ids[i0]] = key_id
+                    relink_map[query_ids[i1]] = key_id
 
-        # Apply relink to track_mask
-        for old_id, new_id in relink_map.items():
-            track_mask[track_mask == old_id] = new_id
+        # Apply relink to track_mask (skip for "new_cells_only" to preserve SAM2 tracking)
+        if self.aux_matching == "segment_then_aux_track":
+            for old_id, new_id in relink_map.items():
+                track_mask[track_mask == old_id] = new_id
 
-        # Update aux_tokens_data with relinked IDs
-        aux_tokens = inference_state.get("aux_tokens_data", {}).get(frame_idx)
-        if aux_tokens is not None:
-            aux_tokens["ids"] = [relink_map.get(tid, tid) for tid in aux_tokens["ids"]]
+            # Update aux_tokens_data with relinked IDs (skip for "new_cells_only" to preserve SAM2 IDs)
+            aux_tokens = inference_state.get("aux_tokens_data", {}).get(frame_idx)
+            if aux_tokens is not None:
+                aux_tokens["ids"] = [relink_map.get(tid, tid) for tid in aux_tokens["ids"]]
 
-        # For "segment_then_aux_track", update obj_ids and parent_ids to reflect relinking
-        if self.aux_matching == "segment_then_aux_track" and relink_map:
-            obj_ids = inference_state.get("obj_ids", {}).get(frame_idx)
-            if obj_ids is not None:
-                # Initialize parent_ids if needed
-                if "parent_ids" not in inference_state:
-                    inference_state["parent_ids"] = {}
-                if frame_idx not in inference_state["parent_ids"]:
-                    inference_state["parent_ids"][frame_idx] = torch.zeros(
-                        len(obj_ids), device=self.device, dtype=torch.int32
-                    )
-                
-                # Update obj_ids and parent_ids in one pass
-                obj_ids_np = obj_ids.cpu().numpy()
-                parent_ids = inference_state["parent_ids"][frame_idx].clone()
-                for i, obj_id in enumerate(obj_ids_np):
-                    obj_id_int = int(obj_id)
-                    # Update obj_id if relinked
-                    if obj_id_int in relink_map:
-                        obj_ids[i] = relink_map[obj_id_int]
-                        obj_id_int = relink_map[obj_id_int]  # Use relinked ID for parent lookup
-                    # Update parent_id if in parent_map
-                    if obj_id_int in parent_map:
-                        parent_ids[i] = parent_map[obj_id_int]
-                
-                inference_state["obj_ids"][frame_idx] = obj_ids
-                inference_state["parent_ids"][frame_idx] = parent_ids
-        
-        # Store in temporal_matching_results for "new_cells_only"
-        if self.aux_matching == "new_cells_only":
-            inference_state.setdefault("temporal_matching_results", {})[frame_idx] = {
-                "relink_map": relink_map,
-                "parent_map": parent_map,
-                "divisions": divisions,
-            }
-        else:
-            # For "segment_then_aux_track", still store relink_map for filtering logic
+            # For "segment_then_aux_track", update obj_ids and parent_ids to reflect relinking
+            if  relink_map:
+                obj_ids = inference_state.get("obj_ids", {}).get(frame_idx)
+                if obj_ids is not None:
+                    # Initialize parent_ids if needed
+                    if "parent_ids" not in inference_state:
+                        inference_state["parent_ids"] = {}
+                    if frame_idx not in inference_state["parent_ids"]:
+                        inference_state["parent_ids"][frame_idx] = torch.zeros(
+                            len(obj_ids), device=self.device, dtype=torch.int32
+                        )
+                    
+                    # Update obj_ids and parent_ids in one pass
+                    obj_ids_np = obj_ids.cpu().numpy()
+                    parent_ids = inference_state["parent_ids"][frame_idx].clone()
+                    for i, obj_id in enumerate(obj_ids_np):
+                        obj_id_int = int(obj_id)
+                        # Update obj_id if relinked
+                        if obj_id_int in relink_map:
+                            obj_ids[i] = relink_map[obj_id_int]
+                            obj_id_int = relink_map[obj_id_int]  # Use relinked ID for parent lookup
+                        # Update parent_id if in parent_map
+                        if obj_id_int in parent_map:
+                            parent_ids[i] = parent_map[obj_id_int]
+                    
+                    inference_state["obj_ids"][frame_idx] = obj_ids
+                    inference_state["parent_ids"][frame_idx] = parent_ids
+
+        elif self.aux_matching == "new_cells_only":    
             inference_state.setdefault("temporal_matching_results", {})[frame_idx] = {
                 "relink_map": relink_map,
             }
