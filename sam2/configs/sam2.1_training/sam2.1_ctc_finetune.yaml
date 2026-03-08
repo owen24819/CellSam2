@@ -225,7 +225,7 @@ trainer:
 
     # Temporal auxiliary matcher
     enable_temporal_aux_matcher: ${scratch.use_temporal_aux_matcher}
-    temporal_aux_matcher_num_heads: 4
+    temporal_aux_matcher_num_heads: 8
     temporal_aux_match_query_k: 0  # 0 = use all cells
     temporal_aux_match_w_daughter: 3.0  # sampling weight for daughter cells
     temporal_aux_match_w_new: 2.0       # sampling weight for new FOV cells

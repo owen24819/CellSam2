@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import math
 
 import torch
 import torch.distributed
@@ -20,43 +21,194 @@ from sam2.modeling.sam2_utils import MLP, get_1d_sine_pe
 NO_OBJ_SCORE = -1024.0
 
 
-class TemporalMatchingHead(torch.nn.Module):
-    """Small cross-attention matcher: frame t+1 queries vs frame t keys + NULL."""
+class FourierPositionEncoding(torch.nn.Module):
+    """Maps 2-D normalised cell centroids to a ``hidden_dim`` embedding using
+    multi-scale Fourier (sinusoidal) features.
 
-    def __init__(self, hidden_dim=256, num_heads=4):
+    For each coordinate axis (cx, cy) and each of the ``num_freqs`` frequency
+    bands (geometric progression 1, 2, 4, …, 2^(F-1)):
+
+        angle  = 2π · coord · freq
+        feature = [sin(angle), cos(angle)]
+
+    This yields a 4·F-dimensional descriptor per cell (2 axes × 2 functions ×
+    F bands) which is then projected linearly to ``hidden_dim``.
+
+    The geometric frequency schedule naturally covers both coarse (global layout)
+    and fine (sub-pixel) positional cues, making the model robust to both large
+    FOV shifts and small local deformations.
+    """
+
+    def __init__(self, hidden_dim: int = 256, num_freqs: int = 64):
         super().__init__()
+        self.num_freqs = num_freqs
+        # Geometric frequency bands: 1, 2, 4, …, 2^(F-1)
+        freqs = 2.0 ** torch.arange(num_freqs).float()   # [F]
+        self.register_buffer("freqs", freqs)
+        # Linear projection: 4F → hidden_dim
+        self.proj = torch.nn.Linear(4 * num_freqs, hidden_dim)
+
+    def forward(self, centroids: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            centroids: [N, 2]  normalised (cx, cy) in [0, 1]
+
+        Returns:
+            pe: [N, hidden_dim]
+        """
+        # Scale to [0, 2π] so one full oscillation fits the unit square
+        angles = centroids * (2.0 * math.pi)                          # [N, 2]
+        angles = angles.unsqueeze(-1) * self.freqs.view(1, 1, -1)     # [N, 2, F]
+        enc = torch.cat([angles.sin(), angles.cos()], dim=-1)         # [N, 2, 2F]
+        enc = enc.flatten(1)                                           # [N, 4F]
+        return self.proj(enc)                                          # [N, hidden_dim]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _SACABlock(torch.nn.Module):
+    """One interleaved Self-Attention → Cross-Attention block (SuperGlue-style).
+
+    Queries first attend to themselves to build a "constellation" context of the
+    current frame, then attend to the (pre-encoded) key set to look up matches.
+    Both sub-layers use pre-LayerNorm + residual connection.
+
+    Keys are *read-only* within this block; only queries are updated.
+    """
+
+    def __init__(self, hidden_dim: int, num_heads: int):
+        super().__init__()
+        self.sa_norm = torch.nn.LayerNorm(hidden_dim)
+        self.sa      = torch.nn.MultiheadAttention(
+            hidden_dim, num_heads, batch_first=True
+        )
+        self.ca_norm = torch.nn.LayerNorm(hidden_dim)
+        self.ca      = torch.nn.MultiheadAttention(
+            hidden_dim, num_heads, batch_first=True
+        )
+
+    def forward(
+        self,
+        q: torch.Tensor,   # [1, N_q, D]
+        k: torch.Tensor,   # [1, N_k, D]  key constellation (frozen)
+    ) -> torch.Tensor:
+        # SA: queries integrate global context from the query constellation
+        q_n = self.sa_norm(q)
+        out, _ = self.sa(q_n, q_n, q_n)
+        q = q + out
+        # CA: queries look up matching evidence from the key constellation
+        q_n = self.ca_norm(q)
+        out, _ = self.ca(q_n, k, k)
+        q = q + out
+        return q                                                       # [1, N_q, D]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TemporalMatchingHead(torch.nn.Module):
+    """SuperGlue-inspired cell matcher for CellSAM2.
+
+    Architecture
+    ────────────
+    **build_matching_tokens** (called externally, once per frame)
+        • Masked-average ROI pooling → roi_feat  [N, C]
+        • LayerNorm each of ``obj_ptr`` and ``roi_feat`` independently
+        • 3-layer GELU MLP fuses them → visual token  [N, hidden_dim]
+        • Returns (token, centroid, area) – positional encoding is added in
+          ``forward`` so the same token can be reused across calls.
+
+    **forward**
+        1. **Positional encoding injection** – ``FourierPositionEncoding`` maps
+           each cell's normalised (cx, cy) centroid to ``hidden_dim`` and adds
+           it to the visual token, baking spatial layout into the features.
+        2. **Key constellation encoder** – 3 × pre-norm Self-Attention layers
+           on the *key* set so keys build a spatial "constellation map" of the
+           previous frame before any cross-frame interaction begins.
+        3. **Interleaved SA→CA blocks** (× ``num_blocks``, default 3) –
+           each block applies SA(Q→Q) followed by CA(Q→K), progressively
+           refining query representations using both local structure and
+           cross-frame evidence.
+        4. **Match matrix** – multi-head dot-product scoring between the refined
+           query tokens and ``{key_tokens ∪ null_key}``, yielding
+           ``[N_q, N_k + 1]`` logits.  The last column corresponds to the
+           learned ``null_key`` (NO_MATCH class).
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int = 256,
+        num_heads: int = 8,
+        num_freqs: int = 64,
+        num_key_sa_layers: int = 3,
+        num_blocks: int = 3,
+    ):
+        super().__init__()
+        assert hidden_dim % num_heads == 0, (
+            f"hidden_dim ({hidden_dim}) must be divisible by num_heads ({num_heads})"
+        )
         self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        self.head_dim = hidden_dim // num_heads
+        self.num_heads  = num_heads
+        self.head_dim   = hidden_dim // num_heads
 
-        # obj_ptr (hidden_dim) + ROI pooled feat (hidden_dim) → matching token
-        self.token_proj = MLP(hidden_dim * 2, hidden_dim, hidden_dim, 2)
+        # ── 1. Feature Fusion ─────────────────────────────────────────────────
+        # Independent LayerNorm for each feature stream
+        self.obj_ptr_norm  = torch.nn.LayerNorm(hidden_dim)
+        self.roi_feat_norm = torch.nn.LayerNorm(hidden_dim)
+        # 3-layer GELU MLP: obj_ptr ∥ roi_feat → visual token  [N, hidden_dim]
+        self.token_proj = MLP(
+            hidden_dim * 2, hidden_dim, hidden_dim, 3,
+            activation=torch.nn.GELU,
+        )
 
+        # ── 1b. Fourier Positional Encoding ───────────────────────────────────
+        self.pos_enc = FourierPositionEncoding(hidden_dim, num_freqs)
+
+        # ── 2. Key Constellation Encoder (3-layer SA) ─────────────────────────
+        self.key_sa_layers = torch.nn.ModuleList([
+            torch.nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+            for _ in range(num_key_sa_layers)
+        ])
+        self.key_sa_norms = torch.nn.ModuleList([
+            torch.nn.LayerNorm(hidden_dim)
+            for _ in range(num_key_sa_layers)
+        ])
+
+        # ── 3. Interleaved SA→CA blocks ───────────────────────────────────────
+        self.blocks = torch.nn.ModuleList([
+            _SACABlock(hidden_dim, num_heads)
+            for _ in range(num_blocks)
+        ])
+
+        # ── 4. Final Scoring Projections ──────────────────────────────────────
         self.q_proj = torch.nn.Linear(hidden_dim, hidden_dim)
         self.k_proj = torch.nn.Linear(hidden_dim, hidden_dim)
 
-        # Learned NULL key for NO_MATCH class
-        self.null_key = torch.nn.Parameter(torch.zeros(1, hidden_dim))
+        # Learned NULL key embedding – the "NO_MATCH" candidate
+        self.null_key = torch.nn.Parameter(torch.empty(1, hidden_dim))
         torch.nn.init.trunc_normal_(self.null_key, std=0.02)
 
-        # (dx, dy, log_area_ratio) → per-head bias
-        self.rel_pos_bias_mlp = MLP(3, hidden_dim // 4, num_heads, 2)
+    # ──────────────────────────────────────────────────────────────────────────
+    def build_matching_tokens(
+        self,
+        obj_ptr: torch.Tensor,
+        pix_feat: torch.Tensor,
+        mask_logits: torch.Tensor,
+    ):
+        """Build per-cell visual tokens via masked-average ROI pooling.
 
-    # ------------------------------------------------------------------
-    def build_matching_tokens(self, obj_ptr, pix_feat, mask_logits):
-        """Build per-cell matching tokens via masked-average ROI pooling.
+        Positional encoding is *not* added here so that the raw visual token
+        can be cached / reused independently of its position.
 
         Args:
             obj_ptr:     [N, C]
-            pix_feat:    [N, C, H, W]  (memory-conditioned features)
-            mask_logits: [N, 1, H_mask, W_mask]  (raw logits, will be sigmoided)
+            pix_feat:    [N, C, H, W]  memory-conditioned image features
+            mask_logits: [N, 1, H_mask, W_mask]  raw logits (will be sigmoided)
 
         Returns:
-            tokens:    [N, C]
-            centroids: [N, 2]  normalised (cx, cy) in [0, 1] relative to crop
-            areas:     [N]
+            tokens:    [N, hidden_dim]  visual tokens (PE will be added in forward)
+            centroids: [N, 2]          normalised (cx, cy) in [0, 1]
         """
-        N, C, H, W = pix_feat.shape
+        _, C, H, W = pix_feat.shape
         device = pix_feat.device
 
         mask_prob = F.interpolate(
@@ -69,60 +221,101 @@ class TemporalMatchingHead(torch.nn.Module):
         mask_sum = mask_prob.sum(dim=(2, 3)).clamp(min=1e-6)  # [N, 1]
         roi_feat = (pix_feat * mask_prob).sum(dim=(2, 3)) / mask_sum  # [N, C]
 
-        # Normalised centroids in [0, 1] range relative to crop
+        # Normalised centroids in [0, 1]
         grid_y = torch.arange(H, device=device).float() / max(H - 1, 1)
         grid_x = torch.arange(W, device=device).float() / max(W - 1, 1)
         grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing="ij")
         cx = (mask_prob[:, 0] * grid_x).sum(dim=(1, 2)) / mask_sum[:, 0]
         cy = (mask_prob[:, 0] * grid_y).sum(dim=(1, 2)) / mask_sum[:, 0]
         centroids = torch.stack([cx, cy], dim=1)  # [N, 2]
-        areas = mask_sum[:, 0]  # [N]
 
-        token = self.token_proj(torch.cat([obj_ptr, roi_feat], dim=1))
-        return token, centroids, areas
+        # Independent LN + 3-layer GELU MLP fusion
+        token = self.token_proj(
+            torch.cat(
+                [self.obj_ptr_norm(obj_ptr), self.roi_feat_norm(roi_feat)],
+                dim=1,
+            )
+        )  # [N, hidden_dim]
+        return token, centroids
 
-    # ------------------------------------------------------------------
-    def forward(self, query_tokens, key_tokens,
-                query_centroids, key_centroids,
-                query_areas, key_areas):
+    # ──────────────────────────────────────────────────────────────────────────
+    def _encode_keys(self, key_tokens: torch.Tensor) -> torch.Tensor:
+        """3-layer pre-norm SA encoder: keys build their constellation map.
+
+        Args:
+            key_tokens: [N_k, D]
+
+        Returns:
+            key_tokens: [N_k, D]  spatially context-enriched
+        """
+        if key_tokens.shape[0] == 0:
+            return key_tokens
+        x = key_tokens.unsqueeze(0)                          # [1, N_k, D]
+        for sa, norm in zip(self.key_sa_layers, self.key_sa_norms):
+            x_n = norm(x)
+            out, _ = sa(x_n, x_n, x_n)
+            x = x + out
+        return x.squeeze(0)                                  # [N_k, D]
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def forward(
+        self,
+        query_tokens: torch.Tensor,
+        key_tokens: torch.Tensor,
+        query_centroids: torch.Tensor,
+        key_centroids: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Args:
-            query_tokens:    [N_q, D]
-            key_tokens:      [N_k, D]
-            query_centroids: [N_q, 2]  normalized (cx, cy) in [0, 1] relative to crop
-            key_centroids:   [N_k, 2]  normalized (cx, cy) in [0, 1] relative to crop
-            query_areas:     [N_q]
-            key_areas:       [N_k]
+            query_tokens:    [N_q, D]  frame t+1 visual tokens
+            key_tokens:      [N_k, D]  frame t   visual tokens
+            query_centroids: [N_q, 2]  normalised (cx, cy) in [0, 1]
+            key_centroids:   [N_k, 2]  normalised (cx, cy) in [0, 1]
+
         Returns:
-            match_logits: [N_q, N_k + 1]  (last col = NO_MATCH)
+            match_logits: [N_q, N_k + 1]
+                Columns 0…N_k-1 are scores for each key cell;
+                column N_k is the NO_MATCH (null) score.
         """
         N_q = query_tokens.shape[0]
         N_k = key_tokens.shape[0]
-        H = self.num_heads
-        D = self.head_dim
 
-        Q = self.q_proj(query_tokens).view(N_q, H, D)
+        # ── Step 1. Inject Fourier positional encoding ─────────────────────
+        query_tokens = query_tokens + self.pos_enc(query_centroids)  # [N_q, D]
+        if N_k > 0:
+            key_tokens = key_tokens + self.pos_enc(key_centroids)    # [N_k, D]
 
-        keys_with_null = torch.cat([key_tokens, self.null_key], dim=0)
+        # ── Step 2. Key constellation encoder (3-layer SA) ─────────────────
+        if N_k > 0:
+            key_tokens = self._encode_keys(key_tokens)               # [N_k, D]
+
+        # ── Step 3. Interleaved SA→CA blocks ────────────────────────────────
+        q = query_tokens.unsqueeze(0)   # [1, N_q, D]
+        if N_k > 0:
+            k = key_tokens.unsqueeze(0) # [1, N_k, D]
+            for block in self.blocks:
+                q = block(q, k)
+        else:
+            # No keys available: SA-only pass (skip the CA sub-layer)
+            for block in self.blocks:
+                q_n = block.sa_norm(q)
+                out, _ = block.sa(q_n, q_n, q_n)
+                q = q + out
+        q = q.squeeze(0)                                             # [N_q, D]
+
+        # ── Step 4. Match matrix ─────────────────────────────────────────────
+        # Concatenate the learned null key as the final "key" candidate
+        keys_with_null = torch.cat(
+            [key_tokens, self.null_key.expand(1, -1)], dim=0
+        ) if N_k > 0 else self.null_key                              # [N_k+1, D]
+
+        H, D = self.num_heads, self.head_dim
+        Q = self.q_proj(q).view(N_q, H, D)
         K = self.k_proj(keys_with_null).view(N_k + 1, H, D)
 
-        attn = torch.einsum("qhd,khd->qkh", Q, K) / (D ** 0.5)  # [N_q, N_k+1, H]
-
-        if N_k > 0:
-            # Compute difference in normalized coordinates
-            dx = query_centroids[:, 0:1] - key_centroids[:, 0:1].T  # [N_q, N_k]
-            dy = query_centroids[:, 1:2] - key_centroids[:, 1:2].T
-            
-            log_ar = torch.log(
-                (query_areas[:, None] + 1e-6) / (key_areas[None, :] + 1e-6)
-            )
-            rel_pos = torch.stack([dx, dy, log_ar], dim=-1)        # [N_q, N_k, 3]
-            pos_bias = self.rel_pos_bias_mlp(rel_pos)               # [N_q, N_k, H]
-            null_bias = pos_bias.new_zeros(N_q, 1, H)
-            pos_bias = torch.cat([pos_bias, null_bias], dim=1)      # [N_q, N_k+1, H]
-            attn = attn + pos_bias
-
-        match_logits = attn.mean(dim=-1)  # [N_q, N_k+1]
+        # Averaged multi-head dot-product scoring
+        attn = torch.einsum("qhd,khd->qkh", Q, K) / (D ** 0.5)     # [N_q, N_k+1, H]
+        match_logits = attn.mean(dim=-1)                             # [N_q, N_k+1]
         return match_logits
 
 
@@ -209,7 +402,7 @@ class SAM2Base(torch.nn.Module):
         div_obj_score_thresh: float = 0.5,
         # Temporal auxiliary matcher
         enable_temporal_aux_matcher: bool = False,
-        temporal_aux_matcher_num_heads: int = 4,
+        temporal_aux_matcher_num_heads: int = 8,
         temporal_aux_match_query_k: int = 0,
         temporal_aux_match_w_daughter: float = 3.0,
         temporal_aux_match_w_new: float = 2.0,

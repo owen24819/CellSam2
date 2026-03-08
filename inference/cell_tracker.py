@@ -2223,7 +2223,7 @@ class SAM2AutomaticCellTracker:
             
             # data["masks"] has shape [N, H, W] after flatten(0, 1), need [N, 1, H, W] for build_matching_tokens
             mask_logits = data["masks"].to(raw_pix_feat.device).unsqueeze(1)
-            key_tokens, key_centroids, key_areas = (
+            key_tokens, key_centroids = (
                 self.model.temporal_matching_head.build_matching_tokens(
                     data["obj_ptr"], raw_pix_feat, mask_logits
                 )
@@ -2233,7 +2233,6 @@ class SAM2AutomaticCellTracker:
             inference_state["aux_tokens_data"][frame_idx] = {
                 "tokens": key_tokens,
                 "centroids": key_centroids,
-                "areas": key_areas,
                 "ids": obj_ids.cpu().numpy().tolist(),
             }
 
@@ -2341,18 +2340,15 @@ class SAM2AutomaticCellTracker:
         device = self.device
         query_tokens = current_aux["tokens"].to(device)
         query_centroids = current_aux["centroids"].to(device)
-        query_areas = current_aux["areas"].to(device)
         query_ids = current_aux["ids"]
 
         key_tokens = prev_aux["tokens"].to(device)
         key_centroids = prev_aux["centroids"].to(device)
-        key_areas = prev_aux["areas"].to(device)
         key_ids = prev_aux["ids"]
 
         # Run temporal matching head
         match_logits = self.model.temporal_matching_head.forward(
             query_tokens, key_tokens, query_centroids, key_centroids,
-            query_areas, key_areas,
         )
 
         # Sparsify: keep only the max per query row

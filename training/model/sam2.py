@@ -379,7 +379,6 @@ class SAM2Train(SAM2Base):
                 key_ids = out_t0["key_ids"]
                 key_tokens = out_t0["key_tokens"]
                 key_centroids = out_t0["key_centroids"]
-                key_areas = out_t0["key_areas"]
 
                 # Queries: post-div tokens for frame t+1 (tracking_object_ids order).
                 query_valid = out_t1["query_valid_mask"]
@@ -404,9 +403,8 @@ class SAM2Train(SAM2Base):
                 if out_t1.get("_temporal_aux_use_conditioned_queries", True):
                     query_tokens = out_t1["key_tokens"][query_valid]
                     query_centroids = out_t1["key_centroids"][query_valid]
-                    query_areas = out_t1["key_areas"][query_valid]
                 else:
-                    query_tokens, query_centroids, query_areas = (
+                    query_tokens, query_centroids = (
                         self._compute_detection_query_tokens(out_t1, query_valid)
                     )
                 if query_tokens is None or query_tokens.shape[0] == 0:
@@ -416,7 +414,6 @@ class SAM2Train(SAM2Base):
                 match_logits = self.temporal_matching_head(
                     query_tokens, key_tokens,
                     query_centroids, key_centroids,
-                    query_areas, key_areas,
                 )
                 match_targets = self._build_matching_targets(
                     query_ids, key_ids, child_to_parent,
@@ -563,7 +560,7 @@ class SAM2Train(SAM2Base):
                     .expand(N_postdiv, -1, -1, -1)
                     .contiguous()
                 )
-                key_tokens, key_centroids, key_areas = (
+                key_tokens, key_centroids = (
                     self.temporal_matching_head.build_matching_tokens(
                         current_out["obj_ptr"],
                         pix_feat_keys,
@@ -572,7 +569,6 @@ class SAM2Train(SAM2Base):
                 )
                 current_out["key_tokens"] = key_tokens
                 current_out["key_centroids"] = key_centroids
-                current_out["key_areas"] = key_areas
                 current_out["key_ids"] = tracking_object_ids.clone()
 
                 # Post-div query masks and IDs. tracking_object_ids > 0 = real cells (valid).
@@ -794,11 +790,11 @@ class SAM2Train(SAM2Base):
         query_masks = out_t1.get("_query_masks")
 
         if raw_vision_feats is None or query_masks is None:
-            return None, None, None
+            return None, None
 
         valid_mask_idx = query_valid.nonzero(as_tuple=False).squeeze(1)
         if valid_mask_idx.numel() == 0:
-            return None, None, None
+            return None, None
 
         device = query_masks.device
         N_valid = valid_mask_idx.numel()
@@ -849,10 +845,10 @@ class SAM2Train(SAM2Base):
             is_dividing=is_div_query,
         )
 
-        tokens, centroids, areas = self.temporal_matching_head.build_matching_tokens(
+        tokens, centroids = self.temporal_matching_head.build_matching_tokens(
             _obj_ptr, raw_feat_bchw, _low_res,
         )
-        return tokens, centroids, areas
+        return tokens, centroids
 
     def _build_child_to_parent_map(self, input, processing_order):
         """Build {daughter_id: mother_id} across all frames.
@@ -882,25 +878,36 @@ class SAM2Train(SAM2Base):
         return child_to_parent
 
     def _build_matching_targets(self, query_ids, key_ids, child_to_parent):
-        """For each query, return the index into keys (or N_keys for NO_MATCH).
-
-        Keys are post-div. Queries are detection-mode (no divisions).
-        - Direct tracked cells: query ID found in key_ids → direct match.
-        - Daughters: query ID in child_to_parent and parent in key_ids → match parent.
-        - New FOV cells: no match → NO_MATCH (index N_keys).
         """
+        Args:
+            query_ids: Tensor of IDs for cells in frame t+1
+            key_ids: Tensor of IDs for cells in frame t
+            child_to_parent: Dict mapping {daughter_id: parent_id}
+        """
+        device = query_ids.device
+        N_k = len(key_ids)
+
+        # Map key IDs to their position in the key_tokens tensor
         key_id_to_idx = {kid.item(): idx for idx, kid in enumerate(key_ids)}
-        N_keys = len(key_ids)
+
         targets = []
         for qid in query_ids:
             qid_val = qid.item()
+
+            # 1. Check if it's a direct track (same ID exists in previous frame)
             if qid_val in key_id_to_idx:
                 targets.append(key_id_to_idx[qid_val])
+
+            # 2. Check if it's a daughter (its parent ID exists in previous frame)
             elif qid_val in child_to_parent and child_to_parent[qid_val] in key_id_to_idx:
-                targets.append(key_id_to_idx[child_to_parent[qid_val]])
+                parent_id = child_to_parent[qid_val]
+                targets.append(key_id_to_idx[parent_id])
+
+            # 3. New cell/No match: point to the NULL key (at index N_k)
             else:
-                targets.append(N_keys)
-        return torch.tensor(targets, device=query_ids.device, dtype=torch.long)
+                targets.append(N_k)
+
+        return torch.tensor(targets, device=device, dtype=torch.long)
 
     def _subsample_matching_query_indices(self, ids, key_ids, child_to_parent):
         """Return indices of queries to use, or None if all should be used.
