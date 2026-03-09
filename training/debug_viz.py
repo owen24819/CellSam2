@@ -6,13 +6,14 @@ Debug visualization for training predictions vs ground truth.
 Generates comparison images showing predictions (top) vs ground truths (bottom).
 """
 
+import math
 import os
 from typing import Dict, List, Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 
 def get_color_for_cell_id(cell_id: int) -> tuple:
@@ -344,6 +345,252 @@ def create_debug_visualization(
     save_path = os.path.join(save_dir, f"debug_sample_{sample_idx}_idx_{dataset_idx}.png")
     Image.fromarray(final_image).save(save_path)
     
+    return save_path
+
+
+def _load_font(size: int = 11):
+    """Load a PIL font, falling back to the built-in default."""
+    for name in ("arial.ttf", "DejaVuSans.ttf", "LiberationSans-Regular.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
+def _draw_text_outlined(draw, xy, text, font, fill=(255, 255, 255), outline=(0, 0, 0)):
+    """Draw text with a 1-pixel outline for contrast on any background."""
+    x, y = xy
+    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        draw.text((x + dx, y + dy), text, fill=outline, font=font)
+    draw.text((x, y), text, fill=fill, font=font)
+
+
+def _draw_dashed_line(draw, x0, y0, x1, y1, color, dash=6, width=2):
+    """Draw a dashed line using alternating filled/empty segments."""
+    dx, dy = x1 - x0, y1 - y0
+    dist = math.hypot(dx, dy)
+    if dist < 1:
+        return
+    steps = max(1, int(dist / dash))
+    for i in range(0, steps, 2):
+        ta = i / steps
+        tb = min((i + 1) / steps, 1.0)
+        draw.line(
+            [(int(x0 + dx * ta), int(y0 + dy * ta)),
+             (int(x0 + dx * tb), int(y0 + dy * tb))],
+            fill=color, width=width,
+        )
+
+
+def _draw_circle(draw, cx, cy, r, fill, outline=(0, 0, 0), outline_width=2):
+    draw.ellipse(
+        [(cx - r, cy - r), (cx + r, cy + r)],
+        fill=fill, outline=outline, width=outline_width,
+    )
+
+
+def create_temporal_matching_visualization(
+    input,
+    t0: int,
+    t1: int,
+    key_ids,
+    key_centroids,
+    query_ids,
+    query_centroids,
+    match_logits,
+    match_targets,
+    child_to_parent: dict,
+    save_dir: str,
+    step: int = 0,
+) -> Optional[str]:
+    """
+    Create a PIL-based debug visualization for the temporal matching head.
+
+    Layout
+    ──────
+    ┌────────────────── header bar (stats) ──────────────────┐
+    │  frame t0  (keys)  │  gap  │  frame t1  (queries)      │
+    └────────────────────────────────────────────────────────┘
+
+    Lines cross the gap between the two panels:
+      • Solid line   = predicted match.
+      • Dashed line  = correct GT assignment when it differs from prediction.
+
+    Query-circle colour coding
+    ──────────────────────────
+      Green  – correct direct-track prediction.
+      Orange – correct division prediction (daughter → mother).
+      Red    – wrong prediction.
+      Grey   – GT is NULL (new / unmatched cell).
+
+    Key circles are drawn with a cyan outline and coloured by cell ID.
+
+    Args:
+        input:            BatchedVideoDatapoint (needs img_batch).
+        t0, t1:           Frame indices (key frame and query frame).
+        key_ids:          [N_k] tensor of cell IDs at frame t0.
+        key_centroids:    [N_k, 2] normalised (cx, cy) in [0, 1].
+        query_ids:        [N_q] tensor of cell IDs at frame t1.
+        query_centroids:  [N_q, 2] normalised (cx, cy) in [0, 1].
+        match_logits:     [N_q, N_k + 1] raw matching logits.
+        match_targets:    [N_q] ground-truth key indices (N_k = NO_MATCH).
+        child_to_parent:  {daughter_id: parent_id} across the video.
+        save_dir:         Directory to save the PNG.
+        step:             Global training step (used for the filename).
+
+    Returns:
+        Path to the saved PNG, or None if saving failed.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # ── Constants ────────────────────────────────────────────────────────────
+    HEADER_H  = 36
+    GAP       = 28
+    CIRCLE_R  = 8
+    LINE_W    = 2
+
+    C_CORRECT_TRACK = (50,  210,  70)   # green
+    C_CORRECT_DIV   = (255, 160,   0)   # orange
+    C_WRONG         = (210,  50,  50)   # red
+    C_NULL          = (150, 150, 150)   # grey  (GT = NULL)
+    C_GT_DIFF       = (80,  130, 230)   # blue dashed  (correct GT ≠ pred)
+    C_KEY_OUTLINE   = (0,   200, 220)   # cyan ring on key circles
+    C_HEADER_BG     = (35,  35,  35)
+
+    N_k = key_ids.shape[0]
+    N_q = query_ids.shape[0]
+
+    if N_k == 0 or N_q == 0:
+        return None
+
+    # ── Predicted / GT assignments ───────────────────────────────────────────
+    pred_idx = match_logits.argmax(dim=1).cpu()   # [N_q]  values in 0..N_k
+    gt_idx   = match_targets.cpu()                # [N_q]
+
+    # ── Per-query labels (is this a division daughter?) ──────────────────────
+    key_id_set  = {k.item() for k in key_ids}
+    is_daughter = [
+        q.item() in child_to_parent and child_to_parent[q.item()] in key_id_set
+        for q in query_ids
+    ]
+
+    # ── Accuracy stats ───────────────────────────────────────────────────────
+    correct    = (pred_idx == gt_idx).float()
+    overall_acc = correct.mean().item()
+    div_mask   = torch.tensor(is_daughter)
+    div_acc    = correct[div_mask].mean().item() if div_mask.sum() > 0 else float("nan")
+
+    # ── Denormalize images ───────────────────────────────────────────────────
+    def _get_img_np(frame_idx):
+        img  = input.img_batch[frame_idx, 0].detach().cpu().float()
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+        img  = (img * std + mean).clamp(0, 1)
+        return (img.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+
+    try:
+        img0_np = _get_img_np(t0)
+        img1_np = _get_img_np(t1)
+    except Exception:
+        return None
+
+    H, W = img0_np.shape[:2]
+
+    # ── Build combined canvas ─────────────────────────────────────────────────
+    canvas_w = W * 2 + GAP
+    canvas_h = H + HEADER_H
+    canvas   = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+    canvas[:HEADER_H, :] = C_HEADER_BG
+    canvas[HEADER_H:, :W]       = img0_np
+    canvas[HEADER_H:, W + GAP:] = img1_np
+
+    img  = Image.fromarray(canvas)
+    draw = ImageDraw.Draw(img)
+    font = _load_font(11)
+
+    # ── Coordinate helpers ───────────────────────────────────────────────────
+    kc = key_centroids.detach().cpu()    # [N_k, 2]
+    qc = query_centroids.detach().cpu()  # [N_q, 2]
+
+    def _kpix(i):
+        """Key centroid → canvas (x, y)."""
+        return int(kc[i, 0] * W), int(kc[i, 1] * H) + HEADER_H
+
+    def _qpix(i):
+        """Query centroid → canvas (x, y)."""
+        return int(W + GAP + qc[i, 0] * W), int(qc[i, 1] * H) + HEADER_H
+
+    def _query_color(q):
+        p, g, div = pred_idx[q].item(), gt_idx[q].item(), is_daughter[q]
+        if g == N_k:
+            return C_NULL
+        if p == g:
+            return C_CORRECT_DIV if div else C_CORRECT_TRACK
+        return C_WRONG
+
+    # ── Draw lines FIRST (underneath circles) ────────────────────────────────
+    for q in range(N_q):
+        qx, qy = _qpix(q)
+        p, g   = pred_idx[q].item(), gt_idx[q].item()
+        color  = _query_color(q)
+
+        if p < N_k:                                # solid predicted line
+            kx, ky = _kpix(p)
+            draw.line([(kx, ky), (qx, qy)], fill=color, width=LINE_W)
+
+        if g < N_k and g != p:                     # dashed GT line (when wrong)
+            kx_gt, ky_gt = _kpix(g)
+            _draw_dashed_line(draw, kx_gt, ky_gt, qx, qy, C_GT_DIFF, dash=5, width=LINE_W)
+
+    # ── Draw key circles (left panel) ────────────────────────────────────────
+    for ki in range(N_k):
+        kx, ky = _kpix(ki)
+        fill   = get_color_for_cell_id(key_ids[ki].item())
+        _draw_circle(draw, kx, ky, CIRCLE_R, fill, outline=C_KEY_OUTLINE, outline_width=2)
+        lbl  = str(key_ids[ki].item())
+        bbox = draw.textbbox((0, 0), lbl, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        _draw_text_outlined(draw, (kx - tw // 2, ky - th // 2), lbl, font)
+
+    # ── Draw query circles (right panel) ─────────────────────────────────────
+    for qi in range(N_q):
+        qx, qy = _qpix(qi)
+        color  = _query_color(qi)
+        _draw_circle(draw, qx, qy, CIRCLE_R, color)
+        lbl  = str(query_ids[qi].item())
+        bbox = draw.textbbox((0, 0), lbl, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        _draw_text_outlined(draw, (qx - tw // 2, qy - th // 2), lbl, font)
+
+    # ── Panel labels ─────────────────────────────────────────────────────────
+    _draw_text_outlined(draw, (6,  2), f"Frame {t0}  (keys)",    font, fill=(200, 200, 200))
+    _draw_text_outlined(draw, (W + GAP + 6, 2), f"Frame {t1}  (queries)", font, fill=(200, 200, 200))
+
+    # ── Stats header ─────────────────────────────────────────────────────────
+    div_str = f"{div_acc:.0%}" if div_acc == div_acc else "n/a"   # nan guard
+    stats   = (
+        f"step {step}  |  acc {overall_acc:.0%}  |  div acc {div_str}  |"
+        f"  Nk={N_k}  Nq={N_q}  Ndiv={sum(is_daughter)}"
+    )
+    _draw_text_outlined(draw, (canvas_w // 2 - 200, 2), stats, font, fill=(220, 220, 220))
+
+    # ── Colour legend (right side of header) ─────────────────────────────────
+    legend = [
+        (C_CORRECT_TRACK, "track"),
+        (C_CORRECT_DIV,   "div"),
+        (C_WRONG,         "wrong"),
+        (C_NULL,          "null"),
+        (C_GT_DIFF,       "GT(dashed)"),
+    ]
+    lx = canvas_w - len(legend) * 80 - 10
+    for lc, ll in legend:
+        draw.rectangle([(lx, 10), (lx + 12, 22)], fill=lc, outline=(0, 0, 0))
+        _draw_text_outlined(draw, (lx + 15, 10), ll, font, fill=(200, 200, 200))
+        lx += 80
+
+    save_path = os.path.join(save_dir, f"temporal_match_idx{step:06d}_t{t0}_t{t1}.png")
+    img.save(save_path)
     return save_path
 
 

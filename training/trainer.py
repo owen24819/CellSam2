@@ -165,6 +165,7 @@ class Trainer:
         freeze_encoder: bool = False,
         debug_viz: bool = False,
         debug_viz_interval: float = 5.0,
+        debug_temporal_matching_viz: bool = True,
     ):
 
         self._setup_env_variables(env_variables)
@@ -189,6 +190,7 @@ class Trainer:
         self.debug_viz_dir = os.path.join(logging.get("log_dir", "sam2_logs"), "debug_viz")
         self.debug_viz_sample_count_train = 0
         self.debug_viz_sample_count_val = 0
+        self.debug_temporal_matching_viz = debug_temporal_matching_viz
         distributed = DistributedConf(**distributed or {})
         cuda = CudaConf(**cuda or {})
         self.where = 0.0
@@ -484,30 +486,48 @@ class Trainer:
         data_iter: int = 0,
         total_iters: int = 0,
     ):
+        # Decide whether to run any debug visualization this step, so we can
+        # signal the model before the forward pass (temporal matching viz must
+        # be generated inside forward_tracking while the data is still live).
+        should_viz = (
+            self.debug_viz
+            and self.distributed_rank == 0
+            and should_visualize(
+                data_iter,
+                total_iters,
+                self.debug_viz_interval_train if phase == Phase.TRAIN else self.debug_viz_interval_val,
+            )
+        )
+        phase_folder = "train" if phase == Phase.TRAIN else "val"
+        epoch_viz_dir = os.path.join(self.debug_viz_dir, phase_folder, f"epoch_{self.epoch}")
+
+        # Signal the model to capture temporal matching diagrams on this step.
+        sample_count = (
+            self.debug_viz_sample_count_train if phase == Phase.TRAIN else self.debug_viz_sample_count_val
+        )
+        model_module = model.module if hasattr(model, "module") else model
+        model_module._do_temporal_debug_viz = should_viz and self.debug_temporal_matching_viz
+        model_module._temporal_debug_viz_dir = epoch_viz_dir
+        model_module._temporal_debug_viz_sample_idx = sample_count
+
         outputs = model(batch)
-        
-        # Debug visualization during training or validation
-        if self.debug_viz and self.distributed_rank == 0:
-            interval = self.debug_viz_interval_train if phase == Phase.TRAIN else self.debug_viz_interval_val
-            if should_visualize(data_iter, total_iters, interval):
-                try:
-                    phase_folder = "train" if phase == Phase.TRAIN else "val"
-                    epoch_viz_dir = os.path.join(self.debug_viz_dir, phase_folder, f"epoch_{self.epoch}")
-                    if phase == Phase.TRAIN:
-                        sample_count = self.debug_viz_sample_count_train
-                        self.debug_viz_sample_count_train += 1
-                    else:
-                        sample_count = self.debug_viz_sample_count_val
-                        self.debug_viz_sample_count_val += 1
-                    create_debug_visualization(
-                        batch=batch,
-                        outputs=outputs,
-                        save_dir=epoch_viz_dir,
-                        sample_idx=sample_count,
-                        dataset_idx=data_iter,
-                    )
-                except Exception as e:
-                    logging.warning(f"Debug visualization failed: {e}")
+
+        # Normal per-sample debug visualization (segmentation masks, etc.)
+        if should_viz:
+            if phase == Phase.TRAIN:
+                self.debug_viz_sample_count_train += 1
+            else:
+                self.debug_viz_sample_count_val += 1
+            try:
+                create_debug_visualization(
+                    batch=batch,
+                    outputs=outputs,
+                    save_dir=epoch_viz_dir,
+                    sample_idx=sample_count,
+                    dataset_idx=data_iter,
+                )
+            except Exception as e:
+                logging.warning(f"Debug visualization failed: {e}")
         
         # Convert tensors to lists per time step, filtering out padded entries
         # batch.masks, batch.cell_divides are now tensors with shape [T, max_objects, ...]

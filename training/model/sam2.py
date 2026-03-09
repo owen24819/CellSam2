@@ -16,6 +16,7 @@ from sam2.modeling.sam2_utils import (
     sample_box_points,
 )
 from sam2.utils.misc import concat_points
+from training.debug_viz import create_temporal_matching_visualization
 from training.utils.data_utils import BatchedVideoDatapoint
 
 
@@ -418,6 +419,18 @@ class SAM2Train(SAM2Base):
                 match_targets = self._build_matching_targets(
                     query_ids, key_ids, child_to_parent,
                 )
+
+                if getattr(self, "_do_temporal_debug_viz", False):
+                    create_temporal_matching_visualization(
+                        input=input,
+                        t0=t0, t1=t1,
+                        key_ids=key_ids, key_centroids=key_centroids,
+                        query_ids=query_ids, query_centroids=query_centroids,
+                        match_logits=match_logits, match_targets=match_targets,
+                        child_to_parent=child_to_parent,
+                        save_dir=getattr(self, "_temporal_debug_viz_dir", "debug_temporal_matching"),
+                        step=getattr(self, "_temporal_debug_viz_sample_idx", 0),
+                    )
 
                 all_frame_outputs[t1]["temporal_match_logits"] = match_logits
                 all_frame_outputs[t1]["temporal_match_targets"] = match_targets
