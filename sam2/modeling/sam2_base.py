@@ -39,7 +39,7 @@ class FourierPositionEncoding(torch.nn.Module):
     FOV shifts and small local deformations.
     """
 
-    def __init__(self, hidden_dim: int = 256, num_freqs: int = 64):
+    def __init__(self, hidden_dim: int = 256, num_freqs: int = 16):
         super().__init__()
         self.num_freqs = num_freqs
         # Geometric frequency bands: 1, 2, 4, …, 2^(F-1)
@@ -47,7 +47,8 @@ class FourierPositionEncoding(torch.nn.Module):
         self.register_buffer("freqs", freqs)
         # Linear projection: 4F → hidden_dim
         self.proj = torch.nn.Linear(4 * num_freqs, hidden_dim)
-
+        torch.nn.init.xavier_uniform_(self.proj.weight, gain=0.01) 
+        torch.nn.init.zeros_(self.proj.bias)
     def forward(self, centroids: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -80,11 +81,11 @@ class _SACABlock(torch.nn.Module):
         super().__init__()
         self.sa_norm = torch.nn.LayerNorm(hidden_dim)
         self.sa      = torch.nn.MultiheadAttention(
-            hidden_dim, num_heads, batch_first=True
+            hidden_dim, num_heads, batch_first=True, dropout=0.1
         )
         self.ca_norm = torch.nn.LayerNorm(hidden_dim)
         self.ca      = torch.nn.MultiheadAttention(
-            hidden_dim, num_heads, batch_first=True
+            hidden_dim, num_heads, batch_first=True, dropout=0.1
         )
 
     def forward(
@@ -138,7 +139,7 @@ class TemporalMatchingHead(torch.nn.Module):
         self,
         hidden_dim: int = 256,
         num_heads: int = 8,
-        num_freqs: int = 64,
+        num_freqs: int = 16,
         num_key_sa_layers: int = 3,
         num_blocks: int = 3,
     ):
@@ -156,7 +157,7 @@ class TemporalMatchingHead(torch.nn.Module):
         self.roi_feat_norm = torch.nn.LayerNorm(hidden_dim)
         # 3-layer GELU MLP: obj_ptr ∥ roi_feat → visual token  [N, hidden_dim]
         self.token_proj = MLP(
-            hidden_dim * 2, hidden_dim, hidden_dim, 3,
+            hidden_dim * 2, hidden_dim, hidden_dim, 2,
             activation=torch.nn.GELU,
         )
 
@@ -165,7 +166,7 @@ class TemporalMatchingHead(torch.nn.Module):
 
         # ── 2. Key Constellation Encoder (3-layer SA) ─────────────────────────
         self.key_sa_layers = torch.nn.ModuleList([
-            torch.nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+            torch.nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True, dropout=0.1)
             for _ in range(num_key_sa_layers)
         ])
         self.key_sa_norms = torch.nn.ModuleList([
@@ -182,6 +183,9 @@ class TemporalMatchingHead(torch.nn.Module):
         # ── 4. Final Scoring Projections ──────────────────────────────────────
         self.q_proj = torch.nn.Linear(hidden_dim, hidden_dim)
         self.k_proj = torch.nn.Linear(hidden_dim, hidden_dim)
+
+        torch.nn.init.xavier_uniform_(self.q_proj.weight, gain=0.1)
+        torch.nn.init.xavier_uniform_(self.k_proj.weight, gain=0.1)
 
         # Learned NULL key embedding – the "NO_MATCH" candidate
         self.null_key = torch.nn.Parameter(torch.empty(1, hidden_dim))

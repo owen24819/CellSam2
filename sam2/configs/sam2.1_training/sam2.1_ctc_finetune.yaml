@@ -13,6 +13,7 @@ scratch:
   num_epochs: 10
   use_lora: True 
   lora_lr: 1.0e-3
+  temporal_matching_head_lr: 1.0e-4
   use_wandb: False
   use_temporal_aux_matcher: True
   freeze_encoder: False
@@ -354,6 +355,12 @@ trainer:
             _target_: fvcore.common.param_scheduler.CosineParamScheduler
             start_value: ${scratch.lora_lr}
             end_value: ${divide:${scratch.lora_lr},10}
+        - scheduler:
+            _target_: fvcore.common.param_scheduler.CosineParamScheduler
+            start_value: ${scratch.temporal_matching_head_lr}
+            end_value: ${divide:${scratch.temporal_matching_head_lr},10}
+          param_names:
+            - 'temporal_matching_head.*'
       weight_decay:
         - scheduler:
             _target_: fvcore.common.param_scheduler.ConstantParamScheduler
@@ -375,7 +382,7 @@ trainer:
         loss_class: 10
         loss_div: 2
         loss_heatmap: 1
-        loss_match: 5
+        loss_match: 0.1
       supervise_all_iou: true
       iou_use_l1_loss: true
       pred_obj_scores: true
