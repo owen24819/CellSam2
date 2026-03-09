@@ -400,16 +400,36 @@ class SAM2Train(SAM2Base):
                     query_valid = query_valid_sub
                     query_ids = query_ids[selected_positions]
 
-                # Query tokens: use conditioned only when _temporal_aux_use_conditioned_queries (never if keys were unconditioned).
-                if out_t1.get("_temporal_aux_use_conditioned_queries", True):
-                    query_tokens = out_t1["key_tokens"][query_valid]
-                    query_centroids = out_t1["key_centroids"][query_valid]
-                else:
-                    query_tokens, query_centroids = (
-                        self._compute_detection_query_tokens(out_t1, query_valid)
+                # Select query token mode.
+                #
+                # Pair (0 → 1): the key frame is the initial conditioning frame, which has
+                # no prior memory (empty memory dict at t=0).  Its obj_ptr is therefore
+                # already in "no-memory" mode, giving us a naturally fresh key.  We always
+                # run detection queries here so the head sees consistent (no-mem key,
+                # no-mem query) pairs — directly matching segment=True inference.
+                #
+                # Later pairs (t > 0 → t+1): keys are memory-conditioned.  We use the
+                # per-frame 50/50 flag (_temporal_aux_use_conditioned_queries) to train
+                # on both conditioned and detection queries, as before.
+                #
+                # This is done to train it for the "new_cells_only" and "segment_then_aux_track" mode
+                if t0 == 0:
+                    query_tokens, query_centroids = self._compute_detection_query_tokens(
+                        out_t1, query_valid
                     )
-                if query_tokens is None or query_tokens.shape[0] == 0:
-                    continue
+                    if query_tokens is None or query_tokens.shape[0] == 0:
+                        continue
+                else:
+                    # Memory-conditioned keys; 50/50 conditioned vs detection for queries.
+                    if out_t1.get("_temporal_aux_use_conditioned_queries", True):
+                        query_tokens = out_t1["key_tokens"][query_valid]
+                        query_centroids = out_t1["key_centroids"][query_valid]
+                    else:
+                        query_tokens, query_centroids = self._compute_detection_query_tokens(
+                            out_t1, query_valid
+                        )
+                    if query_tokens is None or query_tokens.shape[0] == 0:
+                        continue
 
                 # Training uses global [0,1] centroids (single crop = global).
                 match_logits = self.temporal_matching_head(
