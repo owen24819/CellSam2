@@ -431,9 +431,10 @@ class SAM2Train(SAM2Base):
                     if query_tokens is None or query_tokens.shape[0] == 0:
                         continue
 
-                # Training uses global [0,1] centroids (single crop = global).
+                # Detach tokens so loss_match gradients only update the
+                # temporal head — not the SAM decoder / LoRA / backbone.
                 match_logits = self.temporal_matching_head(
-                    query_tokens, key_tokens,
+                    query_tokens.detach(), key_tokens.detach(),
                     query_centroids, key_centroids,
                 )
                 match_targets = self._build_matching_targets(

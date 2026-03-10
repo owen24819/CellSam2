@@ -144,18 +144,24 @@ def compute_weighted_heatmap_loss(target_masks, heatmap_predictions, target_heat
 def temporal_matching_loss(match_logits, match_targets, temperature=1.0):
     """Cross-entropy loss over N_k + 1 classes for the temporal matcher.
 
+    The loss is scaled by cbrt(N_k) so that frames with many cells (harder
+    assignment problems) contribute proportionally more gradient signal to
+    the temporal head than trivially easy frames with few cells.
+
     Args:
         match_logits:  [N_q, N_k + 1]
         match_targets: [N_q]  (indices in 0..N_k, where N_k = NO_MATCH)
         temperature:   scale logits by 1/temperature to avoid saturated softmax (default 1.0).
     Returns:
-        Scalar loss (mean over queries).
+        Scalar loss (mean over queries, scaled by cbrt(N_k)).
     """
     if match_logits.numel() == 0:
         return match_logits.new_tensor(0.0)
     if temperature != 1.0:
         match_logits = match_logits / temperature
-    return F.cross_entropy(match_logits, match_targets)
+    N_k = match_logits.shape[1] - 1  # exclude null key column
+    difficulty_scale = N_k ** (1.0 / 3.0)
+    return F.cross_entropy(match_logits, match_targets) * difficulty_scale
 
 
 class MultiStepMultiMasksAndIous(nn.Module):

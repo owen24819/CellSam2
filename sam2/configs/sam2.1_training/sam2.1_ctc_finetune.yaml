@@ -363,7 +363,7 @@ trainer:
             scheduler:
               _target_: fvcore.common.param_scheduler.CosineParamScheduler
               start_value: ${scratch.temporal_matching_head_lr}
-              end_value: ${divide:${scratch.temporal_matching_head_lr},100}
+              end_value: ${divide:${scratch.temporal_matching_head_lr},10}
             warmup_length: ${scratch.temporal_matching_head_warmup_fraction}
             warmup_factor: 0.0
           param_names:
@@ -389,7 +389,7 @@ trainer:
         loss_class: 10
         loss_div: 2
         loss_heatmap: 1
-        loss_match: 1
+        loss_match: 5
       supervise_all_iou: true
       iou_use_l1_loss: true
       pred_obj_scores: true
