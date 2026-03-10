@@ -388,18 +388,6 @@ class SAM2Train(SAM2Base):
                 if key_ids.numel() == 0 or query_ids.numel() == 0:
                     continue
 
-                # Subsample query indices before the expensive SAM pass (when using detection queries).
-                selected_positions = self._subsample_matching_query_indices(
-                    query_ids, key_ids, child_to_parent,
-                )
-                if selected_positions is not None:
-                    valid_indices = query_valid.nonzero(as_tuple=False).squeeze(1)
-                    selected_full = valid_indices[selected_positions]
-                    query_valid_sub = torch.zeros_like(query_valid)
-                    query_valid_sub[selected_full] = True
-                    query_valid = query_valid_sub
-                    query_ids = query_ids[selected_positions]
-
                 # Select query token mode.
                 #
                 # Pair (0 → 1): the key frame is the initial conditioning frame, which has
@@ -415,7 +403,7 @@ class SAM2Train(SAM2Base):
                 # This is done to train it for the "new_cells_only" and "segment_then_aux_track" mode
                 if t0 == 0:
                     query_tokens, query_centroids = self._compute_detection_query_tokens(
-                        out_t1, query_valid
+                        out_t1, query_valid, input, t1, query_ids
                     )
                     if query_tokens is None or query_tokens.shape[0] == 0:
                         continue
@@ -426,7 +414,7 @@ class SAM2Train(SAM2Base):
                         query_centroids = out_t1["key_centroids"][query_valid]
                     else:
                         query_tokens, query_centroids = self._compute_detection_query_tokens(
-                            out_t1, query_valid
+                            out_t1, query_valid, input, t1, query_ids
                         )
                     if query_tokens is None or query_tokens.shape[0] == 0:
                         continue
@@ -442,6 +430,8 @@ class SAM2Train(SAM2Base):
                 )
 
                 if getattr(self, "_do_temporal_debug_viz", False):
+                    key_masks = out_t0.get("pred_masks")
+                    query_masks = out_t1.get("pred_masks")[query_valid]
                     create_temporal_matching_visualization(
                         input=input,
                         t0=t0, t1=t1,
@@ -451,6 +441,8 @@ class SAM2Train(SAM2Base):
                         child_to_parent=child_to_parent,
                         save_dir=getattr(self, "_temporal_debug_viz_dir", "debug_temporal_matching"),
                         step=getattr(self, "_temporal_debug_viz_sample_idx", 0),
+                        key_masks=key_masks,
+                        query_masks=query_masks,
                     )
 
                 all_frame_outputs[t1]["temporal_match_logits"] = match_logits
@@ -578,11 +570,26 @@ class SAM2Train(SAM2Base):
             obj_ptr
         )
 
-        # Build post-division key tokens for the temporal matcher.
+        # Apply iterative correction points if needed
+        if frame_idx in frames_to_add_correction_pt and is_used.sum() > 0:
+            assert frame_idx == 0 and is_dividing.sum() == 0
+            # Only add points to first frame
+            # Maybe adapt this for other frames but will need to handle dividing cells
+            current_out = self._iter_correct_pt_sampling(
+                point_inputs,
+                gt_masks,
+                high_res_features,
+                pix_feat,
+                current_out,
+                keep_tokens_mask,
+                is_used=is_used,
+                num_corrections=num_corrections,
+            )
+
+        # Build post-division key tokens for the temporal matcher (after PT so keys match refined masks).
         if self.enable_temporal_aux_matcher and current_out.get("obj_ptr") is not None:
-            N_postdiv = tracking_object_ids.shape[0]
+            N_postdiv = current_out["pred_masks"].shape[0]
             if N_postdiv > 0:
-                # Always use unconditioned (raw) features for key tokens.
                 raw_feat = current_vision_feats[-1]
                 H_feat, W_feat = feat_sizes[-1]
                 C_feat = raw_feat.size(2)
@@ -604,8 +611,6 @@ class SAM2Train(SAM2Base):
                 current_out["key_tokens"] = key_tokens
                 current_out["key_centroids"] = key_centroids
                 current_out["key_ids"] = tracking_object_ids.clone()
-
-                # Post-div query masks and IDs. tracking_object_ids > 0 = real cells (valid).
                 current_out["_query_masks"] = current_out["pred_masks"]
                 current_out["query_ids"] = tracking_object_ids.clone()
                 current_out["query_valid_mask"] = tracking_object_ids > 0
@@ -615,22 +620,6 @@ class SAM2Train(SAM2Base):
             else:
                 current_out["query_ids"] = tracking_object_ids
                 current_out["query_valid_mask"] = tracking_object_ids > 0
-
-        # Apply iterative correction points if needed
-        if frame_idx in frames_to_add_correction_pt and is_used.sum() > 0:
-            assert frame_idx == 0 and is_dividing.sum() == 0
-            # Only add points to first frame
-            # Maybe adapt this for other frames but will need to handle dividing cells
-            current_out = self._iter_correct_pt_sampling(
-                point_inputs,
-                gt_masks,
-                high_res_features,
-                pix_feat,
-                current_out,
-                keep_tokens_mask,
-                is_used=is_used,
-                num_corrections=num_corrections,
-            )
 
         # Adjust vision features based on token count changes
         current_vision_feats = self._adjust_vision_features(
@@ -812,38 +801,80 @@ class SAM2Train(SAM2Base):
     # Temporal matching helpers
     # ------------------------------------------------------------------
 
-    def _compute_detection_query_tokens(self, out_t1, query_valid):
+    def _get_gt_masks_for_frame_in_query_order(self, input, frame_idx, query_ids):
+        """Return GT masks [N_valid, 1, H, W] in the same order as query_ids (cell IDs).
+
+        Uses the same ordering as collate: non-dividing cell masks then daughter masks.
+        """
+        is_real_t = input.is_real[frame_idx]
+        is_real_masks_t = input.is_real_masks[frame_idx]
+        gt_masks_t = input.masks[frame_idx][is_real_masks_t]  # [num_masks, H, W]
+        if gt_masks_t.numel() == 0:
+            return None
+
+        cell_ids_raw = input.metadata.unique_objects_identifier[frame_idx][is_real_t][:, 1]
+        cell_divides_t = input.cell_divides[frame_idx][is_real_t]
+        daughter_ids_t = input.daughter_ids[frame_idx][is_real_t]
+
+        gt_cell_ids = []
+        for i in range(len(cell_ids_raw)):
+            if cell_divides_t[i]:
+                for d_id in daughter_ids_t[i]:
+                    if d_id > 0:
+                        gt_cell_ids.append(d_id.item())
+            else:
+                gt_cell_ids.append(cell_ids_raw[i].item())
+
+        cell_id_to_idx = {cid: j for j, cid in enumerate(gt_cell_ids)}
+        device = query_ids.device
+        N_valid = query_ids.shape[0]
+        H_m, W_m = gt_masks_t.shape[1], gt_masks_t.shape[2]
+        valid_gt_masks = torch.zeros(
+            N_valid, 1, H_m, W_m, dtype=torch.float32, device=device
+        )
+        for i in range(N_valid):
+            qid = query_ids[i].item()
+            if qid not in cell_id_to_idx:
+                continue
+            j = cell_id_to_idx[qid]
+            valid_gt_masks[i, 0] = gt_masks_t[j].float().to(device)
+        return valid_gt_masks
+
+    def _compute_detection_query_tokens(self, out_t1, query_valid, input, t1, query_ids):
         """Build detection-mode query tokens for frame t+1.
 
-        Runs the SAM decoder on raw (non-memory-conditioned) backbone features with
-        GT centroid point prompts. Returns centroids in [0,1] (global in single-crop training).
+        Uses GT mask centroids as point prompts (stable, not near touching cells).
+        Runs SAM decoder on raw backbone features, then builds tokens and centroids
+        from the high-res mask output.
         """
         raw_vision_feats = out_t1.get("_raw_vision_feats")
         high_res_features = out_t1.get("_high_res_features")
         feat_sizes = out_t1.get("_feat_sizes")
-        query_masks = out_t1.get("_query_masks")
 
-        if raw_vision_feats is None or query_masks is None:
+        if raw_vision_feats is None:
             return None, None
 
         valid_mask_idx = query_valid.nonzero(as_tuple=False).squeeze(1)
         if valid_mask_idx.numel() == 0:
             return None, None
 
-        device = query_masks.device
+        device = raw_vision_feats[0].device
         N_valid = valid_mask_idx.numel()
 
-        valid_masks = query_masks[valid_mask_idx]  # [N_valid, 1, H, W]
-        mask_bin = (valid_masks.sigmoid() > 0.5).squeeze(1).float()
+        # GT masks for each query_id (same order as query_ids)
+        gt_masks = self._get_gt_masks_for_frame_in_query_order(input, t1, query_ids)
+        if gt_masks is None or gt_masks.shape[0] != N_valid:
+            return None, None
+
+        # Centroids from GT masks in [0, 1] (same convention as build_matching_tokens)
+        mask_bin = gt_masks.squeeze(1)  # [N_valid, H_m, W_m]
         area = mask_bin.sum(dim=(1, 2)).clamp(min=1)
         H_m, W_m = mask_bin.shape[1], mask_bin.shape[2]
-        gy, gx = torch.meshgrid(
-            torch.linspace(0, 1, H_m, device=device),
-            torch.linspace(0, 1, W_m, device=device),
-            indexing="ij",
-        )
-        cx_full = (mask_bin * gx).sum(dim=(1, 2)) / area
-        cy_full = (mask_bin * gy).sum(dim=(1, 2)) / area
+        grid_y = torch.arange(H_m, device=device).float() / max(H_m - 1, 1)
+        grid_x = torch.arange(W_m, device=device).float() / max(W_m - 1, 1)
+        grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing="ij")
+        cx_full = (mask_bin * grid_x).sum(dim=(1, 2)) / area
+        cy_full = (mask_bin * grid_y).sum(dim=(1, 2)) / area
 
         raw_feat = raw_vision_feats[-1]
         H_feat, W_feat = feat_sizes[-1]
@@ -879,8 +910,9 @@ class SAM2Train(SAM2Base):
             is_dividing=is_div_query,
         )
 
+        # Use high-res masks for token/centroid so positions are accurate
         tokens, centroids = self.temporal_matching_head.build_matching_tokens(
-            _obj_ptr, raw_feat_bchw, _low_res,
+            _obj_ptr, raw_feat_bchw, _high_res,
         )
         return tokens, centroids
 

@@ -403,6 +403,8 @@ def create_temporal_matching_visualization(
     child_to_parent: dict,
     save_dir: str,
     step: int = 0,
+    key_masks=None,
+    query_masks=None,
 ) -> Optional[str]:
     """
     Create a PIL-based debug visualization for the temporal matching head.
@@ -426,6 +428,9 @@ def create_temporal_matching_visualization(
 
     Key circles are drawn with a cyan outline and coloured by cell ID.
 
+    If key_masks / query_masks are provided, masks are overlaid (semi-transparent)
+    so you can see the mask shape and why centroids may look off-center.
+
     Args:
         input:            BatchedVideoDatapoint (needs img_batch).
         t0, t1:           Frame indices (key frame and query frame).
@@ -438,6 +443,8 @@ def create_temporal_matching_visualization(
         child_to_parent:  {daughter_id: parent_id} across the video.
         save_dir:         Directory to save the PNG.
         step:             Global training step (used for the filename).
+        key_masks:        Optional [N_k, 1, H, W] or [N_k, H, W] mask logits for keys.
+        query_masks:      Optional [N_q, 1, H, W] or [N_q, H, W] mask logits for queries.
 
     Returns:
         Path to the saved PNG, or None if saving failed.
@@ -504,6 +511,46 @@ def create_temporal_matching_visualization(
     canvas[:HEADER_H, :] = C_HEADER_BG
     canvas[HEADER_H:, :W]       = img0_np
     canvas[HEADER_H:, W + GAP:] = img1_np
+
+    # ── Optional: overlay masks (semi-transparent) so mask shape is visible ────
+    MASK_ALPHA = 0.35
+
+    def _overlay_masks_on_canvas(canvas_arr, masks_tensor, colors, x_offset, y_offset, tgt_H, tgt_W):
+        if masks_tensor is None or masks_tensor.shape[0] == 0:
+            return
+        m = masks_tensor.detach().cpu().float()
+        if m.dim() == 3:
+            m = m.unsqueeze(1)  # [N, 1, h, w]
+        # Sigmoid if logits, then threshold
+        if m.shape[1] == 1:
+            m = (m.sigmoid() > 0.5).float()
+        else:
+            m = (m > 0.5).float().unsqueeze(1)
+        # Resize to image size
+        m = F.interpolate(m, size=(tgt_H, tgt_W), mode="nearest").squeeze(1)  # [N, H, W]
+        for i in range(m.shape[0]):
+            mask_np = m[i].numpy()
+            color = colors[i] if i < len(colors) else (128, 128, 128)
+            roi = canvas_arr[y_offset : y_offset + tgt_H, x_offset : x_offset + tgt_W]
+            for c in range(3):
+                roi[:, :, c] = np.where(
+                    mask_np > 0,
+                    (1 - MASK_ALPHA) * roi[:, :, c] + MASK_ALPHA * color[c],
+                    roi[:, :, c],
+                )
+
+    if key_masks is not None and key_masks.shape[0] == N_k:
+        key_colors = [get_color_for_cell_id(key_ids[ki].item()) for ki in range(N_k)]
+        _overlay_masks_on_canvas(canvas, key_masks, key_colors, 0, HEADER_H, H, W)
+    if query_masks is not None and query_masks.shape[0] == N_q:
+        # Query colors depend on match outcome; use same as circles
+        query_colors = [
+            (C_CORRECT_TRACK if (pred_idx[q].item() == gt_idx[q].item() and not is_daughter[q])
+             else C_CORRECT_DIV if (pred_idx[q].item() == gt_idx[q].item() and is_daughter[q])
+             else C_WRONG if gt_idx[q].item() < N_k else C_NULL)
+            for q in range(N_q)
+        ]
+        _overlay_masks_on_canvas(canvas, query_masks, query_colors, W + GAP, HEADER_H, H, W)
 
     img  = Image.fromarray(canvas)
     draw = ImageDraw.Draw(img)

@@ -16,8 +16,9 @@ scratch:
   temporal_matching_head_lr: 1.0e-4
   temporal_matching_head_warmup_fraction: 0.1  # fraction of total training steps used for linear LR warmup
   use_wandb: False
-  use_temporal_aux_matcher: True
+  use_temporal_aux_matcher: False
   freeze_encoder: False
+  freeze_non_temporal: False  # Set True to train only the temporal_matching_head (phase-2 training)
   dataset_name: "moma"
 
 dataset:
@@ -85,6 +86,7 @@ trainer:
   accelerator: cpu
   seed_value: 123
   freeze_encoder: ${scratch.freeze_encoder}
+  freeze_non_temporal: ${scratch.freeze_non_temporal}
   debug_viz: false  # Set to true to enable debug visualization of predictions vs ground truth
   debug_viz_interval: 5.0  # Percentage interval (5.0 = every 5% of dataset)
 

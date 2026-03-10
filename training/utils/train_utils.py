@@ -285,3 +285,16 @@ def get_resume_checkpoint(checkpoint_save_dir):
         return None
 
     return ckpt_file
+
+
+def get_parent_phase_checkpoint(checkpoint_save_dir):
+    """Return a checkpoint from the parent directory's checkpoints/ folder.
+
+    Used for cross-phase initialisation (e.g. stage-2 temporal-head training
+    loading stage-1 weights) where only model weights should be restored —
+    optimizer state, epoch, and step counters must NOT be carried over.
+    """
+    parent_ckpt = os.path.join(
+        os.path.dirname(os.path.dirname(checkpoint_save_dir)), "checkpoints", "checkpoint.pt"
+    )
+    return parent_ckpt if g_pathmgr.isfile(parent_ckpt) else None

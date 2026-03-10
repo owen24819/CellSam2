@@ -4,7 +4,6 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections import defaultdict
 from typing import Dict, List
 
 import torch
@@ -211,11 +210,14 @@ class MultiStepMultiMasksAndIous(nn.Module):
     def forward(self, outs_batch: List[Dict], targets_batch: torch.Tensor, target_heatmaps_batch: torch.Tensor):
         assert len(outs_batch) == len(targets_batch)
 
-        losses = defaultdict(int)
+        losses = {}
         for outs, targets, target_heatmaps in zip(outs_batch, targets_batch, target_heatmaps_batch):
             cur_losses = self._forward(outs, targets, target_heatmaps)
             for k, v in cur_losses.items():
-                losses[k] += v
+                # Use non-in-place addition so that grad_fn is preserved when
+                # one accumulation step has no grad (e.g. frozen backbone) and
+                # a later step does (e.g. temporal matching loss).
+                losses[k] = losses[k] + v if k in losses else v
 
         return losses
 
@@ -339,11 +341,15 @@ class MultiStepMultiMasksAndIous(nn.Module):
         losses["loss_class"] += loss_class.sum()
 
     def reduce_loss(self, losses):
-        reduced_loss = 0.0
+        # Use non-in-place addition so that a no-grad term accumulated before
+        # a grad term (e.g. loss_match when backbone is frozen) does not
+        # silently drop the grad_fn via PyTorch's in-place __iadd__.
+        reduced_loss = None
         for loss_key, weight in self.weight_dict.items():
             if loss_key not in losses:
                 raise ValueError(f"{type(self)} doesn't compute {loss_key}")
             if weight != 0:
-                reduced_loss += losses[loss_key] * weight
+                term = losses[loss_key] * weight
+                reduced_loss = term if reduced_loss is None else reduced_loss + term
 
-        return reduced_loss
+        return reduced_loss if reduced_loss is not None else torch.tensor(0.0)

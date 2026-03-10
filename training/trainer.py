@@ -41,6 +41,7 @@ from training.utils.train_utils import (
     collect_dict_keys,
     get_amp_type,
     get_machine_local_and_dist_rank,
+    get_parent_phase_checkpoint,
     get_resume_checkpoint,
     human_readable_time,
     is_dist_avail_and_initialized,
@@ -163,6 +164,7 @@ class Trainer:
         meters: Optional[Dict[str, Any]] = None,
         loss: Optional[Dict[str, Any]] = None,
         freeze_encoder: bool = False,
+        freeze_non_temporal: bool = False,
         debug_viz: bool = False,
         debug_viz_interval: float = 5.0,
         debug_temporal_matching_viz: bool = True,
@@ -184,6 +186,7 @@ class Trainer:
         self.meters_conf = meters
         self.loss_conf = loss
         self.freeze_encoder = freeze_encoder
+        self.freeze_non_temporal = freeze_non_temporal
         self.debug_viz = debug_viz
         self.debug_viz_interval_train = debug_viz_interval
         self.debug_viz_interval_val = 10.0  # Less data in val, so use 10%
@@ -409,12 +412,29 @@ class Trainer:
             ckpt_path = self.checkpoint_conf.resume_from
             assert os.path.exists(ckpt_path), f"The 'resume_from' checkpoint {ckpt_path} does not exist!"
             assert ckpt_path.endswith(".pt"), f"The 'resume_from' checkpoint {ckpt_path} is not a .pt file!"
-        else:
-            # Check if there's an existing checkpoint in the save directory
-            ckpt_path = get_resume_checkpoint(self.checkpoint_conf.save_dir)
-        
-        if ckpt_path:
             self._load_resuming_checkpoint(ckpt_path)
+        else:
+            # Resume from an existing checkpoint in the current save directory.
+            ckpt_path = get_resume_checkpoint(self.checkpoint_conf.save_dir)
+            if ckpt_path:
+                self._load_resuming_checkpoint(ckpt_path)
+            else:
+                # No local checkpoint — check for a parent-phase checkpoint
+                # (e.g. stage-1 when starting stage-2 in a sub-directory).
+                # Only model weights are loaded; optimizer/epoch/steps reset.
+                parent_ckpt = get_parent_phase_checkpoint(self.checkpoint_conf.save_dir)
+                if parent_ckpt:
+                    logging.info(
+                        f"No local checkpoint found. Loading model weights from parent-phase "
+                        f"checkpoint: {parent_ckpt}"
+                    )
+                    with g_pathmgr.open(parent_ckpt, "rb") as f:
+                        checkpoint = torch.load(f, map_location="cpu")
+                    load_state_dict_into_model(
+                        model=self.model,
+                        state_dict=checkpoint["model"],
+                        ignore_missing_keys=self.checkpoint_conf.skip_saving_parameters,
+                    )
         
         print_model_summary(self.model)
 
@@ -831,6 +851,11 @@ class Trainer:
         loss_mts = OrderedDict(
             [(name, AverageMeter(name, self.device, ":.2e")) for name in loss_names]
         )
+        # When training only the temporal head, rename the console display so
+        # the progress bar shows loss_match instead of the noisy total loss.
+        if self.freeze_non_temporal:
+            for meter in loss_mts.values():
+                meter.name = meter.name.replace("_loss", "_loss_match")
         extra_loss_mts = {}
 
         progress = ProgressMeter(
@@ -859,7 +884,10 @@ class Trainer:
             )  # move tensors in a tensorclass
 
             try:
-                self._run_step(batch, phase, loss_mts, extra_loss_mts, data_iter=data_iter, total_iters=iters_per_epoch)
+                did_backward = self._run_step(batch, phase, loss_mts, extra_loss_mts, data_iter=data_iter, total_iters=iters_per_epoch)
+
+                if not did_backward:
+                    continue
 
                 # compute gradient and do optim step
                 exact_epoch = self.epoch + float(data_iter) / iters_per_epoch
@@ -984,7 +1012,8 @@ class Trainer:
         raise_on_error: bool = True,
         data_iter: int = 0,
         total_iters: int = 0,
-    ):
+    ) -> bool:
+        """Returns True if backward was called (optimizer step should proceed), False otherwise."""
         """
         Run the forward / backward
         """
@@ -1015,16 +1044,35 @@ class Trainer:
             if raise_on_error:
                 raise FloatingPointError(error_msg)
             else:
-                return
+                return False
+
+        if not loss.requires_grad:
+            if self.freeze_non_temporal:
+                # Batch had no temporal matching (e.g. single-cell clip) — skip update.
+                logging.debug("freeze_non_temporal: skipping backward, no temporal matching in this batch")
+                return False
+            else:
+                raise RuntimeError(
+                    "Loss has no grad_fn but freeze_non_temporal=False. "
+                    "This likely means the model backbone produced no-grad outputs unexpectedly."
+                )
 
         self.scaler.scale(loss).backward()
-        loss_mts[loss_key].update(loss.item(), batch_size)
+        # In freeze_non_temporal mode the meter was renamed to _loss_match,
+        # so feed it the raw match loss rather than the inflated total.
+        if self.freeze_non_temporal:
+            match_key = loss_key + "_match"
+            if match_key in extra_losses:
+                loss_mts[loss_key].update(extra_losses[match_key].item(), batch_size)
+        else:
+            loss_mts[loss_key].update(loss.item(), batch_size)
         for extra_loss_key, extra_loss in extra_losses.items():
             if extra_loss_key not in extra_loss_mts:
                 extra_loss_mts[extra_loss_key] = AverageMeter(
                     extra_loss_key, self.device, ":.2e"
                 )
             extra_loss_mts[extra_loss_key].update(extra_loss.item(), batch_size)
+        return True
 
     def _log_meters_and_save_best_ckpts(self, phases: List[str]):
         logging.info("Synchronizing meters")
@@ -1146,6 +1194,27 @@ class Trainer:
             logging.info("Freezing encoder...")
             for param in self.model.image_encoder.parameters():
                 param.requires_grad = False
+
+        if self.freeze_non_temporal:
+            assert hasattr(self.model, "temporal_matching_head"), (
+                "freeze_non_temporal=True requires use_temporal_aux_matcher=True in the model config, "
+                "but the model has no temporal_matching_head. Set use_temporal_aux_matcher: True."
+            )
+            logging.info("Freezing all parameters except temporal_matching_head...")
+            for name, param in self.model.named_parameters():
+                if not name.startswith("temporal_matching_head."):
+                    param.requires_grad = False
+            n_frozen = sum(
+                p.numel() for n, p in self.model.named_parameters()
+                if not n.startswith("temporal_matching_head.")
+            )
+            n_temporal = sum(
+                p.numel() for n, p in self.model.named_parameters()
+                if n.startswith("temporal_matching_head.")
+            )
+            logging.info(
+                f"Frozen {n_frozen:,} params; training temporal head only ({n_temporal:,} params)"
+            )
 
 
         self.loss = None
