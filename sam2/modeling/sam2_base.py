@@ -407,6 +407,8 @@ class SAM2Base(torch.nn.Module):
         # Temporal auxiliary matcher
         enable_temporal_aux_matcher: bool = False,
         temporal_aux_matcher_num_heads: int = 8,
+        temporal_aux_matcher_num_key_sa_layers: int = 1,
+        temporal_aux_matcher_num_blocks: int = 1,
         temporal_aux_match_query_k: int = 0,
         temporal_aux_match_w_daughter: float = 3.0,
         temporal_aux_match_w_new: float = 2.0,
@@ -508,6 +510,8 @@ class SAM2Base(torch.nn.Module):
         self.temporal_aux_match_w_new = temporal_aux_match_w_new
         self.temporal_aux_match_w_track = temporal_aux_match_w_track
         self._temporal_aux_matcher_num_heads = temporal_aux_matcher_num_heads
+        self._temporal_aux_matcher_num_key_sa_layers = temporal_aux_matcher_num_key_sa_layers
+        self._temporal_aux_matcher_num_blocks = temporal_aux_matcher_num_blocks
 
         self._build_sam_heads()
         self.max_cond_frames_in_attn = max_cond_frames_in_attn
@@ -613,6 +617,8 @@ class SAM2Base(torch.nn.Module):
             self.temporal_matching_head = TemporalMatchingHead(
                 hidden_dim=self.hidden_dim,
                 num_heads=self._temporal_aux_matcher_num_heads,
+                num_key_sa_layers=self._temporal_aux_matcher_num_key_sa_layers,
+                num_blocks=self._temporal_aux_matcher_num_blocks,
             )
 
     def _forward_sam_heads(

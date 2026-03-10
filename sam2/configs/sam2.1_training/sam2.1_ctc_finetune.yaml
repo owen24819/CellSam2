@@ -227,6 +227,8 @@ trainer:
     # Temporal auxiliary matcher
     enable_temporal_aux_matcher: ${scratch.use_temporal_aux_matcher}
     temporal_aux_matcher_num_heads: 8
+    temporal_aux_matcher_num_key_sa_layers: 1
+    temporal_aux_matcher_num_blocks: 1
     temporal_aux_match_query_k: 0  # 0 = use all cells
     temporal_aux_match_w_daughter: 3.0  # sampling weight for daughter cells
     temporal_aux_match_w_new: 2.0       # sampling weight for new FOV cells
@@ -358,7 +360,7 @@ trainer:
         - scheduler:
             _target_: fvcore.common.param_scheduler.CosineParamScheduler
             start_value: ${scratch.temporal_matching_head_lr}
-            end_value: ${divide:${scratch.temporal_matching_head_lr},10}
+            end_value: ${divide:${scratch.temporal_matching_head_lr},50}
           param_names:
             - 'temporal_matching_head.*'
       weight_decay:
@@ -382,7 +384,7 @@ trainer:
         loss_class: 10
         loss_div: 2
         loss_heatmap: 1
-        loss_match: 0.1
+        loss_match: 1
       supervise_all_iou: true
       iou_use_l1_loss: true
       pred_obj_scores: true
