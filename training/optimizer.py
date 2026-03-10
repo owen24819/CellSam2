@@ -553,3 +553,36 @@ def layer_decay_param_modifier(
 
         final_scheduler_cfgs.append(curr_cfg_group)
     return final_scheduler_cfgs
+
+
+class LinearWarmupParamScheduler:
+    """Wraps any fvcore-style scheduler with a linear warmup phase.
+
+    During [0, warmup_length) the value is linearly interpolated from
+    ``warmup_factor * start`` to ``start`` (where ``start`` is the wrapped
+    scheduler's value at where=0).  After that the wrapped scheduler drives
+    the value, with its ``where`` input rescaled to cover [0, 1] over the
+    remaining fraction of training.
+
+    Compatible with the fvcore ``ParamScheduler`` protocol (callable that
+    takes a ``where`` in [0, 1] and returns a scalar).
+
+    Args:
+        scheduler:      Any fvcore-style param scheduler (already instantiated).
+        warmup_length:  Fraction of total training used for warmup (e.g. 0.1).
+        warmup_factor:  LR multiplier at the very start of warmup (default 0.0
+                        → start from zero).
+    """
+
+    def __init__(self, scheduler, warmup_length: float, warmup_factor: float = 0.0):
+        self.scheduler = scheduler
+        self.warmup_length = warmup_length
+        self.warmup_factor = warmup_factor
+        self._start_value = scheduler(0.0)
+
+    def __call__(self, where: float) -> float:
+        if where < self.warmup_length:
+            alpha = where / self.warmup_length
+            return self._start_value * (self.warmup_factor + (1.0 - self.warmup_factor) * alpha)
+        rescaled = (where - self.warmup_length) / (1.0 - self.warmup_length)
+        return self.scheduler(rescaled)

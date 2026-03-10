@@ -14,6 +14,7 @@ scratch:
   use_lora: True 
   lora_lr: 1.0e-3
   temporal_matching_head_lr: 1.0e-4
+  temporal_matching_head_warmup_fraction: 0.1  # fraction of total training steps used for linear LR warmup
   use_wandb: False
   use_temporal_aux_matcher: True
   freeze_encoder: False
@@ -358,9 +359,13 @@ trainer:
             start_value: ${scratch.lora_lr}
             end_value: ${divide:${scratch.lora_lr},10}
         - scheduler:
-            _target_: fvcore.common.param_scheduler.CosineParamScheduler
-            start_value: ${scratch.temporal_matching_head_lr}
-            end_value: ${divide:${scratch.temporal_matching_head_lr},50}
+            _target_: training.optimizer.LinearWarmupParamScheduler
+            scheduler:
+              _target_: fvcore.common.param_scheduler.CosineParamScheduler
+              start_value: ${scratch.temporal_matching_head_lr}
+              end_value: ${divide:${scratch.temporal_matching_head_lr},100}
+            warmup_length: ${scratch.temporal_matching_head_warmup_fraction}
+            warmup_factor: 0.0
           param_names:
             - 'temporal_matching_head.*'
       weight_decay:
