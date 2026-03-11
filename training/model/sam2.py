@@ -595,9 +595,15 @@ class SAM2Train(SAM2Base):
             )
 
         # Build post-division key tokens for the temporal matcher (after PT so keys match refined masks).
-        # Only include foreground (id > 0); skip background to save compute and avoid useless matching.
+        # Only include foreground (id > 0) and exclude cells that left FOV (empty/near-empty mask).
         if self.enable_temporal_aux_matcher and current_out.get("obj_ptr") is not None:
-            key_valid = tracking_object_ids > 0
+            mask_area = current_out["pred_masks"].sigmoid().flatten(1).sum(1)
+            if current_out["pred_masks"].dim() == 4:
+                H, W = current_out["pred_masks"].shape[2], current_out["pred_masks"].shape[3]
+                min_mask_area = max(10.0, 0.001 * H * W)
+            else:
+                min_mask_area = 10.0
+            key_valid = (tracking_object_ids > 0) & (mask_area > min_mask_area)
             N_foreground = key_valid.sum().item()
             if N_foreground > 0:
                 raw_feat = current_vision_feats[-1]
@@ -631,7 +637,7 @@ class SAM2Train(SAM2Base):
                 )
             else:
                 current_out["query_ids"] = tracking_object_ids
-                current_out["query_valid_mask"] = tracking_object_ids > 0
+                current_out["query_valid_mask"] = key_valid  # exclude left-FOV (empty masks) here too
 
         # Adjust vision features based on token count changes
         current_vision_feats = self._adjust_vision_features(
