@@ -140,27 +140,42 @@ def compute_weighted_heatmap_loss(target_masks, heatmap_predictions, target_heat
         weight=weight
     )
 
-def temporal_matching_loss(match_logits, match_targets, temperature=1.0):
-    """Cross-entropy loss over N_k + 1 classes for the temporal matcher.
+def temporal_matching_loss(match_logits, match_targets, temperature=1.0, bce_weight=0.0):
+    """CE loss (and optional BCE) over N_k + 1 classes for the temporal matcher.
 
-    The loss is scaled by cbrt(N_k) so that frames with many cells (harder
-    assignment problems) contribute proportionally more gradient signal to
-    the temporal head than trivially easy frames with few cells.
+    CE: standard cross-entropy (correct class high).
+    BCE: one-hot target; explicitly pushes non-correct logits toward 0 (when bce_weight > 0).
+
+    The loss is scaled by cbrt(N_k) so that frames with many cells contribute
+    proportionally more gradient signal.
 
     Args:
         match_logits:  [N_q, N_k + 1]
         match_targets: [N_q]  (indices in 0..N_k, where N_k = NO_MATCH)
-        temperature:   scale logits by 1/temperature to avoid saturated softmax (default 1.0).
+        temperature:   scale logits by 1/temperature (applied to both CE and BCE).
+        bce_weight:    weight for BCE term (0 = CE only; e.g. 0.5 = CE + 0.5*BCE).
     Returns:
-        Scalar loss (mean over queries, scaled by cbrt(N_k)).
+        Scalar loss (CE + bce_weight * BCE, scaled by cbrt(N_k)).
     """
     if match_logits.numel() == 0:
         return match_logits.new_tensor(0.0)
     if temperature != 1.0:
         match_logits = match_logits / temperature
-    N_k = match_logits.shape[1] - 1  # exclude null key column
+    N_k = match_logits.shape[1] - 1
     difficulty_scale = N_k ** (1.0 / 3.0)
-    return F.cross_entropy(match_logits, match_targets) * difficulty_scale
+
+    loss_ce = F.cross_entropy(match_logits, match_targets)
+
+    if bce_weight > 0:
+        # One-hot target: [N_q, N_k+1], 1 at correct index else 0
+        num_classes = match_logits.shape[1]
+        one_hot = F.one_hot(match_targets, num_classes=num_classes).float()
+        loss_bce = F.binary_cross_entropy_with_logits(match_logits, one_hot, reduction="mean")
+        loss_match = (loss_ce + bce_weight * loss_bce) * difficulty_scale
+    else:
+        loss_match = loss_ce * difficulty_scale
+
+    return loss_match
 
 
 class MultiStepMultiMasksAndIous(nn.Module):
@@ -175,6 +190,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
         focal_gamma_obj_score=0.0,
         focal_alpha_obj_score=-1,
         temporal_match_temperature=1.0,
+        temporal_match_bce_weight=0.0,
     ):
         """
         This class computes the multi-step multi-mask and IoU losses.
@@ -188,6 +204,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
             focal_gamma_obj_score: gamma for sigmoid focal loss on object scores
             focal_alpha_obj_score: alpha for sigmoid focal loss on object scores
             temporal_match_temperature: scale matching logits (e.g. 2.0–4.0) to soften softmax.
+            temporal_match_bce_weight: weight for BCE term on match logits (0 = CE only; e.g. 0.5 for CE+BCE).
         """
 
         super().__init__()
@@ -206,6 +223,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
         self.iou_use_l1_loss = iou_use_l1_loss
         self.pred_obj_scores = pred_obj_scores
         self.temporal_match_temperature = temporal_match_temperature
+        self.temporal_match_bce_weight = temporal_match_bce_weight
 
     def forward(self, outs_batch: List[Dict], targets_batch: torch.Tensor, target_heatmaps_batch: torch.Tensor):
         assert len(outs_batch) == len(targets_batch)
@@ -262,6 +280,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
                 outputs["temporal_match_logits"],
                 outputs["temporal_match_targets"],
                 temperature=self.temporal_match_temperature,
+                bce_weight=self.temporal_match_bce_weight,
             )
 
         assert len(src_masks_list) == len(ious_list)

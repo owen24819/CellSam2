@@ -397,8 +397,8 @@ trainer:
       pred_obj_scores: true
       focal_gamma_obj_score: 0.0
       focal_alpha_obj_score: -1.0
-      # Scale matching logits (e.g. 2.0–4.0) to soften softmax and improve gradients
       temporal_match_temperature: 2.0
+      temporal_match_bce_weight: 0.5  # BCE on one-hot (push non-preds to 0); 0 = CE only
       
   distributed:
     backend: null # nccl for distributed training
