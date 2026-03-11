@@ -373,17 +373,16 @@ class SAM2Train(SAM2Base):
                 out_t1 = all_frame_outputs.get(t1)
                 if out_t0 is None or out_t1 is None:
                     continue
-                if "key_tokens" not in out_t0 or "key_tokens" not in out_t1:
+                if "temporal_matching_tokens" not in out_t0 or "temporal_matching_tokens" not in out_t1:
                     continue
 
-                # Keys: post-div tokens from frame t.
-                key_ids = out_t0["key_ids"]
-                key_tokens = out_t0["key_tokens"]
-                key_centroids = out_t0["key_centroids"]
+                # Reference frame (t0): matching tokens and ids.
+                key_ids = out_t0["temporal_ids"]
+                key_tokens = out_t0["temporal_matching_tokens"]
+                key_centroids = out_t0["temporal_matching_centroids"]
 
-                # Queries: post-div tokens for frame t+1 (tracking_object_ids order).
-                query_valid = out_t1["query_valid_mask"]
-                query_ids = out_t1["query_ids"][query_valid]
+                # Current frame (t1): valid IDs (validity already baked into tokens).
+                query_ids = out_t1["temporal_ids"]
 
                 if key_ids.numel() == 0 or query_ids.numel() == 0:
                     continue
@@ -403,7 +402,7 @@ class SAM2Train(SAM2Base):
                 # This is done to train it for the "new_cells_only" and "segment_then_aux_track" mode
                 if t0 == 0:
                     query_tokens, query_centroids = self._compute_detection_query_tokens(
-                        out_t1, query_valid, input, t1, query_ids
+                        out_t1, input, t1, query_ids
                     )
                     query_recomputed = True  # detection path
                     if query_tokens is None or query_tokens.shape[0] == 0:
@@ -411,12 +410,12 @@ class SAM2Train(SAM2Base):
                 else:
                     # Memory-conditioned keys; 50/50 conditioned vs detection for queries.
                     if out_t1.get("_temporal_aux_use_conditioned_queries", True):
-                        query_tokens = out_t1["key_tokens"][query_valid]
-                        query_centroids = out_t1["key_centroids"][query_valid]
+                        query_tokens = out_t1["temporal_matching_tokens"]
+                        query_centroids = out_t1["temporal_matching_centroids"]
                         query_recomputed = False
                     else:
                         query_tokens, query_centroids = self._compute_detection_query_tokens(
-                            out_t1, query_valid, input, t1, query_ids
+                            out_t1, input, t1, query_ids
                         )
                         query_recomputed = True
                     if query_tokens is None or query_tokens.shape[0] == 0:
@@ -437,7 +436,7 @@ class SAM2Train(SAM2Base):
 
                 if getattr(self, "_do_temporal_debug_viz", False):
                     key_masks = out_t0.get("pred_masks")
-                    query_masks = out_t1.get("pred_masks")[query_valid]
+                    query_masks = out_t1.get("pred_masks")  # same order as temporal_ids when no padding
                     create_temporal_matching_visualization(
                         input=input,
                         t0=t0, t1=t1,
@@ -460,10 +459,9 @@ class SAM2Train(SAM2Base):
         all_frame_outputs = [all_frame_outputs[t] for t in range(num_frames) if not input.no_inputs[t]]
         # Remove per-frame metadata used only during matching (not needed for loss)
         _matching_scratch_keys = {
-            "key_tokens", "key_centroids", "key_areas", "key_ids",
-            "query_ids", "query_valid_mask",
+            "temporal_matching_tokens", "temporal_matching_centroids", "key_areas", "temporal_ids",
             "_raw_vision_feats", "_high_res_features",
-            "_feat_sizes", "_query_masks",
+            "_feat_sizes",
             "_temporal_aux_use_conditioned_queries",
         }
         all_frame_outputs = [
@@ -594,17 +592,18 @@ class SAM2Train(SAM2Base):
                 num_corrections=num_corrections,
             )
 
-        # Build post-division key tokens for the temporal matcher (after PT so keys match refined masks).
-        # Only include foreground (id > 0) and exclude cells that left FOV (empty/near-empty mask).
+        # Build post-division temporal matching tokens (after PT so they match refined masks).
+        # Include only cells that have a non-empty GT mask at this frame (from data).
         if self.enable_temporal_aux_matcher and current_out.get("obj_ptr") is not None:
-            mask_area = current_out["pred_masks"].sigmoid().flatten(1).sum(1)
-            if current_out["pred_masks"].dim() == 4:
-                H, W = current_out["pred_masks"].shape[2], current_out["pred_masks"].shape[3]
-                min_mask_area = max(10.0, 0.001 * H * W)
-            else:
-                min_mask_area = 10.0
-            key_valid = (tracking_object_ids > 0) & (mask_area > min_mask_area)
+            track_ids_with_mask = self._get_track_ids_with_gt_mask(input, frame_idx)
+            key_valid = (tracking_object_ids > 0) & torch.tensor(
+                [tid in track_ids_with_mask for tid in tracking_object_ids.cpu().tolist()],
+                device=tracking_object_ids.device,
+                dtype=torch.bool,
+            )
             N_foreground = key_valid.sum().item()
+            current_out["temporal_ids"] = tracking_object_ids[key_valid].clone()
+
             if N_foreground > 0:
                 raw_feat = current_vision_feats[-1]
                 H_feat, W_feat = feat_sizes[-1]
@@ -626,18 +625,11 @@ class SAM2Train(SAM2Base):
                         pred_masks_fg,
                     )
                 )
-                current_out["key_tokens"] = key_tokens
-                current_out["key_centroids"] = key_centroids
-                current_out["key_ids"] = tracking_object_ids[key_valid].clone()
-                current_out["_query_masks"] = current_out["pred_masks"]
-                current_out["query_ids"] = tracking_object_ids.clone()
-                current_out["query_valid_mask"] = key_valid  # same as tracking_object_ids > 0
+                current_out["temporal_matching_tokens"] = key_tokens
+                current_out["temporal_matching_centroids"] = key_centroids
                 current_out["_temporal_aux_use_conditioned_queries"] = (
                     torch.rand(1, device=tracking_object_ids.device).item() < 0.5
                 )
-            else:
-                current_out["query_ids"] = tracking_object_ids
-                current_out["query_valid_mask"] = key_valid  # exclude left-FOV (empty masks) here too
 
         # Adjust vision features based on token count changes
         current_vision_feats = self._adjust_vision_features(
@@ -819,46 +811,74 @@ class SAM2Train(SAM2Base):
     # Temporal matching helpers
     # ------------------------------------------------------------------
 
-    def _get_gt_masks_for_frame_in_query_order(self, input, frame_idx, query_ids):
-        """Return GT masks [N_valid, 1, H, W] in the same order as query_ids (cell IDs).
-
-        Uses the same ordering as collate: non-dividing cell masks then daughter masks.
+    def _get_track_ids_with_gt_mask(self, input, frame_idx):
+        """Set of track IDs (cell IDs) that have a non-empty GT mask at this frame.
+        Uses same collate order as data_utils: non-dividing then daughters.
         """
         is_real_t = input.is_real[frame_idx]
         is_real_masks_t = input.is_real_masks[frame_idx]
-        gt_masks_t = input.masks[frame_idx][is_real_masks_t]  # [num_masks, H, W]
+        gt_masks_t = input.masks[frame_idx][is_real_masks_t]
         if gt_masks_t.numel() == 0:
-            return None
-
+            return set()
         cell_ids_raw = input.metadata.unique_objects_identifier[frame_idx][is_real_t][:, 1]
         cell_divides_t = input.cell_divides[frame_idx][is_real_t]
         daughter_ids_t = input.daughter_ids[frame_idx][is_real_t]
-
-        gt_cell_ids = []
+        # Expand to one track_id per mask (same order as gt_masks_t)
+        expanded = []
+        div = []
         for i in range(len(cell_ids_raw)):
             if cell_divides_t[i]:
-                for d_id in daughter_ids_t[i]:
-                    if d_id > 0:
-                        gt_cell_ids.append(d_id.item())
+                for d in daughter_ids_t[i]:
+                    if d > 0:
+                        div.append(d.item())
             else:
-                gt_cell_ids.append(cell_ids_raw[i].item())
+                expanded.append(cell_ids_raw[i].item())
+        expanded.extend(div)
+        non_empty = gt_masks_t.flatten(1).sum(1) > 0
+        return {expanded[j] for j in range(len(expanded)) if non_empty[j].item()}
 
-        cell_id_to_idx = {cid: j for j, cid in enumerate(gt_cell_ids)}
-        device = query_ids.device
+    def _get_gt_masks_for_frame_in_query_order(self, input, frame_idx, query_ids):
+        """Return GT masks [N_valid, 1, H, W] in the same order as query_ids.
+
+        """
+        is_real_t = input.is_real[frame_idx]
+        is_real_masks_t = input.is_real_masks[frame_idx]
+        gt_masks_t = input.masks[frame_idx][is_real_masks_t]
+        if gt_masks_t.numel() == 0:
+            return None
+        non_bkgd = gt_masks_t.flatten(1).sum(1) > 0
+        gt_masks_t = gt_masks_t[non_bkgd]
+        if gt_masks_t.numel() == 0:
+            return None
+        # Build track_id per mask (same collate order)
+        cell_ids_raw = input.metadata.unique_objects_identifier[frame_idx][is_real_t][:, 1]
+        cell_divides_t = input.cell_divides[frame_idx][is_real_t]
+        daughter_ids_t = input.daughter_ids[frame_idx][is_real_t]
+        expanded = []
+        div = []
+        for i in range(len(cell_ids_raw)):
+            if cell_divides_t[i]:
+                for d in daughter_ids_t[i]:
+                    if d > 0:
+                        div.append(d.item())
+            else:
+                expanded.append(cell_ids_raw[i].item())
+        expanded.extend(div)
+        # Map track_id -> index into filtered gt_masks_t
+        nonzero_idx = non_bkgd.nonzero(as_tuple=True)[0]
+        track_id_to_idx = {expanded[nonzero_idx[j].item()]: j for j in range(gt_masks_t.shape[0])}
         N_valid = query_ids.shape[0]
+        device = query_ids.device
         H_m, W_m = gt_masks_t.shape[1], gt_masks_t.shape[2]
-        valid_gt_masks = torch.zeros(
-            N_valid, 1, H_m, W_m, dtype=torch.float32, device=device
-        )
+        valid_gt_masks = torch.zeros(N_valid, 1, H_m, W_m, dtype=torch.float32, device=device)
         for i in range(N_valid):
             qid = query_ids[i].item()
-            if qid not in cell_id_to_idx:
-                continue
-            j = cell_id_to_idx[qid]
-            valid_gt_masks[i, 0] = gt_masks_t[j].float().to(device)
+            if qid not in track_id_to_idx:
+                return None
+            valid_gt_masks[i, 0] = gt_masks_t[track_id_to_idx[qid]].float().to(device)
         return valid_gt_masks
 
-    def _compute_detection_query_tokens(self, out_t1, query_valid, input, t1, query_ids):
+    def _compute_detection_query_tokens(self, out_t1, input, t1, query_ids):
         """Build detection-mode query tokens for frame t+1.
 
         Uses GT mask centroids as point prompts (stable, not near touching cells).
@@ -872,12 +892,11 @@ class SAM2Train(SAM2Base):
         if raw_vision_feats is None:
             return None, None
 
-        valid_mask_idx = query_valid.nonzero(as_tuple=False).squeeze(1)
-        if valid_mask_idx.numel() == 0:
+        N_valid = query_ids.numel()
+        if N_valid == 0:
             return None, None
 
         device = raw_vision_feats[0].device
-        N_valid = valid_mask_idx.numel()
 
         # GT masks for each query_id (same order as query_ids)
         gt_masks = self._get_gt_masks_for_frame_in_query_order(input, t1, query_ids)
