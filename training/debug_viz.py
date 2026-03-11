@@ -405,6 +405,8 @@ def create_temporal_matching_visualization(
     step: int = 0,
     key_masks=None,
     query_masks=None,
+    key_recomputed: bool = False,
+    query_recomputed: bool = False,
 ) -> Optional[str]:
     """
     Create a PIL-based debug visualization for the temporal matching head.
@@ -445,6 +447,8 @@ def create_temporal_matching_visualization(
         step:             Global training step (used for the filename).
         key_masks:        Optional [N_k, 1, H, W] or [N_k, H, W] mask logits for keys.
         query_masks:      Optional [N_q, 1, H, W] or [N_q, H, W] mask logits for queries.
+        key_recomputed:   True if keys were built after PT refinement (e.g. frame 0).
+        query_recomputed: True if queries came from detection path (recomputed from GT centroids).
 
     Returns:
         Path to the saved PNG, or None if saving failed.
@@ -616,11 +620,15 @@ def create_temporal_matching_visualization(
 
     # ── Stats header ─────────────────────────────────────────────────────────
     div_str = f"{div_acc:.0%}" if div_acc == div_acc else "n/a"   # nan guard
-    stats   = (
+    k_rec = "K:rec" if key_recomputed else "K:—"
+    q_rec = "Q:rec" if query_recomputed else "Q:—"
+    stats1 = (
         f"step {step}  |  acc {overall_acc:.0%}  |  div acc {div_str}  |"
         f"  Nk={N_k}  Nq={N_q}  Ndiv={sum(is_daughter)}"
     )
-    _draw_text_outlined(draw, (canvas_w // 2 - 200, 2), stats, font, fill=(220, 220, 220))
+    stats2 = f"  |  {k_rec} {q_rec}"
+    _draw_text_outlined(draw, (canvas_w // 2 - 220, 2), stats1, font, fill=(220, 220, 220))
+    _draw_text_outlined(draw, (canvas_w // 2 - 220, 14), stats2, font, fill=(220, 220, 220))
 
     # ── Colour legend (right side of header) ─────────────────────────────────
     legend = [

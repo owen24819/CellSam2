@@ -405,6 +405,7 @@ class SAM2Train(SAM2Base):
                     query_tokens, query_centroids = self._compute_detection_query_tokens(
                         out_t1, query_valid, input, t1, query_ids
                     )
+                    query_recomputed = True  # detection path
                     if query_tokens is None or query_tokens.shape[0] == 0:
                         continue
                 else:
@@ -412,12 +413,17 @@ class SAM2Train(SAM2Base):
                     if out_t1.get("_temporal_aux_use_conditioned_queries", True):
                         query_tokens = out_t1["key_tokens"][query_valid]
                         query_centroids = out_t1["key_centroids"][query_valid]
+                        query_recomputed = False
                     else:
                         query_tokens, query_centroids = self._compute_detection_query_tokens(
                             out_t1, query_valid, input, t1, query_ids
                         )
+                        query_recomputed = True
                     if query_tokens is None or query_tokens.shape[0] == 0:
                         continue
+
+                # Keys built after PT for frame 0 only
+                key_recomputed = t0 == 0
 
                 # Detach tokens so loss_match gradients only update the
                 # temporal head — not the SAM decoder / LoRA / backbone.
@@ -443,6 +449,8 @@ class SAM2Train(SAM2Base):
                         step=getattr(self, "_temporal_debug_viz_sample_idx", 0),
                         key_masks=key_masks,
                         query_masks=query_masks,
+                        key_recomputed=key_recomputed,
+                        query_recomputed=query_recomputed,
                     )
 
                 all_frame_outputs[t1]["temporal_match_logits"] = match_logits
@@ -587,33 +595,37 @@ class SAM2Train(SAM2Base):
             )
 
         # Build post-division key tokens for the temporal matcher (after PT so keys match refined masks).
+        # Only include foreground (id > 0); skip background to save compute and avoid useless matching.
         if self.enable_temporal_aux_matcher and current_out.get("obj_ptr") is not None:
-            N_postdiv = current_out["pred_masks"].shape[0]
-            if N_postdiv > 0:
+            key_valid = tracking_object_ids > 0
+            N_foreground = key_valid.sum().item()
+            if N_foreground > 0:
                 raw_feat = current_vision_feats[-1]
                 H_feat, W_feat = feat_sizes[-1]
                 C_feat = raw_feat.size(2)
+                obj_ptr_fg = current_out["obj_ptr"][key_valid]
+                pred_masks_fg = current_out["pred_masks"][key_valid]
                 pix_feat_keys = (
                     raw_feat[:, 0, :]
                     .view(H_feat, W_feat, C_feat)
                     .permute(2, 0, 1)
                     .unsqueeze(0)
-                    .expand(N_postdiv, -1, -1, -1)
+                    .expand(N_foreground, -1, -1, -1)
                     .contiguous()
                 )
                 key_tokens, key_centroids = (
                     self.temporal_matching_head.build_matching_tokens(
-                        current_out["obj_ptr"],
+                        obj_ptr_fg,
                         pix_feat_keys,
-                        current_out["pred_masks"],
+                        pred_masks_fg,
                     )
                 )
                 current_out["key_tokens"] = key_tokens
                 current_out["key_centroids"] = key_centroids
-                current_out["key_ids"] = tracking_object_ids.clone()
+                current_out["key_ids"] = tracking_object_ids[key_valid].clone()
                 current_out["_query_masks"] = current_out["pred_masks"]
                 current_out["query_ids"] = tracking_object_ids.clone()
-                current_out["query_valid_mask"] = tracking_object_ids > 0
+                current_out["query_valid_mask"] = key_valid  # same as tracking_object_ids > 0
                 current_out["_temporal_aux_use_conditioned_queries"] = (
                     torch.rand(1, device=tracking_object_ids.device).item() < 0.5
                 )
@@ -910,9 +922,9 @@ class SAM2Train(SAM2Base):
             is_dividing=is_div_query,
         )
 
-        # Use high-res masks for token/centroid so positions are accurate
+        # Use low-res masks so query tokens/centroids match key side (both low-res) for 0→1 consistency.
         tokens, centroids = self.temporal_matching_head.build_matching_tokens(
-            _obj_ptr, raw_feat_bchw, _high_res,
+            _obj_ptr, raw_feat_bchw, _low_res,
         )
         return tokens, centroids
 
@@ -974,39 +986,6 @@ class SAM2Train(SAM2Base):
                 targets.append(N_k)
 
         return torch.tensor(targets, device=device, dtype=torch.long)
-
-    def _subsample_matching_query_indices(self, ids, key_ids, child_to_parent):
-        """Return indices of queries to use, or None if all should be used.
-
-        Weighted subsample: higher prob for daughters & new FOV, lower for tracked.
-        Call before _compute_detection_query_tokens to avoid running SAM on unused queries.
-        """
-        k = self.temporal_aux_match_query_k
-        N = ids.shape[0]
-        if k <= 0 or k >= N:
-            return None
-
-        key_id_set = set(kid.item() for kid in key_ids)
-        w_daughter = self.temporal_aux_match_w_daughter
-        w_new = self.temporal_aux_match_w_new
-        w_track = self.temporal_aux_match_w_track
-
-        weights = ids.new_ones(N)
-        for i, qid in enumerate(ids):
-            qid_val = qid.item()
-            if qid_val in child_to_parent and child_to_parent[qid_val] in key_id_set:
-                weights[i] = w_daughter
-            elif qid_val not in key_id_set:
-                weights[i] = w_new
-            else:
-                weights[i] = w_track
-
-        probs = weights / weights.sum()
-        num_sample = min(k, N)
-        try:
-            return torch.multinomial(probs, num_sample, replacement=False)
-        except RuntimeError:
-            return torch.randperm(N, device=ids.device)[:num_sample]
 
     def _iter_correct_pt_sampling(
         self,
