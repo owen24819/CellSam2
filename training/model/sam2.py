@@ -449,8 +449,8 @@ class SAM2Train(SAM2Base):
                 )
 
                 if getattr(self, "_do_temporal_debug_viz", False):
-                    key_masks = out_t0.get("pred_masks")
-                    query_masks = out_t1.get("pred_masks")  # same order as temporal_ids when no padding
+                    key_masks = self._get_masks_for_temporal_viz(out_t0, key_ids)
+                    query_masks = self._get_masks_for_temporal_viz(out_t1, query_ids)
                     create_temporal_matching_visualization(
                         input=input,
                         t0=t0, t1=t1,
@@ -996,6 +996,27 @@ class SAM2Train(SAM2Base):
                     if d_id_val > 0:
                         child_to_parent[d_id_val] = parent_id.item()
         return child_to_parent
+
+    def _get_masks_for_temporal_viz(self, frame_out, ids):
+        """Return pred_masks [N, ...] in the order of ids, for temporal matching debug viz.
+
+        frame_out has pred_masks / pred_masks_high_res in tracking_object_ids order.
+        ids is the subset and order we use for keys or queries (e.g. key_ids or query_ids).
+        """
+        pred_masks = frame_out.get("pred_masks_high_res") or frame_out.get("pred_masks")
+        tracking_ids = frame_out.get("tracking_object_ids")
+        if pred_masks is None or tracking_ids is None or ids is None:
+            return None
+        if pred_masks.shape[0] != tracking_ids.shape[0]:
+            return None
+        id_to_idx = {tracking_ids[i].item(): i for i in range(tracking_ids.shape[0])}
+        indices = []
+        for j in range(ids.shape[0]):
+            tid = ids[j].item()
+            if tid not in id_to_idx:
+                return None
+            indices.append(id_to_idx[tid])
+        return pred_masks[indices]
 
     def _filter_temporal_matching_by_centroid(
         self,
