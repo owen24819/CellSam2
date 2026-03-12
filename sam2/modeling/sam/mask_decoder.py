@@ -187,8 +187,8 @@ class MaskDecoder(nn.Module):
 
         # Process dividing cells if any exist
         if div_mask.sum() > 0:
-            # During training with GT masks, match daughter masks to ground truth
-            if self.training and gt_masks is not None:
+            # When GT masks are provided (train or val), align pred daughters to GT for consistent order
+            if gt_masks is not None:
                 pred_div_masks, pred_div_ious, pred_div_tokens = self._match_daughter_masks_to_gt(
                     gt_masks, masks, iou_pred, mask_tokens_out, div_mask
                 )
@@ -389,8 +389,6 @@ class MaskDecoder(nn.Module):
         Returns:
             Tuple of reordered masks, IoU predictions, and mask tokens
         """
-        
-        assert self.training
         pred_div_masks = masks[div_mask][:, 1:3]
         pred_div_masks_sigmoid = pred_div_masks.sigmoid()  # Take masks 1 and 2
         pred_div_ious = iou_pred[div_mask][:, 1:3]
