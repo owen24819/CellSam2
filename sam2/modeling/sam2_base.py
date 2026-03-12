@@ -66,6 +66,72 @@ class FourierPositionEncoding(torch.nn.Module):
         return self.proj(enc)                                          # [N, hidden_dim]
 
 
+def _bin_init_exp(cutoff: float, n_bins: int) -> torch.Tensor:
+    """Exponentially spaced bin edges from 0 to cutoff (for distance bucketing)."""
+    t = torch.linspace(0, 1, n_bins + 1, dtype=torch.float32)
+    bins = cutoff * (t ** 2)
+    return bins
+
+
+class RelativeSpatialBias(torch.nn.Module):
+    """Relative positional bias for attention: add to attention scores from pairwise centroid distances.
+
+    Uses relative (query–key) distance in normalized [0,1] space so it is robust to FOV shifts.
+    Modes: "distance" (Gaussian decay), "bins" (learned per-bin bias), "none" (zeros).
+    """
+
+    def __init__(
+        self,
+        mode: str = "distance",
+        sigma: float = 0.2,
+        n_bins: int = 16,
+        cutoff: float = 1.5,
+    ):
+        super().__init__()
+        self.mode = mode
+        self.sigma = sigma
+        self.n_bins = n_bins
+        self.cutoff = cutoff
+        if mode == "distance":
+            self.scale = torch.nn.Parameter(torch.tensor(0.1))
+        elif mode == "bins":
+            bins = _bin_init_exp(cutoff, n_bins)
+            self.register_buffer("bins", bins)
+            self.bias_table = torch.nn.Parameter(torch.zeros(n_bins))
+        elif mode != "none":
+            raise ValueError(f"RelativeSpatialBias mode must be 'distance', 'bins', or 'none', got {mode!r}")
+
+    def forward(
+        self,
+        query_centroids: torch.Tensor,
+        key_centroids: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            query_centroids: [N_q, 2]  normalized (cx, cy) in [0, 1]
+            key_centroids:   [N_k, 2]  normalized (cx, cy) in [0, 1]
+
+        Returns:
+            bias: [N_q, N_k]  additive bias for attention scores (same dtype/device as inputs)
+        """
+        if self.mode == "none":
+            return torch.zeros(
+                query_centroids.shape[0],
+                key_centroids.shape[0],
+                device=query_centroids.device,
+                dtype=query_centroids.dtype,
+            )
+        dist = torch.cdist(query_centroids.float(), key_centroids.float(), p=2)
+        if self.mode == "distance":
+            bias = self.scale * torch.exp(-(dist ** 2) / (2 * self.sigma ** 2))
+            return bias.to(query_centroids.dtype)
+        else:
+            idx = torch.bucketize(dist.contiguous().view(-1), self.bins.to(dist.device))
+            idx = idx.clamp(max=self.n_bins - 1)
+            bias = self.bias_table[idx].view(dist.shape).to(query_centroids.dtype)
+            return bias
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 
 class _SACABlock(torch.nn.Module):
@@ -93,14 +159,16 @@ class _SACABlock(torch.nn.Module):
         self,
         q: torch.Tensor,   # [1, N_q, D]
         k: torch.Tensor,   # [1, N_k, D]  key constellation (frozen)
+        attn_mask_sa: Optional[torch.Tensor] = None,  # [N_q, N_q] or None
+        attn_mask_ca: Optional[torch.Tensor] = None,  # [N_q, N_k] or None
     ) -> torch.Tensor:
         # SA: queries integrate global context from the query constellation
         q_n = self.sa_norm(q)
-        out, _ = self.sa(q_n, q_n, q_n)
+        out, _ = self.sa(q_n, q_n, q_n, attn_mask=attn_mask_sa)
         q = q + out
         # CA: queries look up matching evidence from the key constellation
         q_n = self.ca_norm(q)
-        out, _ = self.ca(q_n, k, k)
+        out, _ = self.ca(q_n, k, k, attn_mask=attn_mask_ca)
         q = q + out
         return q                                                       # [1, N_q, D]
 
@@ -143,6 +211,10 @@ class TemporalMatchingHead(torch.nn.Module):
         num_freqs: int = 16,
         num_key_sa_layers: int = 3,
         num_blocks: int = 3,
+        pos_bias_mode: str = "distance",
+        pos_bias_sigma: float = 0.2,
+        pos_bias_n_bins: int = 16,
+        pos_bias_cutoff: float = 1.5,
     ):
         super().__init__()
         assert hidden_dim % num_heads == 0, (
@@ -191,6 +263,14 @@ class TemporalMatchingHead(torch.nn.Module):
         # Learned NULL key embedding – the "NO_MATCH" candidate
         self.null_key = torch.nn.Parameter(torch.empty(1, hidden_dim))
         torch.nn.init.trunc_normal_(self.null_key, std=0.02)
+
+        # ── Relative positional bias (for SA/CA attention matrices) ─────────────
+        self.pos_bias = RelativeSpatialBias(
+            mode=pos_bias_mode,
+            sigma=pos_bias_sigma,
+            n_bins=pos_bias_n_bins,
+            cutoff=pos_bias_cutoff,
+        )
 
     # ──────────────────────────────────────────────────────────────────────────
     def get_centroids_from_mask_logits(
@@ -294,21 +374,29 @@ class TemporalMatchingHead(torch.nn.Module):
         return token, centroids
 
     # ──────────────────────────────────────────────────────────────────────────
-    def _encode_keys(self, key_tokens: torch.Tensor) -> torch.Tensor:
-        """3-layer pre-norm SA encoder: keys build their constellation map.
+    def _encode_keys(
+        self,
+        key_tokens: torch.Tensor,
+        key_centroids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Pre-norm SA encoder: keys build their constellation map.
 
         Args:
             key_tokens: [N_k, D]
+            key_centroids: [N_k, 2]  optional; used for relative pos bias in attention.
 
         Returns:
             key_tokens: [N_k, D]  spatially context-enriched
         """
         if key_tokens.shape[0] == 0:
             return key_tokens
+        attn_mask_kk = None
+        if key_centroids is not None and key_centroids.shape[0] == key_tokens.shape[0]:
+            attn_mask_kk = self.pos_bias(key_centroids, key_centroids)
         x = key_tokens.unsqueeze(0)                          # [1, N_k, D]
         for sa, norm in zip(self.key_sa_layers, self.key_sa_norms):
             x_n = norm(x)
-            out, _ = sa(x_n, x_n, x_n)
+            out, _ = sa(x_n, x_n, x_n, attn_mask=attn_mask_kk)
             x = x + out
         return x.squeeze(0)                                  # [N_k, D]
 
@@ -342,19 +430,21 @@ class TemporalMatchingHead(torch.nn.Module):
 
         # ── Step 2. Key constellation encoder (3-layer SA) ─────────────────
         if N_k > 0:
-            key_tokens = self._encode_keys(key_tokens)               # [N_k, D]
+            key_tokens = self._encode_keys(key_tokens, key_centroids)
 
         # ── Step 3. Interleaved SA→CA blocks ────────────────────────────────
+        bias_qq = self.pos_bias(query_centroids, query_centroids)  # [N_q, N_q]
         q = query_tokens.unsqueeze(0)   # [1, N_q, D]
         if N_k > 0:
             k = key_tokens.unsqueeze(0) # [1, N_k, D]
+            bias_qk = self.pos_bias(query_centroids, key_centroids)  # [N_q, N_k]
             for block in self.blocks:
-                q = block(q, k)
+                q = block(q, k, attn_mask_sa=bias_qq, attn_mask_ca=bias_qk)
         else:
             # No keys available: SA-only pass (skip the CA sub-layer)
             for block in self.blocks:
                 q_n = block.sa_norm(q)
-                out, _ = block.sa(q_n, q_n, q_n)
+                out, _ = block.sa(q_n, q_n, q_n, attn_mask=bias_qq)
                 q = q + out
         q = q.squeeze(0)                                             # [N_q, D]
 
@@ -460,6 +550,10 @@ class SAM2Base(torch.nn.Module):
         temporal_aux_matcher_num_heads: int = 8,
         temporal_aux_matcher_num_key_sa_layers: int = 1,
         temporal_aux_matcher_num_blocks: int = 1,
+        temporal_aux_matcher_pos_bias_mode: str = "distance",
+        temporal_aux_matcher_pos_bias_sigma: float = 0.2,
+        temporal_aux_matcher_pos_bias_n_bins: int = 16,
+        temporal_aux_matcher_pos_bias_cutoff: float = 1.5,
         temporal_aux_match_query_k: int = 0,
         temporal_aux_match_w_daughter: float = 3.0,
         temporal_aux_match_w_new: float = 2.0,
@@ -563,6 +657,10 @@ class SAM2Base(torch.nn.Module):
         self._temporal_aux_matcher_num_heads = temporal_aux_matcher_num_heads
         self._temporal_aux_matcher_num_key_sa_layers = temporal_aux_matcher_num_key_sa_layers
         self._temporal_aux_matcher_num_blocks = temporal_aux_matcher_num_blocks
+        self._temporal_aux_matcher_pos_bias_mode = temporal_aux_matcher_pos_bias_mode
+        self._temporal_aux_matcher_pos_bias_sigma = temporal_aux_matcher_pos_bias_sigma
+        self._temporal_aux_matcher_pos_bias_n_bins = temporal_aux_matcher_pos_bias_n_bins
+        self._temporal_aux_matcher_pos_bias_cutoff = temporal_aux_matcher_pos_bias_cutoff
 
         self._build_sam_heads()
         self.max_cond_frames_in_attn = max_cond_frames_in_attn
@@ -670,6 +768,10 @@ class SAM2Base(torch.nn.Module):
                 num_heads=self._temporal_aux_matcher_num_heads,
                 num_key_sa_layers=self._temporal_aux_matcher_num_key_sa_layers,
                 num_blocks=self._temporal_aux_matcher_num_blocks,
+                pos_bias_mode=self._temporal_aux_matcher_pos_bias_mode,
+                pos_bias_sigma=self._temporal_aux_matcher_pos_bias_sigma,
+                pos_bias_n_bins=self._temporal_aux_matcher_pos_bias_n_bins,
+                pos_bias_cutoff=self._temporal_aux_matcher_pos_bias_cutoff,
             )
 
     def _forward_sam_heads(
