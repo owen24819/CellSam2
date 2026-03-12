@@ -231,7 +231,7 @@ trainer:
     enable_temporal_aux_matcher: ${scratch.use_temporal_aux_matcher}
     temporal_aux_matcher_num_heads: 8
     temporal_aux_matcher_num_key_sa_layers: 1
-    temporal_aux_matcher_num_blocks: 1
+    temporal_aux_matcher_num_blocks: 2
     temporal_aux_matcher_pos_bias_mode: "distance"
     temporal_aux_matcher_pos_bias_sigma: 0.2
     temporal_aux_matcher_pos_bias_n_bins: 16
