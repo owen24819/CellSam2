@@ -159,6 +159,14 @@ def overlay_mask_on_image(
     return result
 
 
+def _draw_line_on_image(img_np: np.ndarray, pt0_xy: tuple, pt1_xy: tuple, color: tuple, width: int = 3) -> None:
+    """Draw a line on a numpy RGB image [H, W, 3] in place. pt0_xy, pt1_xy are (x, y)."""
+    pil_img = Image.fromarray(img_np)
+    draw = ImageDraw.Draw(pil_img)
+    draw.line([pt0_xy, pt1_xy], fill=color, width=width)
+    img_np[:] = np.array(pil_img)
+
+
 def create_debug_visualization(
     batch,
     outputs: List[Dict],
@@ -310,7 +318,26 @@ def create_debug_visualization(
                 color = get_color_for_cell_id(cell_id)
                 # Ground truth always gets high score (10.0) to show black text
                 gt_img = overlay_mask_on_image(gt_img, mask.numpy(), color, alpha=0.6, cell_id=cell_id, obj_score=10.0, obj_score_thresh=0.0)
-        
+
+        # Draw a line between the two daughter cells on the frame where division happens
+        num_daughters = len(daughter_ids_to_add)
+        if num_daughters >= 2 and num_daughters % 2 == 0:
+            start = num_gt_cells - num_daughters
+            division_line_color = (0, 0, 0)  # black
+            for k in range(num_daughters // 2):
+                idx0, idx1 = start + 2 * k, start + 2 * k + 1
+                mask0 = get_largest_blob(gt_masks_t[idx0].detach().cpu())
+                mask1 = get_largest_blob(gt_masks_t[idx1].detach().cpu())
+                if mask0.sum() > 0 and mask1.sum() > 0:
+                    m0 = mask0.numpy() > 0
+                    m1 = mask1.numpy() > 0
+                    y0, x0 = np.where(m0)
+                    y1, x1 = np.where(m1)
+                    cx0, cy0 = int(np.mean(x0)), int(np.mean(y0))
+                    cx1, cy1 = int(np.mean(x1)), int(np.mean(y1))
+                    _draw_line_on_image(pred_img, (cx0, cy0), (cx1, cy1), division_line_color, width=3)
+                    _draw_line_on_image(gt_img, (cx0, cy0), (cx1, cy1), division_line_color, width=3)
+
         pred_frames.append(pred_img)
         gt_frames.append(gt_img)
     
