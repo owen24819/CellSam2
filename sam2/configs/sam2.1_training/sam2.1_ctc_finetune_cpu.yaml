@@ -395,7 +395,7 @@ trainer:
         loss_class: 10
         loss_div: 2
         loss_heatmap: 1
-        loss_match: 5
+        loss_match: 1
       supervise_all_iou: true
       iou_use_l1_loss: true
       pred_obj_scores: true
