@@ -838,18 +838,22 @@ class SAM2Train(SAM2Base):
         return {expanded[j] for j in range(len(expanded)) if non_empty[j].item()}
 
     def _get_gt_masks_for_frame_in_query_order(self, input, frame_idx, query_ids):
-        """Return GT masks [N_valid, 1, H, W] in the same order as query_ids.
+        """Return GT masks [N_valid, 1, H, W] and centroids [N_valid, 2] in query_ids order.
 
+        Both come from the same valid set (non-bkgd, same track_id_to_idx) so shapes match.
+        Centroids are from input.centroids (data_utils), normalized to [0, 1].
         """
         is_real_t = input.is_real[frame_idx]
         is_real_masks_t = input.is_real_masks[frame_idx]
         gt_masks_t = input.masks[frame_idx][is_real_masks_t]
+        centroids_t = input.centroids[frame_idx][is_real_masks_t]
         if gt_masks_t.numel() == 0:
-            return None
+            return None, None
         non_bkgd = gt_masks_t.flatten(1).sum(1) > 0
         gt_masks_t = gt_masks_t[non_bkgd]
+        centroids_t = centroids_t[non_bkgd]
         if gt_masks_t.numel() == 0:
-            return None
+            return None, None
         # Build track_id per mask (same collate order)
         cell_ids_raw = input.metadata.unique_objects_identifier[frame_idx][is_real_t][:, 1]
         cell_divides_t = input.cell_divides[frame_idx][is_real_t]
@@ -864,19 +868,23 @@ class SAM2Train(SAM2Base):
             else:
                 expanded.append(cell_ids_raw[i].item())
         expanded.extend(div)
-        # Map track_id -> index into filtered gt_masks_t
+        # Map track_id -> index into filtered gt_masks_t / centroids_t
         nonzero_idx = non_bkgd.nonzero(as_tuple=True)[0]
         track_id_to_idx = {expanded[nonzero_idx[j].item()]: j for j in range(gt_masks_t.shape[0])}
         N_valid = query_ids.shape[0]
         device = query_ids.device
         H_m, W_m = gt_masks_t.shape[1], gt_masks_t.shape[2]
         valid_gt_masks = torch.zeros(N_valid, 1, H_m, W_m, dtype=torch.float32, device=device)
+        valid_centroids = torch.zeros(N_valid, 2, dtype=torch.float32, device=device)
+        scale = torch.tensor([1 / max(W_m - 1, 1), 1 / max(H_m - 1, 1)], device=device)
         for i in range(N_valid):
             qid = query_ids[i].item()
             if qid not in track_id_to_idx:
-                return None
-            valid_gt_masks[i, 0] = gt_masks_t[track_id_to_idx[qid]].float().to(device)
-        return valid_gt_masks
+                return None, None
+            j = track_id_to_idx[qid]
+            valid_gt_masks[i, 0] = gt_masks_t[j].float().to(device)
+            valid_centroids[i] = centroids_t[j].to(device) * scale
+        return valid_gt_masks, valid_centroids
 
     def _compute_detection_query_tokens(self, out_t1, input, t1, query_ids):
         """Build detection-mode query tokens for frame t+1.
@@ -898,20 +906,12 @@ class SAM2Train(SAM2Base):
 
         device = raw_vision_feats[0].device
 
-        # GT masks for each query_id (same order as query_ids)
-        gt_masks = self._get_gt_masks_for_frame_in_query_order(input, t1, query_ids)
-        if gt_masks is None or gt_masks.shape[0] != N_valid:
+        # GT masks and centroids for each query_id (same order; centroids from input to avoid shape mismatch)
+        gt_masks, centroids_norm = self._get_gt_masks_for_frame_in_query_order(input, t1, query_ids)
+        if gt_masks is None or centroids_norm is None or gt_masks.shape[0] != N_valid:
             return None, None
 
-        # Centroids from GT masks in [0, 1] (same convention as build_matching_tokens)
-        mask_bin = gt_masks.squeeze(1)  # [N_valid, H_m, W_m]
-        area = mask_bin.sum(dim=(1, 2)).clamp(min=1)
-        H_m, W_m = mask_bin.shape[1], mask_bin.shape[2]
-        grid_y = torch.arange(H_m, device=device).float() / max(H_m - 1, 1)
-        grid_x = torch.arange(W_m, device=device).float() / max(W_m - 1, 1)
-        grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing="ij")
-        cx_full = (mask_bin * grid_x).sum(dim=(1, 2)) / area
-        cy_full = (mask_bin * grid_y).sum(dim=(1, 2)) / area
+        cx_full, cy_full = centroids_norm[:, 0], centroids_norm[:, 1]
 
         raw_feat = raw_vision_feats[-1]
         H_feat, W_feat = feat_sizes[-1]
@@ -948,8 +948,9 @@ class SAM2Train(SAM2Base):
         )
 
         # Use low-res masks so query tokens/centroids match key side (both low-res) for 0→1 consistency.
+        # Pass precomputed centroids from collation so we don't recalculate.
         tokens, centroids = self.temporal_matching_head.build_matching_tokens(
-            _obj_ptr, raw_feat_bchw, _low_res,
+            _obj_ptr, raw_feat_bchw, _low_res, centroids=centroids_norm
         )
         return tokens, centroids
 

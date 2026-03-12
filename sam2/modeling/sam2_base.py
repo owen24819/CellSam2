@@ -6,6 +6,7 @@
 
 import logging
 import math
+from typing import Optional
 
 import torch
 import torch.distributed
@@ -192,11 +193,62 @@ class TemporalMatchingHead(torch.nn.Module):
         torch.nn.init.trunc_normal_(self.null_key, std=0.02)
 
     # ──────────────────────────────────────────────────────────────────────────
+    def get_centroids_from_mask_logits(
+        self,
+        mask_logits: torch.Tensor,
+        H: int,
+        W: int,
+    ) -> torch.Tensor:
+        """Compute normalised centroids [N, 2] from mask logits (same logic as data_utils get_centroids_from_mask).
+
+        Mean of foreground; if rounded mean is off-mask, use middle foreground pixel.
+        Use when centroids are not already provided (e.g. inference). During training
+        centroids often come from collation, so callers can pass them into build_matching_tokens.
+
+        Args:
+            mask_logits: [N, 1, H_mask, W_mask]  raw logits (sigmoided and interpolated to (H, W))
+            H, W: target spatial size for centroid grid (e.g. from pix_feat)
+
+        Returns:
+            centroids: [N, 2]  normalised (cx, cy) in [0, 1]
+        """
+        device = mask_logits.device
+        mask_prob = F.interpolate(
+            mask_logits.float().sigmoid(),
+            size=(H, W),
+            mode="bilinear",
+            align_corners=False,
+        )  # [N, 1, H, W]
+        mask_bin = (mask_prob.squeeze(1) > 0.5)  # [N, H, W]
+        N = mask_bin.shape[0]
+        H_norm = max(H - 1, 1)
+        W_norm = max(W - 1, 1)
+        centroids_list = []
+        for i in range(N):
+            ys, xs = torch.where(mask_bin[i])
+            if len(xs) == 0:
+                centroids_list.append(torch.zeros(2, device=device, dtype=torch.float32))
+                continue
+            cx = xs.float().mean()
+            cy = ys.float().mean()
+            cy_int = int(round(cy.item()))
+            cx_int = int(round(cx.item()))
+            if not mask_bin[i, cy_int, cx_int]:
+                mid = len(xs) // 2
+                cx = xs[mid].float()
+                cy = ys[mid].float()
+            centroids_list.append(torch.stack([cx, cy]))
+        centroids_px = torch.stack(centroids_list, dim=0)
+        return torch.stack(
+            [centroids_px[:, 0] / W_norm, centroids_px[:, 1] / H_norm], dim=1
+        )
+
     def build_matching_tokens(
         self,
         obj_ptr: torch.Tensor,
         pix_feat: torch.Tensor,
         mask_logits: torch.Tensor,
+        centroids: Optional[torch.Tensor] = None,
     ):
         """Build per-cell visual tokens via masked-average ROI pooling.
 
@@ -207,6 +259,8 @@ class TemporalMatchingHead(torch.nn.Module):
             obj_ptr:     [N, C]
             pix_feat:    [N, C, H, W]  memory-conditioned image features
             mask_logits: [N, 1, H_mask, W_mask]  raw logits (will be sigmoided)
+            centroids:   [N, 2]  optional; normalised (cx, cy) in [0, 1]. If provided
+                         (e.g. from collation during training), centroid computation is skipped.
 
         Returns:
             tokens:    [N, hidden_dim]  visual tokens (PE will be added in forward)
@@ -225,13 +279,10 @@ class TemporalMatchingHead(torch.nn.Module):
         mask_sum = mask_prob.sum(dim=(2, 3)).clamp(min=1e-6)  # [N, 1]
         roi_feat = (pix_feat * mask_prob).sum(dim=(2, 3)) / mask_sum  # [N, C]
 
-        # Normalised centroids in [0, 1]
-        grid_y = torch.arange(H, device=device).float() / max(H - 1, 1)
-        grid_x = torch.arange(W, device=device).float() / max(W - 1, 1)
-        grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing="ij")
-        cx = (mask_prob[:, 0] * grid_x).sum(dim=(1, 2)) / mask_sum[:, 0]
-        cy = (mask_prob[:, 0] * grid_y).sum(dim=(1, 2)) / mask_sum[:, 0]
-        centroids = torch.stack([cx, cy], dim=1)  # [N, 2]
+        if centroids is None:
+            centroids = self.get_centroids_from_mask_logits(mask_logits, H, W)
+        else:
+            centroids = centroids.to(device=device)
 
         # Independent LN + 3-layer GELU MLP fusion
         token = self.token_proj(

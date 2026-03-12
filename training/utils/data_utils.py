@@ -58,6 +58,7 @@ class BatchedVideoDatapoint:
     target_obj_mask: torch.BoolTensor
     is_real: torch.BoolTensor  # True for real objects, False for padded objects
     is_real_masks: torch.BoolTensor  # True for real masks, False for padded masks
+    centroids: torch.FloatTensor  # [T, max_objects_masks, 2] (x, y) per mask, same order as masks
 
     def pin_memory(self, device=None):
         return self.apply(torch.Tensor.pin_memory, device=device)
@@ -332,6 +333,7 @@ def collate_fn(
     cell_tracks_mask = pad_and_stack(cell_tracks_mask_per_t, max_objects, pad_value=False)
     target_obj_mask = pad_and_stack(target_obj_mask_per_t, max_objects, pad_value=False)
     daughter_ids = pad_and_stack(daughter_ids_per_t, max_objects, pad_value=0)
+    centroids = pad_and_stack(centroids_per_t, max_objects_masks, pad_value=0.0)
 
     return BatchedVideoDatapoint(
         img_batch=img_batch,
@@ -351,6 +353,7 @@ def collate_fn(
         dict_key=dict_key,
         is_real=is_real,
         is_real_masks=is_real_masks,
+        centroids=centroids,
         batch_size=[T],
     )
 
@@ -374,11 +377,18 @@ def get_centroids_from_mask(mask):
         mask: binary (H, W) tensor
 
     Returns:
-        (x, y) float tuple
+        [cx, cy] tensor (x, y) in pixel coords. If mean is not on the mask, uses middle value xs[len//2], ys[len//2].
     """
     ys, xs = torch.where(mask)
     if len(xs) == 0:
         return torch.zeros((2), dtype=torch.float32)
     cx = xs.float().mean()
     cy = ys.float().mean()
+    # If mean falls outside the mask (e.g. filament), use middle value: xs[len//2], ys[len//2] so cx, cy are from the mask.
+    H, W = mask.shape
+    cy_int = int(round(cy.item()))
+    cx_int = int(round(cx.item()))
+    if not mask[cy_int, cx_int]:
+        cx = xs[len(xs) // 2].float()
+        cy = ys[len(ys) // 2].float()
     return torch.tensor([cx.item(), cy.item()], dtype=torch.float32)
