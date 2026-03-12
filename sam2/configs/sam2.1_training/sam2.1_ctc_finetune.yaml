@@ -236,6 +236,8 @@ trainer:
     temporal_aux_matcher_pos_bias_sigma: 0.2
     temporal_aux_matcher_pos_bias_n_bins: 16
     temporal_aux_matcher_pos_bias_cutoff: 1.5
+    temporal_aux_matcher_ffn_ratio: 4
+    temporal_aux_matcher_use_aux_loss: true
     temporal_aux_match_query_k: 0  # 0 = use all cells
     temporal_aux_match_w_daughter: 3.0  # sampling weight for daughter cells
     temporal_aux_match_w_new: 2.0       # sampling weight for new FOV cells
@@ -403,6 +405,7 @@ trainer:
       focal_alpha_obj_score: -1.0
       temporal_match_temperature: 2.0
       temporal_match_bce_weight: 0.5  # BCE on one-hot (push non-preds to 0); 0 = CE only
+      temporal_match_aux_loss_weight: 0.3  # deep-supervision weight for intermediate block match logits
       
   distributed:
     backend: null # nccl for distributed training

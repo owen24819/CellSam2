@@ -426,10 +426,11 @@ class SAM2Train(SAM2Base):
 
                 # Detach is done inside build_matching_tokens (before the MLP) so
                 # temporal loss trains the head (including token_proj) but not backbone/SAM.
-                match_logits = self.temporal_matching_head(
+                result = self.temporal_matching_head(
                     query_tokens, key_tokens,
                     query_centroids, key_centroids,
                 )
+                match_logits, match_logits_aux = result if isinstance(result, tuple) else (result, None)
                 match_targets = self._build_matching_targets(
                     query_ids, key_ids, child_to_parent,
                 )
@@ -454,6 +455,8 @@ class SAM2Train(SAM2Base):
 
                 all_frame_outputs[t1]["temporal_match_logits"] = match_logits
                 all_frame_outputs[t1]["temporal_match_targets"] = match_targets
+                if match_logits_aux is not None:
+                    all_frame_outputs[t1]["temporal_match_logits_aux"] = match_logits_aux
 
         # turn `output_dict` into a list for loss function
         all_frame_outputs = [all_frame_outputs[t] for t in range(num_frames) if not input.no_inputs[t]]

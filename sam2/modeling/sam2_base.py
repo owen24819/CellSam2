@@ -6,7 +6,7 @@
 
 import logging
 import math
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import torch
 import torch.distributed
@@ -135,16 +135,15 @@ class RelativeSpatialBias(torch.nn.Module):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class _SACABlock(torch.nn.Module):
-    """One interleaved Self-Attention → Cross-Attention block (SuperGlue-style).
+    """One interleaved Self-Attention → Cross-Attention → FFN block (standard transformer).
 
-    Queries first attend to themselves to build a "constellation" context of the
-    current frame, then attend to the (pre-encoded) key set to look up matches.
+    Queries first attend to themselves, then to keys, then a feed-forward layer.
     Both sub-layers use pre-LayerNorm + residual connection.
 
     Keys are *read-only* within this block; only queries are updated.
     """
 
-    def __init__(self, hidden_dim: int, num_heads: int):
+    def __init__(self, hidden_dim: int, num_heads: int, ffn_ratio: int = 4):
         super().__init__()
         self.sa_norm = torch.nn.LayerNorm(hidden_dim)
         self.sa      = torch.nn.MultiheadAttention(
@@ -153,6 +152,14 @@ class _SACABlock(torch.nn.Module):
         self.ca_norm = torch.nn.LayerNorm(hidden_dim)
         self.ca      = torch.nn.MultiheadAttention(
             hidden_dim, num_heads, batch_first=True, dropout=0.1
+        )
+        self.ffn_norm = torch.nn.LayerNorm(hidden_dim)
+        self.ffn = MLP(
+            hidden_dim,
+            hidden_dim * ffn_ratio,
+            hidden_dim,
+            num_layers=2,
+            activation=torch.nn.GELU,
         )
 
     def forward(
@@ -170,6 +177,9 @@ class _SACABlock(torch.nn.Module):
         q_n = self.ca_norm(q)
         out, _ = self.ca(q_n, k, k, attn_mask=attn_mask_ca)
         q = q + out
+        # FFN (standard transformer)
+        q_n = self.ffn_norm(q)
+        q = q + self.ffn(q_n)
         return q                                                       # [1, N_q, D]
 
 
@@ -215,6 +225,8 @@ class TemporalMatchingHead(torch.nn.Module):
         pos_bias_sigma: float = 0.2,
         pos_bias_n_bins: int = 16,
         pos_bias_cutoff: float = 1.5,
+        ffn_ratio: int = 4,
+        use_aux_loss: bool = False,
     ):
         super().__init__()
         assert hidden_dim % num_heads == 0, (
@@ -237,7 +249,7 @@ class TemporalMatchingHead(torch.nn.Module):
         # ── 1b. Fourier Positional Encoding ───────────────────────────────────
         self.pos_enc = FourierPositionEncoding(hidden_dim, num_freqs)
 
-        # ── 2. Key Constellation Encoder (3-layer SA) ─────────────────────────
+        # ── 2. Key Constellation Encoder (SA→FFN per layer, standard transformer) ─
         self.key_sa_layers = torch.nn.ModuleList([
             torch.nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True, dropout=0.1)
             for _ in range(num_key_sa_layers)
@@ -246,12 +258,21 @@ class TemporalMatchingHead(torch.nn.Module):
             torch.nn.LayerNorm(hidden_dim)
             for _ in range(num_key_sa_layers)
         ])
+        self.key_ffn_norms = torch.nn.ModuleList([
+            torch.nn.LayerNorm(hidden_dim)
+            for _ in range(num_key_sa_layers)
+        ])
+        self.key_ffns = torch.nn.ModuleList([
+            MLP(hidden_dim, hidden_dim * ffn_ratio, hidden_dim, num_layers=2, activation=torch.nn.GELU)
+            for _ in range(num_key_sa_layers)
+        ])
 
-        # ── 3. Interleaved SA→CA blocks ───────────────────────────────────────
+        # ── 3. Interleaved SA→CA→FFN blocks ───────────────────────────────────
         self.blocks = torch.nn.ModuleList([
-            _SACABlock(hidden_dim, num_heads)
+            _SACABlock(hidden_dim, num_heads, ffn_ratio=ffn_ratio)
             for _ in range(num_blocks)
         ])
+        self.use_aux_loss = use_aux_loss
 
         # ── 4. Final Scoring Projections ──────────────────────────────────────
         self.q_proj = torch.nn.Linear(hidden_dim, hidden_dim)
@@ -361,8 +382,8 @@ class TemporalMatchingHead(torch.nn.Module):
 
         # Detach before the MLP so temporal matching loss trains token_proj (and norms)
         # but does not backprop through SAM decoder / backbone.
-        obj_ptr = obj_ptr.detach()
-        roi_feat = roi_feat.detach()
+        obj_ptr_detach = obj_ptr.detach()
+        roi_feat_detach = roi_feat.detach()
 
         if centroids is None:
             centroids = self.get_centroids_from_mask_logits(mask_logits, H, W)
@@ -372,7 +393,7 @@ class TemporalMatchingHead(torch.nn.Module):
         # Independent LN + 3-layer GELU MLP fusion
         token = self.token_proj(
             torch.cat(
-                [self.obj_ptr_norm(obj_ptr), self.roi_feat_norm(roi_feat)],
+                [self.obj_ptr_norm(obj_ptr_detach), self.roi_feat_norm(roi_feat_detach)],
                 dim=1,
             )
         )  # [N, hidden_dim]
@@ -399,11 +420,36 @@ class TemporalMatchingHead(torch.nn.Module):
         if key_centroids is not None and key_centroids.shape[0] == key_tokens.shape[0]:
             attn_mask_kk = self.pos_bias(key_centroids, key_centroids)
         x = key_tokens.unsqueeze(0)                          # [1, N_k, D]
-        for sa, norm in zip(self.key_sa_layers, self.key_sa_norms):
-            x_n = norm(x)
+        for sa, sa_norm, ffn_norm, ffn in zip(
+            self.key_sa_layers, self.key_sa_norms, self.key_ffn_norms, self.key_ffns
+        ):
+            x_n = sa_norm(x)
             out, _ = sa(x_n, x_n, x_n, attn_mask=attn_mask_kk)
             x = x + out
+            x_n = ffn_norm(x)
+            x = x + ffn(x_n)
         return x.squeeze(0)                                  # [N_k, D]
+
+    def _match_logits_from_q(
+        self,
+        q: torch.Tensor,
+        key_tokens: torch.Tensor,
+        N_k: int,
+        query_centroids: torch.Tensor,
+        key_centroids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute [N_q, N_k+1] match logits from query state q and key_tokens."""
+        N_q = q.shape[0]
+        keys_with_null = (
+            torch.cat([key_tokens, self.null_key.expand(1, -1)], dim=0)
+            if N_k > 0
+            else self.null_key
+        )
+        H, D = self.num_heads, self.head_dim
+        Q = self.q_proj(q).view(N_q, H, D)
+        K = self.k_proj(keys_with_null).view(N_k + 1, H, D)
+        attn = torch.einsum("qhd,khd->qkh", Q, K) / (D ** 0.5)
+        return attn.mean(dim=-1)
 
     # ──────────────────────────────────────────────────────────────────────────
     def forward(
@@ -412,7 +458,7 @@ class TemporalMatchingHead(torch.nn.Module):
         key_tokens: torch.Tensor,
         query_centroids: torch.Tensor,
         key_centroids: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[List[torch.Tensor]]]:
         """
         Args:
             query_tokens:    [N_q, D]  frame t+1 visual tokens
@@ -421,52 +467,61 @@ class TemporalMatchingHead(torch.nn.Module):
             key_centroids:   [N_k, 2]  normalised (cx, cy) in [0, 1]
 
         Returns:
-            match_logits: [N_q, N_k + 1]
-                Columns 0…N_k-1 are scores for each key cell;
-                column N_k is the NO_MATCH (null) score.
+            match_logits: [N_q, N_k + 1]; main match logits.
+            match_logits_aux: list of [N_q, N_k+1] or None; one per block when use_aux_loss and N_k > 0.
         """
         N_q = query_tokens.shape[0]
         N_k = key_tokens.shape[0]
 
+        if N_k == 0:
+            # Every query matches null only; no need to run blocks or projections
+            match_logits = torch.zeros(
+                N_q, 1,
+                device=query_tokens.device,
+                dtype=query_tokens.dtype,
+            )
+            return match_logits, None
+
         # ── Step 1. Inject Fourier positional encoding ─────────────────────
         query_tokens = query_tokens + self.pos_enc(query_centroids)  # [N_q, D]
-        if N_k > 0:
-            key_tokens = key_tokens + self.pos_enc(key_centroids)    # [N_k, D]
+        key_tokens = key_tokens + self.pos_enc(key_centroids)    # [N_k, D]
 
-        # ── Step 2. Key constellation encoder (3-layer SA) ─────────────────
-        if N_k > 0:
-            key_tokens = self._encode_keys(key_tokens, key_centroids)
+        # ── Step 2. Key constellation encoder (SA→FFN per layer) ─────────────
+        key_tokens = self._encode_keys(key_tokens, key_centroids)
 
-        # ── Step 3. Interleaved SA→CA blocks ────────────────────────────────
-        bias_qq = self.pos_bias(query_centroids, query_centroids)  # [N_q, N_q]
-        q = query_tokens.unsqueeze(0)   # [1, N_q, D]
-        if N_k > 0:
-            k = key_tokens.unsqueeze(0) # [1, N_k, D]
-            bias_qk = self.pos_bias(query_centroids, key_centroids)  # [N_q, N_k]
-            for block in self.blocks:
-                q = block(q, k, attn_mask_sa=bias_qq, attn_mask_ca=bias_qk)
-        else:
-            # No keys available: SA-only pass (skip the CA sub-layer)
-            for block in self.blocks:
-                q_n = block.sa_norm(q)
-                out, _ = block.sa(q_n, q_n, q_n, attn_mask=bias_qq)
-                q = q + out
-        q = q.squeeze(0)                                             # [N_q, D]
-
-        # ── Step 4. Match matrix ─────────────────────────────────────────────
-        # Concatenate the learned null key as the final "key" candidate
+        # ── Step 2b. Append null key so queries can attend to it in every CA ──
         keys_with_null = torch.cat(
             [key_tokens, self.null_key.expand(1, -1)], dim=0
-        ) if N_k > 0 else self.null_key                              # [N_k+1, D]
+        )  # [N_k+1, D]
 
-        H, D = self.num_heads, self.head_dim
-        Q = self.q_proj(q).view(N_q, H, D)
-        K = self.k_proj(keys_with_null).view(N_k + 1, H, D)
+        # ── Step 3. Interleaved SA→CA→FFN blocks ────────────────────────────
+        bias_qq = self.pos_bias(query_centroids, query_centroids)  # [N_q, N_q]
+        q = query_tokens.unsqueeze(0)   # [1, N_q, D]
+        match_logits_aux = [] if self.use_aux_loss else None
 
-        # Averaged multi-head dot-product scoring
-        attn = torch.einsum("qhd,khd->qkh", Q, K) / (D ** 0.5)     # [N_q, N_k+1, H]
-        match_logits = attn.mean(dim=-1)                             # [N_q, N_k+1]
-        return match_logits
+        k = keys_with_null.unsqueeze(0)  # [1, N_k+1, D]
+        bias_qk = self.pos_bias(query_centroids, key_centroids)  # [N_q, N_k]
+        null_bias = torch.zeros(
+            N_q, 1,
+            device=query_centroids.device,
+            dtype=bias_qk.dtype,
+        )
+        bias_qk = torch.cat([bias_qk, null_bias], dim=1)  # [N_q, N_k+1]
+        for i, block in enumerate(self.blocks):
+            q = block(q, k, attn_mask_sa=bias_qq, attn_mask_ca=bias_qk)
+            if self.use_aux_loss and i < len(self.blocks) - 1:
+                match_logits_aux.append(
+                    self._match_logits_from_q(
+                        q.squeeze(0), key_tokens, N_k,
+                        query_centroids, key_centroids,
+                    )
+                )
+        q = q.squeeze(0)
+        match_logits = self._match_logits_from_q(
+            q, key_tokens, N_k, query_centroids, key_centroids,
+        )
+
+        return match_logits, match_logits_aux
 
 
 class SAM2Base(torch.nn.Module):
@@ -559,6 +614,8 @@ class SAM2Base(torch.nn.Module):
         temporal_aux_matcher_pos_bias_sigma: float = 0.2,
         temporal_aux_matcher_pos_bias_n_bins: int = 16,
         temporal_aux_matcher_pos_bias_cutoff: float = 1.5,
+        temporal_aux_matcher_ffn_ratio: int = 4,
+        temporal_aux_matcher_use_aux_loss: bool = False,
         temporal_aux_match_query_k: int = 0,
         temporal_aux_match_w_daughter: float = 3.0,
         temporal_aux_match_w_new: float = 2.0,
@@ -666,6 +723,8 @@ class SAM2Base(torch.nn.Module):
         self._temporal_aux_matcher_pos_bias_sigma = temporal_aux_matcher_pos_bias_sigma
         self._temporal_aux_matcher_pos_bias_n_bins = temporal_aux_matcher_pos_bias_n_bins
         self._temporal_aux_matcher_pos_bias_cutoff = temporal_aux_matcher_pos_bias_cutoff
+        self._temporal_aux_matcher_ffn_ratio = temporal_aux_matcher_ffn_ratio
+        self._temporal_aux_matcher_use_aux_loss = temporal_aux_matcher_use_aux_loss
 
         self._build_sam_heads()
         self.max_cond_frames_in_attn = max_cond_frames_in_attn
@@ -777,6 +836,8 @@ class SAM2Base(torch.nn.Module):
                 pos_bias_sigma=self._temporal_aux_matcher_pos_bias_sigma,
                 pos_bias_n_bins=self._temporal_aux_matcher_pos_bias_n_bins,
                 pos_bias_cutoff=self._temporal_aux_matcher_pos_bias_cutoff,
+                ffn_ratio=self._temporal_aux_matcher_ffn_ratio,
+                use_aux_loss=self._temporal_aux_matcher_use_aux_loss,
             )
 
     def _forward_sam_heads(

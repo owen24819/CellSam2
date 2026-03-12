@@ -191,6 +191,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
         focal_alpha_obj_score=-1,
         temporal_match_temperature=1.0,
         temporal_match_bce_weight=0.0,
+        temporal_match_aux_loss_weight=0.3,
     ):
         """
         This class computes the multi-step multi-mask and IoU losses.
@@ -205,6 +206,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
             focal_alpha_obj_score: alpha for sigmoid focal loss on object scores
             temporal_match_temperature: scale matching logits (e.g. 2.0–4.0) to soften softmax.
             temporal_match_bce_weight: weight for BCE term on match logits (0 = CE only; e.g. 0.5 for CE+BCE).
+            temporal_match_aux_loss_weight: weight for auxiliary temporal match losses from intermediate blocks (0 = off).
         """
 
         super().__init__()
@@ -224,6 +226,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
         self.pred_obj_scores = pred_obj_scores
         self.temporal_match_temperature = temporal_match_temperature
         self.temporal_match_bce_weight = temporal_match_bce_weight
+        self.temporal_match_aux_loss_weight = temporal_match_aux_loss_weight
 
     def forward(self, outs_batch: List[Dict], targets_batch: torch.Tensor, target_heatmaps_batch: torch.Tensor):
         assert len(outs_batch) == len(targets_batch)
@@ -282,6 +285,14 @@ class MultiStepMultiMasksAndIous(nn.Module):
                 temperature=self.temporal_match_temperature,
                 bce_weight=self.temporal_match_bce_weight,
             )
+            if self.temporal_match_aux_loss_weight != 0 and "temporal_match_logits_aux" in outputs:
+                for aux_logits in outputs["temporal_match_logits_aux"]:
+                    loss_match = loss_match + self.temporal_match_aux_loss_weight * temporal_matching_loss(
+                        aux_logits,
+                        outputs["temporal_match_targets"],
+                        temperature=self.temporal_match_temperature,
+                        bce_weight=self.temporal_match_bce_weight,
+                    )
 
         assert len(src_masks_list) == len(ious_list)
         assert len(object_score_logits_list) == len(ious_list)

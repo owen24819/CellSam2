@@ -82,6 +82,8 @@ class SAM2AutomaticCellTracker:
                     f"aux_matching={aux_matching!r} requires a model trained with the "
                     "temporal auxiliary matching head (enable_temporal_aux_matcher=True)."
                 )
+            # Inference does not need auxiliary match logits; disable to save compute
+            model.temporal_matching_head.use_aux_loss = False
         self.model = model
         self.model.sam_mask_decoder.pred_iou_thresh = pred_iou_thresh
         self.model.sam_mask_decoder.obj_score_thresh = obj_score_thresh
@@ -2347,9 +2349,10 @@ class SAM2AutomaticCellTracker:
         key_ids = prev_aux["ids"]
 
         # Run temporal matching head
-        match_logits = self.model.temporal_matching_head.forward(
+        result = self.model.temporal_matching_head.forward(
             query_tokens, key_tokens, query_centroids, key_centroids,
         )
+        match_logits = result[0] if isinstance(result, tuple) else result
 
         # Sparsify: keep only the max per query row
         best_col = match_logits.argmax(dim=1)
