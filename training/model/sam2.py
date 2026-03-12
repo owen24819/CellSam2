@@ -424,10 +424,10 @@ class SAM2Train(SAM2Base):
                 # Keys built after PT for frame 0 only
                 key_recomputed = t0 == 0
 
-                # Detach tokens so loss_match gradients only update the
-                # temporal head — not the SAM decoder / LoRA / backbone.
+                # Detach is done inside build_matching_tokens (before the MLP) so
+                # temporal loss trains the head (including token_proj) but not backbone/SAM.
                 match_logits = self.temporal_matching_head(
-                    query_tokens.detach(), key_tokens.detach(),
+                    query_tokens, key_tokens,
                     query_centroids, key_centroids,
                 )
                 match_targets = self._build_matching_targets(

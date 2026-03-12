@@ -359,6 +359,11 @@ class TemporalMatchingHead(torch.nn.Module):
         mask_sum = mask_prob.sum(dim=(2, 3)).clamp(min=1e-6)  # [N, 1]
         roi_feat = (pix_feat * mask_prob).sum(dim=(2, 3)) / mask_sum  # [N, C]
 
+        # Detach before the MLP so temporal matching loss trains token_proj (and norms)
+        # but does not backprop through SAM decoder / backbone.
+        obj_ptr = obj_ptr.detach()
+        roi_feat = roi_feat.detach()
+
         if centroids is None:
             centroids = self.get_centroids_from_mask_logits(mask_logits, H, W)
         else:
