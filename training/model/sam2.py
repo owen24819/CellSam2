@@ -421,6 +421,19 @@ class SAM2Train(SAM2Base):
                     if query_tokens is None or query_tokens.shape[0] == 0:
                         continue
 
+                # Drop keys/queries with (0,0) centroid and their matching pair
+                filtered = self._filter_temporal_matching_by_centroid(
+                    key_tokens, key_centroids, key_ids,
+                    query_tokens, query_centroids, query_ids,
+                    child_to_parent,
+                )
+                if filtered is None:
+                    continue
+                (
+                    key_tokens, key_centroids, key_ids,
+                    query_tokens, query_centroids, query_ids,
+                ) = filtered
+
                 # Keys built after PT for frame 0 only
                 key_recomputed = t0 == 0
 
@@ -983,6 +996,74 @@ class SAM2Train(SAM2Base):
                     if d_id_val > 0:
                         child_to_parent[d_id_val] = parent_id.item()
         return child_to_parent
+
+    def _filter_temporal_matching_by_centroid(
+        self,
+        key_tokens,
+        key_centroids,
+        key_ids,
+        query_tokens,
+        query_centroids,
+        query_ids,
+        child_to_parent,
+        centroid_zero_thresh=1e-5,
+    ):
+        """Drop keys/queries with (0,0) centroid and their matching pair; use parent-daughter for divisions.
+
+        Returns:
+            Filtered (key_tokens, key_centroids, key_ids, query_tokens, query_centroids, query_ids)
+            or None if after filtering keys or queries are empty.
+        """
+        key_centroids = key_centroids.to(query_centroids.device)
+        key_bad = (
+            (key_centroids[:, 0].abs() < centroid_zero_thresh)
+            & (key_centroids[:, 1].abs() < centroid_zero_thresh)
+        )
+        query_bad = (
+            (query_centroids[:, 0].abs() < centroid_zero_thresh)
+            & (query_centroids[:, 1].abs() < centroid_zero_thresh)
+        )
+        key_id_to_idx = {key_ids[i].item(): i for i in range(len(key_ids))}
+        key_id_drop = set(key_ids[i].item() for i in range(len(key_ids)) if key_bad[i])
+        # Do not drop parent key when a daughter has bad centroid; the other daughter can still track to mother
+        key_keep = torch.tensor(
+            [key_ids[i].item() not in key_id_drop for i in range(len(key_ids))],
+            device=key_ids.device,
+            dtype=torch.bool,
+        )
+        query_keep_list = []
+        for j in range(len(query_ids)):
+            if query_bad[j]:
+                query_keep_list.append(False)
+                continue
+            qid_val = query_ids[j].item()
+            target_id = (
+                qid_val
+                if qid_val in key_id_to_idx
+                else child_to_parent.get(qid_val)
+            )
+            query_keep_list.append(
+                target_id is None or target_id not in key_id_drop
+            )
+        query_keep = torch.tensor(
+            query_keep_list, device=query_ids.device, dtype=torch.bool
+        )
+        key_tokens = key_tokens[key_keep]
+        key_centroids = key_centroids[key_keep]
+        key_ids = key_ids[key_keep]
+        query_tokens = query_tokens[query_keep]
+        query_centroids = query_centroids[query_keep]
+        query_ids = query_ids[query_keep]
+        if key_ids.numel() == 0 or query_ids.numel() == 0:
+            return None
+        return (
+            key_tokens,
+            key_centroids,
+            key_ids,
+            query_tokens,
+            query_centroids,
+            query_ids,
+        )
 
     def _build_matching_targets(self, query_ids, key_ids, child_to_parent):
         """
