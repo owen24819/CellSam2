@@ -294,36 +294,26 @@ class TemporalMatchingHead(torch.nn.Module):
         )
 
     # ──────────────────────────────────────────────────────────────────────────
-    def get_centroids_from_mask_logits(
-        self,
-        mask_logits: torch.Tensor,
-        H: int,
-        W: int,
-    ) -> torch.Tensor:
+    def get_centroids_from_mask_logits(self, mask_logits: torch.Tensor) -> torch.Tensor:
         """Compute normalised centroids [N, 2] from mask logits (same logic as data_utils get_centroids_from_mask).
 
-        Mean of foreground; if rounded mean is off-mask, use middle foreground pixel.
-        Use when centroids are not already provided (e.g. inference). During training
-        centroids often come from collation, so callers can pass them into build_matching_tokens.
+        Centroids are computed at the mask's native resolution so small cells do not vanish.
+        Result is normalised (cx, cy) in [0, 1] for use in position encoding and matching.
 
         Args:
-            mask_logits: [N, 1, H_mask, W_mask]  raw logits (sigmoided and interpolated to (H, W))
-            H, W: target spatial size for centroid grid (e.g. from pix_feat)
+            mask_logits: [N, 1, H_mask, W_mask]  raw logits (will be sigmoided at native res)
 
         Returns:
             centroids: [N, 2]  normalised (cx, cy) in [0, 1]
         """
         device = mask_logits.device
-        mask_prob = F.interpolate(
-            mask_logits.float().sigmoid(),
-            size=(H, W),
-            mode="bilinear",
-            align_corners=False,
-        )  # [N, 1, H, W]
-        mask_bin = (mask_prob.squeeze(1) > 0.5)  # [N, H, W]
+        # Use mask native resolution so we don't lose small cells (e.g. 32x32 would drop them)
+        _, _, H_mask, W_mask = mask_logits.shape
+        mask_prob = mask_logits.float().sigmoid()  # [N, 1, H_mask, W_mask]
+        mask_bin = (mask_prob.squeeze(1) > 0.5)   # [N, H_mask, W_mask]
         N = mask_bin.shape[0]
-        H_norm = max(H - 1, 1)
-        W_norm = max(W - 1, 1)
+        H_norm = max(H_mask - 1, 1)
+        W_norm = max(W_mask - 1, 1)
         centroids_list = []
         for i in range(N):
             ys, xs = torch.where(mask_bin[i])
@@ -386,7 +376,7 @@ class TemporalMatchingHead(torch.nn.Module):
         roi_feat_detach = roi_feat.detach()
 
         if centroids is None:
-            centroids = self.get_centroids_from_mask_logits(mask_logits, H, W)
+            centroids = self.get_centroids_from_mask_logits(mask_logits)
         else:
             centroids = centroids.to(device=device)
 
