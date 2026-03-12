@@ -449,6 +449,48 @@ class GradientClipper:
         )
 
 
+class PerGroupGradientClipper:
+    """
+    Clip temporal_matching_head params and all other params separately so that
+    temporal head training cannot affect backbone/rest via a shared global norm.
+    """
+
+    def __init__(
+        self,
+        max_norm: float = 1.0,
+        temporal_head_max_norm: Optional[float] = None,
+        norm_type: int = 2,
+    ):
+        assert isinstance(max_norm, (int, float)) and max_norm > 0
+        self.max_norm = float(max_norm)
+        self.temporal_head_max_norm = (
+            float(temporal_head_max_norm) if temporal_head_max_norm is not None else self.max_norm
+        )
+        self.norm_type = norm_type
+
+    def __call__(self, model: nn.Module):
+        temporal_params: List[nn.Parameter] = []
+        other_params: List[nn.Parameter] = []
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if name.startswith("temporal_matching_head."):
+                temporal_params.append(p)
+            else:
+                other_params.append(p)
+
+        if other_params:
+            nn.utils.clip_grad_norm_(
+                other_params, max_norm=self.max_norm, norm_type=self.norm_type
+            )
+        if temporal_params:
+            nn.utils.clip_grad_norm_(
+                temporal_params,
+                max_norm=self.temporal_head_max_norm,
+                norm_type=self.norm_type,
+            )
+
+
 class ValueScaler:
     def __init__(self, scheduler, mult_val: float):
         self.scheduler = scheduler

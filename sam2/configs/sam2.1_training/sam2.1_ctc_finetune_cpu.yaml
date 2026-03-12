@@ -336,8 +336,9 @@ trainer:
       _target_: torch.optim.AdamW
 
     gradient_clip:
-      _target_: training.optimizer.GradientClipper
+      _target_: training.optimizer.PerGroupGradientClipper
       max_norm: 0.1
+      temporal_head_max_norm: 0.1  # clip temporal head separately so it doesn't affect backbone
       norm_type: 2
 
     param_group_modifiers:
