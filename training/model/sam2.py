@@ -1003,7 +1003,9 @@ class SAM2Train(SAM2Base):
         frame_out has pred_masks / pred_masks_high_res in tracking_object_ids order.
         ids is the subset and order we use for keys or queries (e.g. key_ids or query_ids).
         """
-        pred_masks = frame_out.get("pred_masks_high_res") or frame_out.get("pred_masks")
+        pred_masks = frame_out.get("pred_masks_high_res")
+        if pred_masks is None:
+            pred_masks = frame_out.get("pred_masks")
         tracking_ids = frame_out.get("tracking_object_ids")
         if pred_masks is None or tracking_ids is None or ids is None:
             return None
