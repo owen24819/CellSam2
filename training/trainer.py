@@ -4,6 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import fnmatch
 import gc
 import json
 import logging
@@ -114,6 +115,8 @@ class CheckpointConf:
     initialize_after_preemption: Optional[bool] = None
     # if not None, training will be resumed from this checkpoint
     resume_from: Optional[str] = None
+    # if not None, load only temporal_matching_head.* from this checkpoint (after base/resume load)
+    load_temporal_head_from: Optional[str] = None
 
     def infer_missing(self):
         if self.initialize_after_preemption is None:
@@ -435,7 +438,19 @@ class Trainer:
                         state_dict=checkpoint["model"],
                         ignore_missing_keys=self.checkpoint_conf.skip_saving_parameters,
                     )
-        
+
+        # Optionally load temporal head from a second checkpoint (e.g. temporal-only .pt)
+        if self.checkpoint_conf.load_temporal_head_from:
+            path = self.checkpoint_conf.load_temporal_head_from
+            assert os.path.exists(path), f"load_temporal_head_from checkpoint {path} does not exist!"
+            logging.info(f"Loading temporal_matching_head from {path}")
+            with g_pathmgr.open(path, "rb") as f:
+                ckpt = torch.load(f, map_location="cpu")
+            sd = ckpt.get("model", ckpt)
+            temporal_sd = {k: v for k, v in sd.items() if fnmatch.fnmatch(k, "temporal_matching_head.*")}
+            if temporal_sd:
+                load_state_dict_into_model(model=self.model, state_dict=temporal_sd, strict=False)
+
         print_model_summary(self.model)
 
     def _init_model_state(self):
