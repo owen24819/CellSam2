@@ -407,7 +407,8 @@ trainer:
       temporal_match_temperature: 2.0
       temporal_match_bce_weight: 0.5  # BCE on one-hot (push non-preds to 0); 0 = CE only
       temporal_match_aux_loss_weight: 0.3  # deep-supervision weight for intermediate block match logits
-
+      temporal_only: ${scratch.freeze_non_temporal}  # skip mask/dice/iou when training only temporal head
+      
   distributed:
     backend: file # nccl for GPU
     find_unused_parameters: False # True for GPU

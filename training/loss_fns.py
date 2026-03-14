@@ -192,6 +192,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
         temporal_match_temperature=1.0,
         temporal_match_bce_weight=0.0,
         temporal_match_aux_loss_weight=0.3,
+        temporal_only=False,
     ):
         """
         This class computes the multi-step multi-mask and IoU losses.
@@ -227,6 +228,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
         self.temporal_match_temperature = temporal_match_temperature
         self.temporal_match_bce_weight = temporal_match_bce_weight
         self.temporal_match_aux_loss_weight = temporal_match_aux_loss_weight
+        self.temporal_only = temporal_only
 
     def forward(self, outs_batch: List[Dict], targets_batch: torch.Tensor, target_heatmaps_batch: torch.Tensor):
         assert len(outs_batch) == len(targets_batch)
@@ -256,6 +258,28 @@ class MultiStepMultiMasksAndIous(nn.Module):
         If `supervise_all_iou` is True, we backpropagate ious losses for all predicted masks.
         """
 
+        # Temporal matching loss (if present for this frame)
+        loss_match = torch.tensor(0.0, device=targets.device)
+        if "temporal_match_logits" in outputs:
+            loss_match = temporal_matching_loss(
+                outputs["temporal_match_logits"],
+                outputs["temporal_match_targets"],
+                temperature=self.temporal_match_temperature,
+                bce_weight=self.temporal_match_bce_weight,
+            )
+            if self.temporal_match_aux_loss_weight != 0 and "temporal_match_logits_aux" in outputs:
+                for aux_logits in outputs["temporal_match_logits_aux"]:
+                    loss_match = loss_match + self.temporal_match_aux_loss_weight * temporal_matching_loss(
+                        aux_logits,
+                        outputs["temporal_match_targets"],
+                        temperature=self.temporal_match_temperature,
+                        bce_weight=self.temporal_match_bce_weight,
+                    )
+
+        if self.temporal_only:
+            core = loss_match * self.weight_dict.get("loss_match", 1)
+            return {CORE_LOSS_KEY: core, "loss_match": loss_match}
+
         target_masks = targets.unsqueeze(1).float()
         assert target_masks.dim() == 4  # [N, 1, H, W]
         src_masks_list = outputs["multistep_pred_masks_high_res"]
@@ -275,24 +299,6 @@ class MultiStepMultiMasksAndIous(nn.Module):
             heatmap_predictions,
             target_heatmaps
         )
-
-        # Temporal matching loss (if present for this frame)
-        loss_match = torch.tensor(0.0, device=target_masks.device)
-        if "temporal_match_logits" in outputs:
-            loss_match = temporal_matching_loss(
-                outputs["temporal_match_logits"],
-                outputs["temporal_match_targets"],
-                temperature=self.temporal_match_temperature,
-                bce_weight=self.temporal_match_bce_weight,
-            )
-            if self.temporal_match_aux_loss_weight != 0 and "temporal_match_logits_aux" in outputs:
-                for aux_logits in outputs["temporal_match_logits_aux"]:
-                    loss_match = loss_match + self.temporal_match_aux_loss_weight * temporal_matching_loss(
-                        aux_logits,
-                        outputs["temporal_match_targets"],
-                        temperature=self.temporal_match_temperature,
-                        bce_weight=self.temporal_match_bce_weight,
-                    )
 
         assert len(src_masks_list) == len(ious_list)
         assert len(object_score_logits_list) == len(ious_list)

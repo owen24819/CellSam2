@@ -705,6 +705,9 @@ class Trainer:
         loss_mts = OrderedDict(
             [(name, AverageMeter(name, self.device, ":.2e")) for name in loss_names]
         )
+        if self.freeze_non_temporal:
+            match_name = f"Losses/{curr_phases[0]}_match"
+            loss_mts = OrderedDict([(match_name, next(iter(loss_mts.values())))])
         extra_loss_mts = {}
 
         for model in curr_models:
@@ -751,12 +754,14 @@ class Trainer:
                         assert len(loss_dict) == 1
                         loss_key, loss = loss_dict.popitem()
 
-                        loss_mts[loss_key].update(loss.item(), batch_size)
-
-                        for k, v in extra_losses.items():
-                            if k not in extra_loss_mts:
-                                extra_loss_mts[k] = AverageMeter(k, self.device, ":.2e")
-                            extra_loss_mts[k].update(v.item(), batch_size)
+                        # When freeze_non_temporal, loss = match only; use "match" key
+                        mt_key = f"Losses/{phase}_match" if self.freeze_non_temporal else loss_key
+                        loss_mts[mt_key].update(loss.item(), batch_size)
+                        if not self.freeze_non_temporal:
+                            for k, v in extra_losses.items():
+                                if k not in extra_loss_mts:
+                                    extra_loss_mts[k] = AverageMeter(k, self.device, ":.2e")
+                                extra_loss_mts[k].update(v.item(), batch_size)
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -851,11 +856,10 @@ class Trainer:
         loss_mts = OrderedDict(
             [(name, AverageMeter(name, self.device, ":.2e")) for name in loss_names]
         )
-        # When training only the temporal head, rename the console display so
-        # the progress bar shows loss_match instead of the noisy total loss.
+        # When training only temporal head, use "match" for cleaner display (avoid all_loss = match redundancy)
         if self.freeze_non_temporal:
-            for meter in loss_mts.values():
-                meter.name = meter.name.replace("_loss", "_loss_match")
+            match_name = f"Losses/{phase}_match"
+            loss_mts = OrderedDict([(match_name, next(iter(loss_mts.values())))])
         extra_loss_mts = {}
 
         progress = ProgressMeter(
@@ -1058,20 +1062,16 @@ class Trainer:
                 )
 
         self.scaler.scale(loss).backward()
-        # In freeze_non_temporal mode the meter was renamed to _loss_match,
-        # so feed it the raw match loss rather than the inflated total.
-        if self.freeze_non_temporal:
-            match_key = loss_key + "_match"
-            if match_key in extra_losses:
-                loss_mts[loss_key].update(extra_losses[match_key].item(), batch_size)
-        else:
-            loss_mts[loss_key].update(loss.item(), batch_size)
-        for extra_loss_key, extra_loss in extra_losses.items():
-            if extra_loss_key not in extra_loss_mts:
-                extra_loss_mts[extra_loss_key] = AverageMeter(
-                    extra_loss_key, self.device, ":.2e"
-                )
-            extra_loss_mts[extra_loss_key].update(extra_loss.item(), batch_size)
+        # When freeze_non_temporal, loss = match only; use "match" key for display
+        mt_key = f"Losses/{phase}_match" if self.freeze_non_temporal else loss_key
+        loss_mts[mt_key].update(loss.item(), batch_size)
+        if not self.freeze_non_temporal:
+            for extra_loss_key, extra_loss in extra_losses.items():
+                if extra_loss_key not in extra_loss_mts:
+                    extra_loss_mts[extra_loss_key] = AverageMeter(
+                        extra_loss_key, self.device, ":.2e"
+                    )
+                extra_loss_mts[extra_loss_key].update(extra_loss.item(), batch_size)
         return True
 
     def _log_meters_and_save_best_ckpts(self, phases: List[str]):
