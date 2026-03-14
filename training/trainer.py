@@ -820,7 +820,7 @@ class Trainer:
         for phase in curr_phases:
             out_dict.update(self._get_trainer_state(phase))
         self._reset_meters(curr_phases)
-        logging.info(f"Meters: {out_dict}")
+        logging.info(f"Losses and meters: {out_dict}")
 
         # Log final validation metrics to wandb
         if self.wandb is not None and self.distributed_rank == 0:
