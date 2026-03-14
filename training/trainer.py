@@ -513,6 +513,24 @@ class Trainer:
     def is_intermediate_val_epoch(self, epoch):
         return epoch % self.val_epoch_freq == 0 and epoch < self.max_epochs - 1
 
+    def _get_last_val_epoch(self) -> int:
+        """Return the last epoch for which validation was run, or -1 if none."""
+        path = os.path.join(self.logging_conf.log_dir, "val_stats.json")
+        if not g_pathmgr.exists(path):
+            return -1
+        last = -1
+        try:
+            with g_pathmgr.open(path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    d = json.loads(line)
+                    last = max(last, d.get("Trainer/epoch", -1))
+        except (json.JSONDecodeError, OSError) as e:
+            logging.warning(f"Could not read val_stats.json: {e}")
+        return int(last)
+
     def _step(
         self,
         batch: BatchedVideoDatapoint,
@@ -620,9 +638,12 @@ class Trainer:
         if self.mode == "train":
             if self.epoch > 0:
                 logging.info(f"Resuming training from epoch: {self.epoch}")
-                # resuming from a checkpoint
-                if self.is_intermediate_val_epoch(self.epoch - 1):
-                    logging.info("Running previous val epoch")
+                prev_epoch = self.epoch - 1
+                if (
+                    self.is_intermediate_val_epoch(prev_epoch)
+                    and self._get_last_val_epoch() < prev_epoch
+                ):
+                    logging.info("Running previous val epoch (not yet in val_stats.json)")
                     self.epoch -= 1
                     self.run_val()
                     self.epoch += 1
