@@ -89,8 +89,8 @@ class CTCSegmentLoader:
         top, left, bottom, right = self.crop_region
         crop_h = bottom - top
         crop_w = right - left
-        max_shift_y = min(50, int(round(0.05 * crop_h)))
-        max_shift_x = min(50, int(round(0.05 * crop_w)))
+        max_shift_y = int(round(0.08 * crop_h))
+        max_shift_x = int(round(0.08 * crop_w))
         shift_y = random.randint(-max_shift_y, max_shift_y)
         shift_x = random.randint(-max_shift_x, max_shift_x)
         new_top = min(max(0, top + shift_y), max(0, self.full_h - crop_h))
