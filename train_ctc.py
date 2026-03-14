@@ -26,26 +26,21 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 config_name = "sam2.1_ctc_finetune" if device == "cuda" else "sam2.1_ctc_finetune_cpu"
 
 config_path = "sam2/configs/sam2.1_training"
-model_name = "sam2.1_ctc_segmentationv2"
 
 register_omegaconf_resolvers()
 
 @hydra.main(version_base=None, config_path=config_path, config_name=config_name)
 def main(cfg: DictConfig) -> None:
-    # Use the global model_name variable instead
-    global model_name
 
-    # Determine log dir: launcher.experiment_log_dir, launcher.model_name, or default model_name
-    if cfg.launcher.experiment_log_dir is not None:
-        model_name = os.path.basename(cfg.launcher.experiment_log_dir.rstrip("/"))
-    elif cfg.launcher.get("model_name") is not None:
-        model_name = str(cfg.launcher.model_name)
-        cfg.launcher.experiment_log_dir = os.path.join(
-            os.getcwd(), "sam2_logs", model_name
-        )
+    log_dir = cfg.launcher.get("experiment_log_dir")
+    model_name = cfg.get("model_name") or cfg.launcher.get("model_name")
+    if log_dir:
+        model_name = os.path.basename(log_dir.rstrip("/"))
+    elif model_name:
+        cfg.launcher.experiment_log_dir = os.path.join(os.getcwd(), "sam2_logs", model_name)
     else:
-        cfg.launcher.experiment_log_dir = os.path.join(
-            os.getcwd(), "sam2_logs", model_name
+        raise AssertionError(
+            "Provide either model_name=my_run or launcher.experiment_log_dir=/path/to/logs"
         )
 
     # Optional: set scratch.use_wandb=true and add wandb.project/group in config to log to W&B

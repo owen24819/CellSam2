@@ -9,7 +9,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -51,19 +51,29 @@ class VOSRawDataset:
     def get_video(self, idx):
         raise NotImplementedError()
 
+
 class CTCRawDataset(VOSRawDataset):
     def __init__(self,
-                 train_dir, 
-                 num_frames,
+                 train_dir=None,
+                 num_frames=None,
                  file_list_txt=None,
                  excluded_videos_list_txt=None,
                  truncate_video=-1,
                  sample_rate=1,
                  target_size=512,
                  resize_threshold=600,
-                 training=True):
-        
-        self.train_dirs = self._resolve_train_dirs(train_dir)
+                 training=True,
+                 max_samples_per_epoch_per_dir=None,
+                 train_sources=None,
+                 split="train"):
+        if train_sources is not None:
+            self.train_dirs, self.max_samples_per_epoch_per_dir = self._resolve_train_sources(
+                train_sources, split
+            )
+        else:
+            assert train_dir is not None, "Provide either train_dir or train_sources"
+            self.train_dirs = self._resolve_train_dirs(train_dir)
+            self.max_samples_per_epoch_per_dir = max_samples_per_epoch_per_dir
         self.num_frames = num_frames
         self.truncate_video = truncate_video
         self.sample_rate = sample_rate
@@ -86,7 +96,7 @@ class CTCRawDataset(VOSRawDataset):
             excluded_files = []
 
         self.video_entries = []
-        for train_dir_path in self.train_dirs:
+        for source_id, train_dir_path in enumerate(self.train_dirs):
             img_folders = list(Path(train_dir_path).glob("[0-9][0-9]"))
             if subset is None:
                 video_names = [img_folder.name for img_folder in img_folders]
@@ -101,22 +111,81 @@ class CTCRawDataset(VOSRawDataset):
                         "train_dir": Path(train_dir_path),
                         "video_name": video_name,
                         "video_id": len(self.video_entries),
+                        "source_id": source_id,
                     }
                 )
 
-        # Build index of (video_name, start_frame) pairs
+        # Pre-scan TRA/SEG per video for frame_index and SEG-only single-frame mode
+        for entry in self.video_entries:
+            gt_root = entry["train_dir"] / (entry["video_name"] + "_GT")
+            tra_path = gt_root / "TRA"
+            seg_path = gt_root / "SEG"
+            has_tra = (tra_path / "man_track.txt").exists()
+            has_seg = seg_path.exists()
+            if has_tra:
+                entry["effective_num_frames"] = self.num_frames
+            elif has_seg:
+                entry["effective_num_frames"] = 1  # SEG-only: single frame
+            else:
+                entry["effective_num_frames"] = 0  # Skip: neither TRA nor SEG
+
+        # Build index of (entry_idx, start_idx) pairs
         self.frame_index = []
         for entry_idx, entry in enumerate(self.video_entries):
-            # For initialization, we need all frames to know how many starting points we have
             all_frames = self.get_all_frames(entry_idx)
-            
-            # For each possible start frame that allows num_frames sequence
-            max_start_idx = len(all_frames) - self.num_frames + 1 if self.num_frames > 1 else len(all_frames)
-            for i in range(0, max_start_idx):
+            eff_nf = entry["effective_num_frames"]
+            if eff_nf == 0:
+                continue
+            max_start_idx = len(all_frames) - eff_nf + 1 if eff_nf > 1 else len(all_frames)
+            for i in range(max_start_idx):
                 self.frame_index.append((entry_idx, i))
 
+        self._epoch_index = None
+        # Only apply caps if at least one source has a cap; [None, None] means no capping
+        caps = self.max_samples_per_epoch_per_dir
+        if caps is not None and len(caps) == len(self.train_dirs) and any(c is not None for c in caps):
+            self._apply_caps(0)  # train and val both get initial cap at init; val stays fixed, train resamples each set_epoch
+
+    def _apply_caps(self, epoch: int) -> None:
+        """Build _epoch_index by capping samples per source (train_dir).
+        For training=True uses epoch as seed (new sample each epoch). For val (training=False) uses fixed seed 0 so val set is constant.
+        """
+        caps = self.max_samples_per_epoch_per_dir
+        n_dirs = len(self.train_dirs)
+        if caps is None or len(caps) != n_dirs:
+            self._epoch_index = None
+            return
+        by_source = [[] for _ in range(n_dirs)]
+        for idx, (entry_idx, start_idx) in enumerate(self.frame_index):
+            sid = self.video_entries[entry_idx]["source_id"]
+            by_source[sid].append(idx)
+        # Val: fixed seed so the same indices every time; train: epoch seed so different sample each epoch
+        seed = 0 if not self.training else epoch
+        rng = np.random.default_rng(seed)
+        self._epoch_index = []
+        for sid in range(n_dirs):
+            indices = np.array(by_source[sid], dtype=np.int64)
+            cap = caps[sid]
+            if cap is None or cap >= len(indices):
+                chosen = indices
+            else:
+                chosen = rng.choice(indices, size=cap, replace=False)
+            for i in np.sort(chosen):
+                self._epoch_index.append(self.frame_index[i])
+        total = sum(len(x) for x in by_source)
+        capped = len(self._epoch_index)
+        if capped != total:
+            print(f"CTCRawDataset: {'val' if not self.training else f'epoch {epoch}'} capped {total} -> {capped} samples")
+
+    def set_epoch(self, epoch: int) -> None:
+        """Rebuild per-epoch index when using caps. No-op for val so val set stays constant."""
+        caps = self.max_samples_per_epoch_per_dir
+        if caps is not None and len(caps) == len(self.train_dirs) and any(c is not None for c in caps) and self.training:
+            self._apply_caps(epoch)
+
     def __len__(self):
-        return len(self.frame_index)
+        index = self._epoch_index if self._epoch_index is not None else self.frame_index
+        return len(index)
 
     def get_all_frames(self, entry_idx):
         """Get a sampled subset of frames from a video.
@@ -136,14 +205,16 @@ class CTCRawDataset(VOSRawDataset):
 
     def get_video(self, idx):
         """Get a video starting from the specified frame index"""
-        entry_idx, start_idx = self.frame_index[idx]
+        index = self._epoch_index if self._epoch_index is not None else self.frame_index
+        entry_idx, start_idx = index[idx]
         entry = self.video_entries[entry_idx]
         train_dir = entry["train_dir"]
         video_name = entry["video_name"]
         
-        # Get just the frames we need
+        # Get just the frames we need (use effective_num_frames for SEG-only single-frame)
         all_frames = self.get_all_frames(entry_idx)
-        selected_frames = all_frames[start_idx:start_idx + self.num_frames]
+        eff_nf = entry["effective_num_frames"]
+        selected_frames = all_frames[start_idx : start_idx + eff_nf]
         
         # Create frames list
         frames = []
@@ -151,9 +222,13 @@ class CTCRawDataset(VOSRawDataset):
             fid = int(re.findall(r'\d+', fpath.stem)[0])
             frames.append(VOSFrame(fid, image_path=fpath))
             
-        # Load man_track if available
-        if (train_dir / (video_name + "_GT") / "TRA" / "man_track.txt").exists():
-            man_track = np.loadtxt(train_dir / (video_name + "_GT") / "TRA" / "man_track.txt", dtype=np.int16)
+        gt_root = train_dir / (video_name + "_GT")
+        tra_path = gt_root / "TRA"
+        seg_path = gt_root / "SEG"
+
+        # Load man_track if TRA exists; otherwise SEG-only (no tracking)
+        if (tra_path / "man_track.txt").exists():
+            man_track = np.loadtxt(tra_path / "man_track.txt", dtype=np.int16)
             # Step 1: Remove parent IDs that appear only once and are positive
             parent_ids, counts = np.unique(man_track[:, -1], return_counts=True)
             single_use_parents = parent_ids[(counts == 1) & (parent_ids > 0)]
@@ -178,15 +253,21 @@ class CTCRawDataset(VOSRawDataset):
                 if dau_entry_frame != parent_exit_frame + 1:
                     man_track[man_track[:, -1] == parent_id, -1] = 0
 
-        else:
+            video_mask_root = tra_path
+            mask_prefix = "man_track"
+        elif seg_path.exists():
             man_track = None
-            
+            video_mask_root = seg_path
+            mask_prefix = "man_seg"
+        else:
+            raise FileNotFoundError(
+                f"Neither TRA nor SEG found for {video_name} in {gt_root}"
+            )
+
         video = VOSVideo(video_name, entry["video_id"], frames, man_track)
-        
-        video_mask_root = train_dir / (video_name + "_GT") / "TRA"
-        first_frame_num = re.findall(r'\d+',selected_frames[0].stem)[0]
-        # Get first mask path (GT) for crop region determination
-        first_mask_path = video_mask_root / ("man_track" + first_frame_num + ".tif")
+
+        first_frame_num = re.findall(r'\d+', selected_frames[0].stem)[0]
+        first_mask_path = video_mask_root / (mask_prefix + first_frame_num + ".tif")
         segment_loader = CTCSegmentLoader(
             video_mask_root, 
             first_mask_path, 
@@ -198,29 +279,24 @@ class CTCRawDataset(VOSRawDataset):
         return video, segment_loader
 
     def _resolve_train_dirs(self, train_dir):
-        if isinstance(train_dir, ListConfig):
-            return [Path(p) for p in train_dir]
-        if isinstance(train_dir, (list, tuple)):
+        """Resolve train_dir to a list of paths. Accepts a single path or a list."""
+        if isinstance(train_dir, (ListConfig, list, tuple)):
             return [Path(p) for p in train_dir]
         train_dir_path = Path(train_dir)
-        if train_dir_path.exists():
-            return [train_dir_path]
-        parts = train_dir_path.parts
-        if "all" not in parts:
+        if not train_dir_path.exists():
             raise FileNotFoundError(f"train_dir not found: {train_dir_path}")
-        all_index = parts.index("all")
-        base_root = Path(*parts[:all_index])
-        suffix = Path(*parts[all_index + 1 :])
-        train_dirs = []
-        for child in base_root.iterdir():
-            candidate = child / suffix
-            if candidate.is_dir():
-                train_dirs.append(candidate)
-        if not train_dirs:
-            raise FileNotFoundError(
-                f"No dataset directories found under {base_root} with suffix {suffix}"
-            )
-        return sorted(train_dirs)
+        return [train_dir_path]
+
+    def _resolve_train_sources(self, train_sources: List[Dict[str, Any]], split: str) -> tuple:
+        """Build (train_dirs, max_samples_per_epoch_per_dir) from train_sources.
+        Each source: data_dir; cap_train / max_per_epoch for train split; cap_val for val split.
+        """
+        dirs = [Path(s["data_dir"]) / split / "CTC" for s in train_sources]
+        if split == "train":
+            caps = [s.get("max_per_epoch_train") or s.get("max_per_epoch") for s in train_sources]
+        else:
+            caps = [s.get("max_per_epoch_val") for s in train_sources]
+        return dirs, caps
 
 class PNGRawDataset(VOSRawDataset):
     def __init__(

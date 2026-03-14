@@ -38,6 +38,12 @@ class VOSDataset(VisionDataset):
         self.curr_epoch = 0  # Used in case data loader behavior changes across epochs
         self.always_target = always_target
 
+    def set_epoch(self, epoch: int) -> None:
+        """Propagate epoch to video_dataset (e.g. for CTCRawDataset per-epoch caps)."""
+        self.curr_epoch = epoch
+        if hasattr(self.video_dataset, "set_epoch"):
+            self.video_dataset.set_epoch(epoch)
+
     def _get_datapoint(self, idx):
 
         if isinstance(idx, torch.Tensor):

@@ -1,0 +1,41 @@
+# @package _global_
+# Multi-dataset training. Use: python train_ctc.py --config-name=sam2.1_ctc_finetune_multi
+# (Extends GPU config; for CPU debugging use same command with CPU machine or override as needed.)
+
+defaults:
+  - sam2.1_ctc_finetune
+
+# List of dataset roots (separate from single-dataset "dataset" in base config). Omit caps to use all.
+multi_datasets:
+  - data_dir: ../data/moma
+    max_per_epoch: 1000
+    max_per_epoch_val: 200
+  - data_dir: ../data/2D
+  - data_dir: ../data/DynamicNuclearNet
+  - data_dir: ../data/MCLI
+  - data_dir: ../data/yeast
+
+trainer:
+  data:
+    train:
+      dataset:
+        video_dataset:
+          _target_: training.dataset.vos_raw_dataset.CTCRawDataset
+          train_sources: ${multi_datasets}
+          split: train
+          num_frames: ${scratch.num_frames}
+          file_list_txt: null
+          target_size: ${scratch.resolution}
+          resize_threshold: ${scratch.resize_threshold}
+          training: true
+    val:
+      dataset:
+        video_dataset:
+          _target_: training.dataset.vos_raw_dataset.CTCRawDataset
+          train_sources: ${multi_datasets}
+          split: val
+          num_frames: ${scratch.num_frames}
+          file_list_txt: null
+          target_size: ${scratch.resolution}
+          resize_threshold: ${scratch.resize_threshold}
+          training: false
