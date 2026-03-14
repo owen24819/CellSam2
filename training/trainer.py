@@ -46,7 +46,6 @@ from training.utils.train_utils import (
     get_resume_checkpoint,
     human_readable_time,
     is_dist_avail_and_initialized,
-    log_env_variables,
     makedir,
     set_seeds,
     setup_distributed_backend,
@@ -217,7 +216,6 @@ class Trainer:
         )
 
         set_seeds(seed_value, self.max_epochs, self.distributed_rank)
-        log_env_variables()
 
         # assert (
         #     is_dist_avail_and_initialized()
@@ -1252,6 +1250,12 @@ class Trainer:
                 f"Frozen {n_frozen:,} params; training temporal head only ({n_temporal:,} params)"
             )
 
+        # Log trainable params after all freezing (so it reflects final state, e.g. when freeze_non_temporal=True)
+        trainable = [(n, p) for n, p in self.model.named_parameters() if p.requires_grad]
+        total_trainable = sum(p.numel() for _, p in trainable)
+        logging.info(f"Trainable parameters ({len(trainable)}, total {total_trainable:,}):")
+        for name, param in trainable:
+            logging.info(f"Trainable:  {name} | shape: {tuple(param.shape)} | params: {param.numel():,}")
 
         self.loss = None
         if self.loss_conf:
@@ -1312,7 +1316,7 @@ class Trainer:
         return core_loss
 
 
-def print_model_summary(model: torch.nn.Module, log_dir: str = ""):
+def print_model_summary(model: torch.nn.Module, log_dir: str = "", display_full_model: bool = False):
     """
     Prints the model and the number of parameters in the model.
     # Multiple packages provide this info in a nice table format
@@ -1331,7 +1335,8 @@ def print_model_summary(model: torch.nn.Module, log_dir: str = ""):
     non_trainable_parameters = total_parameters - trainable_parameters
     logging.info("==" * 10)
     logging.info(f"Summary for model {type(model)}")
-    logging.info(f"Model is {model}")
+    if display_full_model:
+        logging.info(f"Model is {model}")
     logging.info(f"\tTotal parameters {get_human_readable_count(total_parameters)}")
     logging.info(
         f"\tTrainable parameters {get_human_readable_count(trainable_parameters)}"

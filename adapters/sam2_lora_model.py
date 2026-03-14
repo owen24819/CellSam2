@@ -148,8 +148,6 @@ class SAM2LoRAModel:
                 if any(pattern in name.lower() for pattern in trainable_patterns):
                     param.requires_grad = True
 
-            self.print_trainable()
-
     def save_adapters(self, save_dir):
 
         """Save the LoRA adapters to a file."""
@@ -165,15 +163,6 @@ class SAM2LoRAModel:
         save_path = save_dir / "lora_adapters.pth"
         torch.save(lora_state_dict, save_path)
         print(f"✅ Saved LoRA adapters to: {save_path}")
-
-    def print_trainable(self):
-
-        """Print the trainable LoRA parameters."""
-
-        print("\n🔍 Trainable LoRA parameters:")
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                print(f"Trainable:  {name} | shape: {tuple(param.shape)}")
 
     def load_adapters(self, adapter_path):
 

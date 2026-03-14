@@ -1,13 +1,25 @@
 import os
 
-import hydra
-import torch
-from hydra.utils import instantiate
-from iopath.common.file_io import g_pathmgr
-from omegaconf import DictConfig, OmegaConf
+# Suppress TensorFlow/XLA/cuDNN/cuBLAS/cuFFT registration noise (must be before TF/JAX imports)
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("GLOG_minloglevel", "3")
 
-from training.utils.train_utils import makedir, register_omegaconf_resolvers
-from training.utils.wandb_utils import WANDB_AVAILABLE, init_wandb, wandb
+import logging
+
+logging.getLogger("numexpr").setLevel(logging.WARNING)
+
+# Env vars above must run before imports that may load TF/JAX
+import hydra  # noqa: E402
+import torch  # noqa: E402
+from hydra.utils import instantiate  # noqa: E402
+from iopath.common.file_io import g_pathmgr  # noqa: E402
+from omegaconf import DictConfig, OmegaConf  # noqa: E402
+
+from training.utils.train_utils import (  # noqa: E402
+    makedir,
+    register_omegaconf_resolvers,
+)
+from training.utils.wandb_utils import WANDB_AVAILABLE, init_wandb, wandb  # noqa: E402
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
