@@ -8,11 +8,10 @@ scratch:
   num_frames: 4
   max_num_objects: 80
   max_num_bkgd_objects: 40
-  base_lr: 5.0e-6
-  vision_lr: 3.0e-06
   num_epochs: 10
-  use_lora: True 
+  use_lora: True
   lora_lr: 1.0e-3
+  temporal_lr: 1.0e-4  # temporal matching head (only if use_temporal_matching: true)
   use_wandb: False
   freeze_encoder: False
   freeze_non_temporal: False  # Set True to train only the temporal_matching_head (phase-2 training)
@@ -88,10 +87,14 @@ trainer:
   debug_viz: true  # Set to true to enable debug visualization of predictions vs ground truth
   debug_viz_interval: 5.0  # Percentage interval (5.0 = every 5% of dataset)
 
+  # Learning rates (backbone/decoder, rarely tuned)
+  base_lr: 5.0e-6
+  vision_lr: 3.0e-06
+
   # Temporal matching head (enabled via scratch.use_temporal_matching)
   temporal_matching:
     optimizer:
-      lr: 1.0e-4
+      lr: ${scratch.temporal_lr}
       warmup_fraction: 0.1  # fraction of total steps for linear LR warmup
     head:
       _target_: sam2.modeling.temporal_matching.TemporalMatchingHead
@@ -368,12 +371,12 @@ trainer:
       lr_finetune:
         - scheduler:
             _target_: fvcore.common.param_scheduler.CosineParamScheduler
-            start_value: ${scratch.base_lr}
-            end_value: ${divide:${scratch.base_lr},10}
+            start_value: ${trainer.base_lr}
+            end_value: ${divide:${trainer.base_lr},10}
         - scheduler:
             _target_: fvcore.common.param_scheduler.CosineParamScheduler
-            start_value: ${scratch.vision_lr}
-            end_value: ${divide:${scratch.vision_lr},10}
+            start_value: ${trainer.vision_lr}
+            end_value: ${divide:${trainer.vision_lr},10}
           param_names:
             - 'image_encoder.*'
       lr_LoRA:
