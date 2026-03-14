@@ -7,12 +7,7 @@ from iopath.common.file_io import g_pathmgr
 from omegaconf import DictConfig, OmegaConf
 
 from training.utils.train_utils import makedir, register_omegaconf_resolvers
-
-try:
-    import wandb
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
+from training.utils.wandb_utils import WANDB_AVAILABLE, init_wandb, wandb
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -38,38 +33,12 @@ def main(cfg: DictConfig) -> None:
     else:
         model_name = cfg.launcher.experiment_log_dir.split("/")[-1]
 
-    # Initialize wandb if available and enabled in config
-    use_wandb = cfg.scratch.get('use_wandb', False)  # Default to False if not specified
-    wandb_config = cfg.get('wandb', {})
-    
+    # Optional: set scratch.use_wandb=true and add wandb.project/group in config to log to W&B
+    use_wandb = cfg.scratch.get('use_wandb', False) and WANDB_AVAILABLE
+    if cfg.scratch.get('use_wandb', False) and not WANDB_AVAILABLE:
+        print("WandB requested but not installed. pip install wandb to enable.")
     if use_wandb:
-        if not WANDB_AVAILABLE:
-            print("WandB logging requested but wandb package is not installed. "
-                  "Install with 'pip install wandb' to enable logging.")
-        else:
-            wandb_run_id = None
-            run_id_path = os.path.join(cfg.launcher.experiment_log_dir, "wandb_run_id.txt")
-            if os.path.exists(run_id_path):
-                with open(run_id_path, "r") as f:
-                    wandb_run_id = f.read().strip()
-
-            wandb_run = wandb.init(
-                project=wandb_config.get('project', 'CellSAM2'),
-                name=model_name,
-                group=wandb_config.get('group', None),
-                config=OmegaConf.to_container(cfg, resolve=True),
-                id=wandb_run_id,
-                resume="allow" if wandb_run_id else None,
-            )
-            
-            # Save run ID for future resuming
-            makedir(os.path.dirname(run_id_path))
-            with open(run_id_path, "w") as f:
-                f.write(wandb_run.id)
-
-            # 🛠️ Define how different metrics are tracked
-            wandb.define_metric("train/*", step_metric="train_step")
-            wandb.define_metric("val/*", step_metric="val_step")
+        init_wandb(cfg, model_name, cfg.launcher.experiment_log_dir)
 
     print("###################### Train App Config ####################")
     print(OmegaConf.to_yaml(cfg))
@@ -99,15 +68,10 @@ def main(cfg: DictConfig) -> None:
     os.environ["MASTER_PORT"] = "12355"
 
     trainer = instantiate(cfg.trainer, _recursive_=False)
-    
-    # Add wandb callback if available and enabled
-    if WANDB_AVAILABLE and use_wandb:
+    if use_wandb:
         trainer.wandb = wandb
-    
     trainer.run()
-
-    # Close wandb run if active
-    if WANDB_AVAILABLE and use_wandb:
+    if use_wandb:
         wandb.finish()
 
 if __name__ == "__main__":
