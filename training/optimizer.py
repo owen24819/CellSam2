@@ -334,6 +334,7 @@ def construct_optimizer(
     param_group_modifiers_conf: List[Callable] = None,
     use_lora=False,
     freeze_encoder=False,
+    use_temporal_head=True,
     param_allowlist: Optional[Set[str]] = None,
     validate_param_groups=True,
 ) -> Optimizer:
@@ -385,6 +386,15 @@ def construct_optimizer(
     if use_lora:
         options_conf.pop('lr_finetune', None)
         options_conf['lr'] = options_conf.pop('lr_LoRA')
+        # Explicitly drop temporal_matching_head scheduler when model has no temporal head
+        if not use_temporal_head and options_conf.get('lr'):
+            def param_names_list(c):
+                return list(c.get('param_names') or [])
+            options_conf['lr'] = [
+                c for c in options_conf['lr']
+                if 'temporal_matching_head.*' not in param_names_list(c)
+            ]
+            logging.info("Optimizer: temporal head disabled — excluded temporal_matching_head.* scheduler")
     else:
         options_conf.pop('lr_LoRA', None)
         options_conf['lr'] = options_conf.pop('lr_finetune')

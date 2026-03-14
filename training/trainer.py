@@ -1260,6 +1260,8 @@ class Trainer:
         logging.info("Finished setting up components: model,loss, optim, meters etc.")
 
     def _construct_optimizers(self):
+        model_core = unwrap_ddp_if_wrapped(self.model)
+        use_temporal_head = hasattr(model_core, "temporal_matching_head")
         self.optim = construct_optimizer(
             self.model,
             self.optim_conf.optimizer,
@@ -1267,6 +1269,7 @@ class Trainer:
             self.optim_conf.param_group_modifiers,
             self.use_lora,
             self.freeze_encoder,
+            use_temporal_head=use_temporal_head,
         )
 
     def _log_to_wandb(self, logs: Dict[str, Any]) -> None:
