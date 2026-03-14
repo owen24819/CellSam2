@@ -21,13 +21,10 @@ from training.utils.train_utils import (  # noqa: E402
 )
 from training.utils.wandb_utils import WANDB_AVAILABLE, init_wandb, wandb  # noqa: E402
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+# Default config; override with --config-name=NAME (e.g. sam2.1_ctc_finetune_multi for multi-dataset).
+device = "cuda" if torch.cuda.is_available() else "cpu"
+config_name = "sam2.1_ctc_finetune" if device == "cuda" else "sam2.1_ctc_finetune_cpu"
 
-if device == 'cuda':
-    config_name = "sam2.1_ctc_finetune.yaml"
-else:
-    config_name = "sam2.1_ctc_finetune_cpu.yaml"
-    
 config_path = "sam2/configs/sam2.1_training"
 model_name = "sam2.1_ctc_segmentationv2"
 
