@@ -6,11 +6,12 @@
 
 import logging
 import math
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 import torch.distributed
 import torch.nn.functional as F
+from hydra.utils import instantiate
 from torch.nn.init import trunc_normal_
 
 from sam2.modeling.sam.mask_decoder import MaskDecoder
@@ -185,6 +186,67 @@ class _SACABlock(torch.nn.Module):
 
 # ──────────────────────────────────────────────────────────────────────────────
 
+class KeyConstellationEncoder(torch.nn.Module):
+    """Pre-norm self-attention + FFN stack on key tokens to build a spatial constellation map.
+
+    Used by TemporalMatchingHead before cross-frame matching. Caller supplies attn_mask
+    (e.g. from RelativeSpatialBias) for position-aware self-attention.
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+        num_layers: int = 1,
+        ffn_ratio: int = 4,
+    ):
+        super().__init__()
+        self.sa_layers = torch.nn.ModuleList([
+            torch.nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True, dropout=0.1)
+            for _ in range(num_layers)
+        ])
+        self.sa_norms = torch.nn.ModuleList([
+            torch.nn.LayerNorm(hidden_dim)
+            for _ in range(num_layers)
+        ])
+        self.ffn_norms = torch.nn.ModuleList([
+            torch.nn.LayerNorm(hidden_dim)
+            for _ in range(num_layers)
+        ])
+        self.ffns = torch.nn.ModuleList([
+            MLP(hidden_dim, hidden_dim * ffn_ratio, hidden_dim, num_layers=2, activation=torch.nn.GELU)
+            for _ in range(num_layers)
+        ])
+
+    def forward(
+        self,
+        key_tokens: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            key_tokens: [N_k, D]
+            attn_mask:  [N_k, N_k] optional additive bias for self-attention
+
+        Returns:
+            [N_k, D]  context-enriched key tokens
+        """
+        if key_tokens.shape[0] == 0:
+            return key_tokens
+        x = key_tokens.unsqueeze(0)
+        for sa, sa_norm, ffn_norm, ffn in zip(
+            self.sa_layers, self.sa_norms, self.ffn_norms, self.ffns
+        ):
+            x_n = sa_norm(x)
+            out, _ = sa(x_n, x_n, x_n, attn_mask=attn_mask)
+            x = x + out
+            x_n = ffn_norm(x)
+            x = x + ffn(x_n)
+        return x.squeeze(0)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+
 class TemporalMatchingHead(torch.nn.Module):
     """SuperGlue-inspired cell matcher for CellSAM2.
 
@@ -216,17 +278,13 @@ class TemporalMatchingHead(torch.nn.Module):
 
     def __init__(
         self,
-        hidden_dim: int = 256,
-        num_heads: int = 8,
-        num_freqs: int = 16,
-        num_key_sa_layers: int = 3,
-        num_blocks: int = 3,
-        pos_bias_mode: str = "distance",
-        pos_bias_sigma: float = 0.2,
-        pos_bias_n_bins: int = 16,
-        pos_bias_cutoff: float = 1.5,
-        ffn_ratio: int = 4,
-        use_aux_loss: bool = False,
+        hidden_dim: int,
+        num_heads: int,
+        use_aux_loss: bool,
+        pos_enc: Any,      # config with _target_: FourierPositionEncoding
+        pos_bias: Any,     # config with _target_: RelativeSpatialBias
+        key_encoder: Any,  # config with _target_: KeyConstellationEncoder (num_layers, ffn_ratio)
+        blocks: Any,  # config with num_blocks + block: { _target_: _SACABlock, ... }
     ):
         super().__init__()
         assert hidden_dim % num_heads == 0, (
@@ -237,39 +295,27 @@ class TemporalMatchingHead(torch.nn.Module):
         self.head_dim   = hidden_dim // num_heads
 
         # ── 1. Feature Fusion ─────────────────────────────────────────────────
-        # Independent LayerNorm for each feature stream
         self.obj_ptr_norm  = torch.nn.LayerNorm(hidden_dim)
         self.roi_feat_norm = torch.nn.LayerNorm(hidden_dim)
-        # 3-layer GELU MLP: obj_ptr ∥ roi_feat → visual token  [N, hidden_dim]
         self.token_proj = MLP(
             hidden_dim * 2, hidden_dim, hidden_dim, 2,
             activation=torch.nn.GELU,
         )
 
-        # ── 1b. Fourier Positional Encoding ───────────────────────────────────
-        self.pos_enc = FourierPositionEncoding(hidden_dim, num_freqs)
+        # ── 1b. Fourier Positional Encoding (from config) ─────────────────────
+        self.pos_enc = instantiate(pos_enc, hidden_dim=hidden_dim, _convert_="all")
 
-        # ── 2. Key Constellation Encoder (SA→FFN per layer, standard transformer) ─
-        self.key_sa_layers = torch.nn.ModuleList([
-            torch.nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True, dropout=0.1)
-            for _ in range(num_key_sa_layers)
-        ])
-        self.key_sa_norms = torch.nn.ModuleList([
-            torch.nn.LayerNorm(hidden_dim)
-            for _ in range(num_key_sa_layers)
-        ])
-        self.key_ffn_norms = torch.nn.ModuleList([
-            torch.nn.LayerNorm(hidden_dim)
-            for _ in range(num_key_sa_layers)
-        ])
-        self.key_ffns = torch.nn.ModuleList([
-            MLP(hidden_dim, hidden_dim * ffn_ratio, hidden_dim, num_layers=2, activation=torch.nn.GELU)
-            for _ in range(num_key_sa_layers)
-        ])
+        # ── 2. Key Constellation Encoder (from config) ─────────────────────────
+        self.key_encoder = instantiate(
+            key_encoder, hidden_dim=hidden_dim, num_heads=num_heads, _convert_="all"
+        )
 
-        # ── 3. Interleaved SA→CA→FFN blocks ───────────────────────────────────
+        # ── 3. Interleaved SA→CA→FFN blocks: blocks.num_blocks × instantiate(blocks.block) ─
+        get = blocks.get if hasattr(blocks, "get") else lambda k, d=None: getattr(blocks, k, d)
+        num_blocks = get("num_blocks", 1)
+        block_cfg = get("block")
         self.blocks = torch.nn.ModuleList([
-            _SACABlock(hidden_dim, num_heads, ffn_ratio=ffn_ratio)
+            instantiate(block_cfg, hidden_dim=hidden_dim, num_heads=num_heads, _convert_="all")
             for _ in range(num_blocks)
         ])
         self.use_aux_loss = use_aux_loss
@@ -277,21 +323,13 @@ class TemporalMatchingHead(torch.nn.Module):
         # ── 4. Final Scoring Projections ──────────────────────────────────────
         self.q_proj = torch.nn.Linear(hidden_dim, hidden_dim)
         self.k_proj = torch.nn.Linear(hidden_dim, hidden_dim)
-
         torch.nn.init.xavier_uniform_(self.q_proj.weight, gain=0.1)
         torch.nn.init.xavier_uniform_(self.k_proj.weight, gain=0.1)
-
-        # Learned NULL key embedding – the "NO_MATCH" candidate
         self.null_key = torch.nn.Parameter(torch.empty(1, hidden_dim))
         torch.nn.init.trunc_normal_(self.null_key, std=0.02)
 
-        # ── Relative positional bias (for SA/CA attention matrices) ─────────────
-        self.pos_bias = RelativeSpatialBias(
-            mode=pos_bias_mode,
-            sigma=pos_bias_sigma,
-            n_bins=pos_bias_n_bins,
-            cutoff=pos_bias_cutoff,
-        )
+        # ── Relative positional bias (from config) ─────────────────────────────
+        self.pos_bias = instantiate(pos_bias, _convert_="all")
 
     # ──────────────────────────────────────────────────────────────────────────
     def get_centroids_from_mask_logits(self, mask_logits: torch.Tensor) -> torch.Tensor:
@@ -404,21 +442,10 @@ class TemporalMatchingHead(torch.nn.Module):
         Returns:
             key_tokens: [N_k, D]  spatially context-enriched
         """
-        if key_tokens.shape[0] == 0:
-            return key_tokens
         attn_mask_kk = None
         if key_centroids is not None and key_centroids.shape[0] == key_tokens.shape[0]:
             attn_mask_kk = self.pos_bias(key_centroids, key_centroids)
-        x = key_tokens.unsqueeze(0)                          # [1, N_k, D]
-        for sa, sa_norm, ffn_norm, ffn in zip(
-            self.key_sa_layers, self.key_sa_norms, self.key_ffn_norms, self.key_ffns
-        ):
-            x_n = sa_norm(x)
-            out, _ = sa(x_n, x_n, x_n, attn_mask=attn_mask_kk)
-            x = x + out
-            x_n = ffn_norm(x)
-            x = x + ffn(x_n)
-        return x.squeeze(0)                                  # [N_k, D]
+        return self.key_encoder(key_tokens, attn_mask=attn_mask_kk)
 
     def _match_logits_from_q(
         self,
@@ -595,23 +622,14 @@ class SAM2Base(torch.nn.Module):
         pred_iou_thresh: float = 0.7,
         obj_score_thresh: float = 0.5,
         div_obj_score_thresh: float = 0.5,
-        # Temporal auxiliary matcher
-        enable_temporal_aux_matcher: bool = False,
-        temporal_aux_matcher_num_heads: int = 8,
-        temporal_aux_matcher_num_key_sa_layers: int = 1,
-        temporal_aux_matcher_num_blocks: int = 1,
-        temporal_aux_matcher_pos_bias_mode: str = "distance",
-        temporal_aux_matcher_pos_bias_sigma: float = 0.2,
-        temporal_aux_matcher_pos_bias_n_bins: int = 16,
-        temporal_aux_matcher_pos_bias_cutoff: float = 1.5,
-        temporal_aux_matcher_ffn_ratio: int = 4,
-        temporal_aux_matcher_use_aux_loss: bool = False,
-        temporal_aux_match_query_k: int = 0,
-        temporal_aux_match_w_daughter: float = 3.0,
-        temporal_aux_match_w_new: float = 2.0,
-        temporal_aux_match_w_track: float = 0.5,
+        temporal_matching: Optional[Any] = None,  # {enabled, head: {_target_, ...}}
     ):
         super().__init__()
+
+        # Temporal matching: enabled + head config; head is instantiated in _build_sam_heads with hidden_dim
+        get = (temporal_matching.get if hasattr(temporal_matching, "get") else lambda k, d=None: getattr(temporal_matching, k, d)) if temporal_matching else lambda k, d=None: d
+        self.enable_temporal_aux_matcher = get("enabled", False)
+        self._temporal_matching_cfg = temporal_matching
 
         # Part 1: the image backbone
         self.image_encoder = image_encoder
@@ -700,21 +718,6 @@ class SAM2Base(torch.nn.Module):
         self.pred_iou_thresh = pred_iou_thresh
         self.obj_score_thresh = obj_score_thresh
         self.div_obj_score_thresh = div_obj_score_thresh
-
-        self.enable_temporal_aux_matcher = enable_temporal_aux_matcher
-        self.temporal_aux_match_query_k = temporal_aux_match_query_k
-        self.temporal_aux_match_w_daughter = temporal_aux_match_w_daughter
-        self.temporal_aux_match_w_new = temporal_aux_match_w_new
-        self.temporal_aux_match_w_track = temporal_aux_match_w_track
-        self._temporal_aux_matcher_num_heads = temporal_aux_matcher_num_heads
-        self._temporal_aux_matcher_num_key_sa_layers = temporal_aux_matcher_num_key_sa_layers
-        self._temporal_aux_matcher_num_blocks = temporal_aux_matcher_num_blocks
-        self._temporal_aux_matcher_pos_bias_mode = temporal_aux_matcher_pos_bias_mode
-        self._temporal_aux_matcher_pos_bias_sigma = temporal_aux_matcher_pos_bias_sigma
-        self._temporal_aux_matcher_pos_bias_n_bins = temporal_aux_matcher_pos_bias_n_bins
-        self._temporal_aux_matcher_pos_bias_cutoff = temporal_aux_matcher_pos_bias_cutoff
-        self._temporal_aux_matcher_ffn_ratio = temporal_aux_matcher_ffn_ratio
-        self._temporal_aux_matcher_use_aux_loss = temporal_aux_matcher_use_aux_loss
 
         self._build_sam_heads()
         self.max_cond_frames_in_attn = max_cond_frames_in_attn
@@ -817,17 +820,14 @@ class SAM2Base(torch.nn.Module):
         ])
 
         if self.enable_temporal_aux_matcher:
-            self.temporal_matching_head = TemporalMatchingHead(
-                hidden_dim=self.hidden_dim,
-                num_heads=self._temporal_aux_matcher_num_heads,
-                num_key_sa_layers=self._temporal_aux_matcher_num_key_sa_layers,
-                num_blocks=self._temporal_aux_matcher_num_blocks,
-                pos_bias_mode=self._temporal_aux_matcher_pos_bias_mode,
-                pos_bias_sigma=self._temporal_aux_matcher_pos_bias_sigma,
-                pos_bias_n_bins=self._temporal_aux_matcher_pos_bias_n_bins,
-                pos_bias_cutoff=self._temporal_aux_matcher_pos_bias_cutoff,
-                ffn_ratio=self._temporal_aux_matcher_ffn_ratio,
-                use_aux_loss=self._temporal_aux_matcher_use_aux_loss,
+            cfg = getattr(self, "_temporal_matching_cfg", None)
+            head_cfg = cfg.get("head") if cfg and hasattr(cfg, "get") else None
+            if not head_cfg or not getattr(head_cfg, "_target_", None):
+                raise ValueError(
+                    "temporal_matching.enabled=true requires temporal_matching.head with _target_: sam2.modeling.sam2_base.TemporalMatchingHead"
+                )
+            self.temporal_matching_head = instantiate(
+                head_cfg, hidden_dim=self.hidden_dim, _convert_="all"
             )
 
     def _forward_sam_heads(

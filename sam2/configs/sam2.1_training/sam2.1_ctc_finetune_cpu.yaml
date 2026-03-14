@@ -13,13 +13,38 @@ scratch:
   num_epochs: 20
   use_lora: True 
   lora_lr: 1.0e-3
-  temporal_matching_head_lr: 1.0e-4
-  temporal_matching_head_warmup_fraction: 0.1  # fraction of total training steps used for linear LR warmup
   use_wandb: False
-  use_temporal_aux_matcher: False
   freeze_encoder: False
   freeze_non_temporal: False  # Set True to train only the temporal_matching_head (phase-2 training)
   dataset_name: "moma"
+
+  temporal_matching:
+    enabled: False
+    optimizer:
+      lr: 1.0e-4
+      warmup_fraction: 0.1
+    head:
+      _target_: sam2.modeling.sam2_base.TemporalMatchingHead
+      num_heads: 8
+      use_aux_loss: true
+      pos_enc:
+        _target_: sam2.modeling.sam2_base.FourierPositionEncoding
+        num_freqs: 16
+      pos_bias:
+        _target_: sam2.modeling.sam2_base.RelativeSpatialBias
+        mode: "distance"
+        sigma: 0.2
+        n_bins: 16
+        cutoff: 1.5
+      key_encoder:
+        _target_: sam2.modeling.sam2_base.KeyConstellationEncoder
+        num_layers: 1
+        ffn_ratio: 4
+      blocks:
+        num_blocks: 2
+        block:
+          _target_: sam2.modeling.sam2_base._SACABlock
+          ffn_ratio: 4
 
 dataset:
   # PATHS to Dataset
@@ -227,21 +252,7 @@ trainer:
     obj_score_thresh: 0.5
     div_obj_score_thresh: 0.4
 
-    # Temporal auxiliary matcher
-    enable_temporal_aux_matcher: ${scratch.use_temporal_aux_matcher}
-    temporal_aux_matcher_num_heads: 8
-    temporal_aux_matcher_num_key_sa_layers: 1
-    temporal_aux_matcher_num_blocks: 2
-    temporal_aux_matcher_pos_bias_mode: "distance"
-    temporal_aux_matcher_pos_bias_sigma: 0.2
-    temporal_aux_matcher_pos_bias_n_bins: 16
-    temporal_aux_matcher_pos_bias_cutoff: 1.5
-    temporal_aux_matcher_ffn_ratio: 4
-    temporal_aux_matcher_use_aux_loss: true
-    temporal_aux_match_query_k: 0  # 0 = use all cells
-    temporal_aux_match_w_daughter: 3.0  # sampling weight for daughter cells
-    temporal_aux_match_w_new: 2.0       # sampling weight for new FOV cells
-    temporal_aux_match_w_track: 0.5     # sampling weight for tracked cells (lower but non-zero)
+    temporal_matching: ${scratch.temporal_matching}
 
     ####### Training specific params #######
     # box/point input and corrections
@@ -371,9 +382,9 @@ trainer:
             _target_: training.optimizer.LinearWarmupParamScheduler
             scheduler:
               _target_: fvcore.common.param_scheduler.CosineParamScheduler
-              start_value: ${scratch.temporal_matching_head_lr}
-              end_value: ${divide:${scratch.temporal_matching_head_lr},10}
-            warmup_length: ${scratch.temporal_matching_head_warmup_fraction}
+              start_value: ${scratch.temporal_matching.optimizer.lr}
+              end_value: ${divide:${scratch.temporal_matching.optimizer.lr},10}
+            warmup_length: ${scratch.temporal_matching.optimizer.warmup_fraction}
             warmup_factor: 0.0
           param_names:
             - 'temporal_matching_head.*'
