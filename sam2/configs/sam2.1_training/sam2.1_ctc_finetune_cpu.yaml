@@ -16,35 +16,8 @@ scratch:
   use_wandb: False
   freeze_encoder: False
   freeze_non_temporal: False  # Set True to train only the temporal_matching_head (phase-2 training)
+  use_temporal_matching: False  # Enable temporal matching head for cell tracking
   dataset_name: "moma"
-
-  temporal_matching:
-    enabled: False
-    optimizer:
-      lr: 1.0e-4
-      warmup_fraction: 0.1
-    head:
-      _target_: sam2.modeling.sam2_base.TemporalMatchingHead
-      num_heads: 8
-      use_aux_loss: true
-      pos_enc:
-        _target_: sam2.modeling.sam2_base.FourierPositionEncoding
-        num_freqs: 16
-      pos_bias:
-        _target_: sam2.modeling.sam2_base.RelativeSpatialBias
-        mode: "distance"
-        sigma: 0.2
-        n_bins: 16
-        cutoff: 1.5
-      key_encoder:
-        _target_: sam2.modeling.sam2_base.KeyConstellationEncoder
-        num_layers: 1
-        ffn_ratio: 4
-      blocks:
-        num_blocks: 2
-        block:
-          _target_: sam2.modeling.sam2_base._SACABlock
-          ffn_ratio: 4
 
 dataset:
   # PATHS to Dataset
@@ -114,6 +87,34 @@ trainer:
   freeze_non_temporal: ${scratch.freeze_non_temporal}
   debug_viz: false  # Set to true to enable debug visualization of predictions vs ground truth
   debug_viz_interval: 5.0  # Percentage interval (5.0 = every 5% of dataset)
+
+  # Temporal matching head (enabled via scratch.use_temporal_matching)
+  temporal_matching:
+    optimizer:
+      lr: 1.0e-4
+      warmup_fraction: 0.1
+    head:
+      _target_: sam2.modeling.temporal_matching.TemporalMatchingHead
+      num_heads: 8
+      use_aux_loss: true
+      pos_enc:
+        _target_: sam2.modeling.temporal_matching.FourierPositionEncoding
+        num_freqs: 16
+      pos_bias:
+        _target_: sam2.modeling.temporal_matching.RelativeSpatialBias
+        mode: "distance"
+        sigma: 0.2
+        n_bins: 16
+        cutoff: 1.5
+      key_encoder:
+        _target_: sam2.modeling.temporal_matching.KeyConstellationEncoder
+        num_layers: 1
+        ffn_ratio: 4
+      blocks:
+        num_blocks: 2
+        block:
+          _target_: sam2.modeling.temporal_matching.SACABlock
+          ffn_ratio: 4
 
   use_lora: ${scratch.use_lora}
   lora:
@@ -252,7 +253,9 @@ trainer:
     obj_score_thresh: 0.5
     div_obj_score_thresh: 0.4
 
-    temporal_matching: ${scratch.temporal_matching}
+    temporal_matching:
+      enabled: ${scratch.use_temporal_matching}
+      head: ${trainer.temporal_matching.head}
 
     ####### Training specific params #######
     # box/point input and corrections
@@ -382,9 +385,9 @@ trainer:
             _target_: training.optimizer.LinearWarmupParamScheduler
             scheduler:
               _target_: fvcore.common.param_scheduler.CosineParamScheduler
-              start_value: ${scratch.temporal_matching.optimizer.lr}
-              end_value: ${divide:${scratch.temporal_matching.optimizer.lr},10}
-            warmup_length: ${scratch.temporal_matching.optimizer.warmup_fraction}
+              start_value: ${trainer.temporal_matching.optimizer.lr}
+              end_value: ${divide:${trainer.temporal_matching.optimizer.lr},10}
+            warmup_length: ${trainer.temporal_matching.optimizer.warmup_fraction}
             warmup_factor: 0.0
           param_names:
             - 'temporal_matching_head.*'

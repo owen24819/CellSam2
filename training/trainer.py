@@ -1234,7 +1234,7 @@ class Trainer:
         if self.freeze_non_temporal:
             assert hasattr(self.model, "temporal_matching_head"), (
                 "freeze_non_temporal=True requires the temporal matching head. "
-                "Set scratch.temporal_matching.enabled: true in config."
+                "Set scratch.use_temporal_matching: true in config."
             )
             logging.info("Freezing all parameters except temporal_matching_head...")
             for name, param in self.model.named_parameters():
