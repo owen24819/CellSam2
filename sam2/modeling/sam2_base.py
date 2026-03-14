@@ -307,7 +307,7 @@ class SAM2Base(torch.nn.Module):
                     "scratch.use_temporal_matching=true requires temporal_matching.head with _target_: sam2.modeling.temporal_matching.TemporalMatchingHead"
                 )
             self.temporal_matching_head = instantiate(
-                head_cfg, hidden_dim=self.hidden_dim, _convert_="all"
+                head_cfg, _convert_="all", _recursive_=False
             )
 
     def _forward_sam_heads(

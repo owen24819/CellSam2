@@ -38,12 +38,18 @@ def main(cfg: DictConfig) -> None:
     # Use the global model_name variable instead
     global model_name
 
-    if cfg.launcher.experiment_log_dir is None:
+    # Determine log dir: launcher.experiment_log_dir, launcher.model_name, or default model_name
+    if cfg.launcher.experiment_log_dir is not None:
+        model_name = os.path.basename(cfg.launcher.experiment_log_dir.rstrip("/"))
+    elif cfg.launcher.get("model_name") is not None:
+        model_name = str(cfg.launcher.model_name)
         cfg.launcher.experiment_log_dir = os.path.join(
             os.getcwd(), "sam2_logs", model_name
         )
     else:
-        model_name = cfg.launcher.experiment_log_dir.split("/")[-1]
+        cfg.launcher.experiment_log_dir = os.path.join(
+            os.getcwd(), "sam2_logs", model_name
+        )
 
     # Optional: set scratch.use_wandb=true and add wandb.project/group in config to log to W&B
     use_wandb = cfg.scratch.get('use_wandb', False) and WANDB_AVAILABLE
