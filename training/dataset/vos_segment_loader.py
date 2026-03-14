@@ -42,7 +42,7 @@ class CTCSegmentLoader:
         if max_dim <= self.resize_threshold:
             return None
         
-        scale = 1.0 + random.uniform(-0.05, 0.05) if self.training else 1.0
+        scale = 1.0 + random.uniform(-0.1, 0.1) if self.training else 1.0
         crop_h = max(1, int(round(self.target_size * scale)))
         crop_w = max(1, int(round(self.target_size * scale)))
         top = max(0, (h - crop_h) // 2)
