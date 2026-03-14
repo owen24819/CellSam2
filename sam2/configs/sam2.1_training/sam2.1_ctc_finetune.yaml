@@ -16,7 +16,7 @@ scratch:
   temporal_matching_head_lr: 1.0e-4
   temporal_matching_head_warmup_fraction: 0.1  # fraction of total training steps used for linear LR warmup (e.g. 0.1 = ~1 epoch out of 10)
   use_wandb: False
-  use_temporal_aux_matcher: True
+  use_temporal_aux_matcher: False
   freeze_encoder: False
   freeze_non_temporal: False  # Set True to train only the temporal_matching_head (phase-2 training)
   dataset_name: "moma"
