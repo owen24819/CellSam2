@@ -163,6 +163,7 @@ class CTCRawDataset(VOSRawDataset):
         seed = 0 if not self.training else epoch
         rng = np.random.default_rng(seed)
         self._epoch_index = []
+        capped_per = []
         for sid in range(n_dirs):
             indices = np.array(by_source[sid], dtype=np.int64)
             cap = caps[sid]
@@ -170,12 +171,21 @@ class CTCRawDataset(VOSRawDataset):
                 chosen = indices
             else:
                 chosen = rng.choice(indices, size=cap, replace=False)
+            capped_per.append(len(chosen))
             for i in np.sort(chosen):
                 self._epoch_index.append(self.frame_index[i])
         total = sum(len(x) for x in by_source)
         capped = len(self._epoch_index)
         if capped != total:
             print(f"CTCRawDataset: {'val' if not self.training else f'epoch {epoch}'} capped {total} -> {capped} samples")
+        # One-time per-dataset summary before epoch 0 (train and val)
+        if epoch == 0 and n_dirs > 1:
+            # Path is .../data/<name>/train/CTC or .../data/<name>/val/CTC -> use parts[-3] for <name>
+            names = [d.parts[-3] if len(d.parts) >= 3 else (d.parts[-1] if d.parts else str(d)) for d in self.train_dirs]
+            for i in range(n_dirs):
+                t, c = len(by_source[i]), capped_per[i]
+                print(f"  {names[i]}: total={t}" + (f", capped={c}" if c < t else ""))
+            print(f"  Total: {total} -> {capped} samples per epoch")
 
     def set_epoch(self, epoch: int) -> None:
         """Rebuild per-epoch index when using caps. No-op for val so val set stays constant."""
