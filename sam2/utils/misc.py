@@ -296,6 +296,8 @@ def read_image(img_path, return_np=False):
     image = Image.open(img_path)
     if image.mode == "RGB":
         pass
+    elif image.mode == "L":
+        image = image.convert("RGB")
     elif image.mode == "I;16":
         # Convert to NumPy array
         arr = np.array(image)
