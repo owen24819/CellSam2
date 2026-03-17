@@ -77,6 +77,13 @@ def main(cfg: DictConfig) -> None:
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "12355"
 
+    # When use_temporal_matching=true: use cached embeddings and train only the temporal head (create cache if missing). When false: train full model.
+    if cfg.scratch.get("use_temporal_matching", False):
+        if cfg.trainer.get("temporal_embeddings_dir") is None:
+            cfg.trainer.temporal_embeddings_dir = "temporal_embeddings"
+    else:
+        cfg.trainer.temporal_embeddings_dir = None
+
     trainer = instantiate(cfg.trainer, _recursive_=False)
     if use_wandb:
         trainer.wandb = wandb

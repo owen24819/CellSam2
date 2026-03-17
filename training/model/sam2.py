@@ -437,6 +437,24 @@ class SAM2Train(SAM2Base):
                 # Keys built after PT for frame 0 only
                 key_recomputed = t0 == 0
 
+                match_targets = self._build_matching_targets(
+                    query_ids, key_ids, child_to_parent,
+                )
+
+                # Optional: save temporal matching inputs for later head-only training
+                # Only tokens, centroids, and match_targets are needed; key_ids/query_ids/child_to_parent
+                # were only used to compute match_targets.
+                callback = getattr(self, "_temporal_embedding_callback", None)
+                if callback is not None:
+                    pair_dict = {
+                        "key_tokens": key_tokens.detach().cpu(),
+                        "key_centroids": key_centroids.detach().cpu(),
+                        "query_tokens": query_tokens.detach().cpu(),
+                        "query_centroids": query_centroids.detach().cpu(),
+                        "match_targets": match_targets.detach().cpu(),
+                    }
+                    callback(pair_dict)
+
                 # Detach is done inside build_matching_tokens (before the MLP) so
                 # temporal loss trains the head (including token_proj) but not backbone/SAM.
                 result = self.temporal_matching_head(
@@ -444,9 +462,6 @@ class SAM2Train(SAM2Base):
                     query_centroids, key_centroids,
                 )
                 match_logits, match_logits_aux = result if isinstance(result, tuple) else (result, None)
-                match_targets = self._build_matching_targets(
-                    query_ids, key_ids, child_to_parent,
-                )
 
                 if getattr(self, "_do_temporal_debug_viz", False):
                     key_masks = self._get_masks_for_temporal_viz(out_t0, key_ids)

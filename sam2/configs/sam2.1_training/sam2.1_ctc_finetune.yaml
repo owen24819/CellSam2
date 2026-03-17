@@ -15,7 +15,7 @@ scratch:
   use_wandb: False
   freeze_encoder: False
   freeze_non_temporal: False  # Set True to train only the temporal_matching_head (phase-2 training)
-  use_temporal_matching: False  # Enable temporal matching head for cell tracking
+  use_temporal_matching: False  # If true: create embeddings (CellSam2 runs once) then train only temporal head; no CellSam2 during training
   dataset_name: "moma"
 
 dataset:
@@ -118,6 +118,9 @@ trainer:
   seed_value: 123
   freeze_encoder: ${scratch.freeze_encoder}
   freeze_non_temporal: ${scratch.freeze_non_temporal}
+  # When use_temporal_matching=true this is set to temporal_embeddings: extract embeddings once (CellSam2 runs on dataset), then train only temporal head (no CellSam2 during training). Set to null to train full model.
+  temporal_embeddings_dir: null
+  force_temporal_embeddings: false  # Set true to re-extract embeddings even if cache exists
   debug_viz: true  # Set to true to enable debug visualization of predictions vs ground truth
   debug_viz_interval: 5.0  # Percentage interval (5.0 = every 5% of dataset)
 

@@ -118,6 +118,8 @@ trainer:
   seed_value: 123
   freeze_encoder: ${scratch.freeze_encoder}
   freeze_non_temporal: ${scratch.freeze_non_temporal}
+  temporal_embeddings_dir: null  # Set automatically when use_temporal_matching=true (see train_ctc.py)
+  force_temporal_embeddings: false
   debug_viz: false  # Set to true to enable debug visualization of predictions vs ground truth
   debug_viz_interval: 5.0  # Percentage interval (5.0 = every 5% of dataset)
 

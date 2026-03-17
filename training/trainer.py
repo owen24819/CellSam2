@@ -13,7 +13,7 @@ import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 import numpy as np
 import torch
@@ -22,7 +22,10 @@ import torch.nn as nn
 from hydra.utils import instantiate
 from iopath.common.file_io import g_pathmgr
 
+from training.dataset.sam2_datasets import SingleDataLoader
+from training.dataset.temporal_embedding_dataset import TemporalEmbeddingDataset
 from training.debug_viz import create_debug_visualization, should_visualize
+from training.loss_fns import temporal_matching_loss
 from training.optimizer import construct_optimizer
 from training.utils.checkpoint_utils import (
     assert_skipped_parameters_are_frozen,
@@ -167,6 +170,8 @@ class Trainer:
         loss: Optional[Dict[str, Any]] = None,
         freeze_encoder: bool = False,
         freeze_non_temporal: bool = False,
+        temporal_embeddings_dir: Optional[str] = None,
+        force_temporal_embeddings: bool = False,
         debug_viz: bool = False,
         debug_viz_interval: float = 5.0,
         debug_temporal_matching_viz: bool = True,
@@ -189,6 +194,10 @@ class Trainer:
         self.loss_conf = loss
         self.freeze_encoder = freeze_encoder
         self.freeze_non_temporal = freeze_non_temporal
+        self.temporal_embeddings_dir = temporal_embeddings_dir
+        self.force_temporal_embeddings = force_temporal_embeddings
+        if self.temporal_embeddings_dir:
+            self.freeze_non_temporal = True
         self.debug_viz = debug_viz
         self.debug_viz_interval_train = debug_viz_interval
         self.debug_viz_interval_val = 10.0  # Less data in val, so use 10%
@@ -633,6 +642,9 @@ class Trainer:
 
     def run(self):
         assert self.mode in ["train", "train_only", "val"]
+        if self.temporal_embeddings_dir:
+            self._run_embedding_extraction()
+            self._setup_embedding_dataloaders()
         if self.mode == "train":
             if self.epoch > 0:
                 logging.info(f"Resuming training from epoch: {self.epoch}")
@@ -661,6 +673,119 @@ class Trainer:
 
         if self.mode in ["train", "train_only"]:
             self.train_dataset = instantiate(self.data_conf.train)
+
+    def _run_embedding_extraction(self) -> None:
+        """Run full model on train/val to save temporal matching inputs; skip if cache exists and not force."""
+        if not self.temporal_embeddings_dir:
+            return
+        root = self.temporal_embeddings_dir
+        train_done = os.path.join(root, "train", ".done")
+        val_done = os.path.join(root, "val", ".done")
+        if not self.force_temporal_embeddings and g_pathmgr.exists(train_done) and g_pathmgr.exists(val_done):
+            logging.info("Using existing temporal embeddings (set force_temporal_embeddings=true to re-extract).")
+            return
+        makedir(os.path.join(root, "train"))
+        makedir(os.path.join(root, "val"))
+        model_module = unwrap_ddp_if_wrapped(self.model)
+        if not hasattr(model_module, "temporal_matching_head") or model_module.temporal_matching_head is None:
+            raise RuntimeError("temporal_embeddings_dir requires scratch.use_temporal_matching: true and a loaded model with temporal_matching_head.")
+        batch_pairs: List[Dict[str, Any]] = []
+
+        def _callback(pair_dict: Dict[str, Any]) -> None:
+            batch_pairs.append(pair_dict)
+
+        model_module._temporal_embedding_callback = _callback
+        self.model.eval()
+        try:
+            for split, phase_name in [("train", "Train"), ("val", "Val")]:
+                dataset = self.train_dataset if split == "train" else self.val_dataset
+                if dataset is None:
+                    continue
+                loader = dataset.get_loader(epoch=0)
+                for batch_idx, batch in enumerate(loader):
+                    batch = batch.to(self.device, non_blocking=True)
+                    batch_pairs.clear()
+                    with torch.no_grad():
+                        _ = self.model(batch)
+                    save_path = os.path.join(root, split, f"batch_{batch_idx:06d}.pt")
+                    with g_pathmgr.open(save_path, "wb") as f:
+                        torch.save(list(batch_pairs), f)
+                    if (batch_idx + 1) % 50 == 0:
+                        logging.info(f"Temporal embedding extraction {phase_name}: saved batch {batch_idx + 1}")
+                done_file = os.path.join(root, split, ".done")
+                with g_pathmgr.open(done_file, "w") as f:
+                    f.write("")
+            logging.info("Temporal embedding extraction finished.")
+        finally:
+            del model_module._temporal_embedding_callback
+        self.model.train()
+
+    def _setup_embedding_dataloaders(self) -> None:
+        """Replace train/val datasets with embedding datasets when temporal_embeddings_dir is set."""
+        if not self.temporal_embeddings_dir:
+            return
+        root = self.temporal_embeddings_dir
+        batch_size = self.data_conf.get("train", {}).get("batch_size", 8)
+        num_workers = self.data_conf.get("train", {}).get("num_workers", 0)
+        train_dir = os.path.join(root, "train")
+        val_dir = os.path.join(root, "val")
+        self.train_dataset = SingleDataLoader(
+            dataset=TemporalEmbeddingDataset(train_dir),
+            batch_size=batch_size,
+            num_workers=num_workers,
+            shuffle=True,
+            pin_memory=True,
+            drop_last=True,
+            collate_fn=lambda x: x,
+        )
+        self.val_dataset = SingleDataLoader(
+            dataset=TemporalEmbeddingDataset(val_dir),
+            batch_size=batch_size,
+            num_workers=num_workers,
+            shuffle=False,
+            pin_memory=True,
+            drop_last=False,
+            collate_fn=lambda x: x,
+        )
+
+    def _step_temporal_from_embeddings(
+        self,
+        batch: List[Dict[str, Any]],
+        model: nn.Module,
+        phase: str,
+    ):
+        """Forward and loss for temporal head only from cached embedding pairs."""
+        model_module = unwrap_ddp_if_wrapped(model)
+        head = model_module.temporal_matching_head
+        loss_fn = self.loss.get("all") or next(iter(self.loss.values()))
+        temperature = getattr(loss_fn, "temporal_match_temperature", 2.0)
+        bce_weight = getattr(loss_fn, "temporal_match_bce_weight", 0.5)
+        aux_weight = getattr(loss_fn, "temporal_match_aux_loss_weight", 0.3)
+        total_loss = None
+        for pair in batch:
+            key_tokens = pair["key_tokens"].to(self.device)
+            key_centroids = pair["key_centroids"].to(self.device)
+            query_tokens = pair["query_tokens"].to(self.device)
+            query_centroids = pair["query_centroids"].to(self.device)
+            match_targets = pair["match_targets"].to(self.device)
+            result = head(query_tokens, key_tokens, query_centroids, key_centroids)
+            match_logits, match_logits_aux = result if isinstance(result, tuple) else (result, None)
+            loss = temporal_matching_loss(match_logits, match_targets, temperature=temperature, bce_weight=bce_weight)
+            if aux_weight != 0 and match_logits_aux is not None:
+                for aux_logits in match_logits_aux:
+                    loss = loss + aux_weight * temporal_matching_loss(
+                        aux_logits, match_targets, temperature=temperature, bce_weight=bce_weight
+                    )
+            total_loss = loss if total_loss is None else total_loss + loss
+        if total_loss is None:
+            total_loss = torch.tensor(0.0, device=self.device)
+        else:
+            total_loss = total_loss / max(len(batch), 1)
+        loss_str = f"Losses/{phase}_match"
+        if self.steps[phase] % self.logging_conf.log_scalar_frequency == 0:
+            self.logger.log(loss_str, total_loss.item(), self.steps[phase])
+        self.steps[phase] += 1
+        return {loss_str: total_loss}, len(batch), {}
 
     def run_train(self):
 
@@ -763,7 +888,8 @@ class Trainer:
             # measure data loading time
             data_time.update(time.time() - end)
 
-            batch = batch.to(self.device, non_blocking=True)
+            if not (self.temporal_embeddings_dir and isinstance(batch, list)):
+                batch = batch.to(self.device, non_blocking=True)
 
             # compute output
             with torch.no_grad():
@@ -777,13 +903,18 @@ class Trainer:
                     ),
                 ):
                     for phase, model in zip(curr_phases, curr_models):
-                        loss_dict, batch_size, extra_losses = self._step(
-                            batch,
-                            model,
-                            phase,
-                            data_iter=data_iter,
-                            total_iters=iters_per_epoch,
-                        )
+                        if self.temporal_embeddings_dir and isinstance(batch, list):
+                            loss_dict, batch_size, extra_losses = self._step_temporal_from_embeddings(
+                                batch, model, phase
+                            )
+                        else:
+                            loss_dict, batch_size, extra_losses = self._step(
+                                batch,
+                                model,
+                                phase,
+                                data_iter=data_iter,
+                                total_iters=iters_per_epoch,
+                            )
 
                         assert len(loss_dict) == 1
                         loss_key, loss = loss_dict.popitem()
@@ -917,9 +1048,10 @@ class Trainer:
             # measure data loading time
             data_time_meter.update(time.time() - end)
             data_times.append(data_time_meter.val)
-            batch = batch.to(
-                self.device, non_blocking=True
-            )  # move tensors in a tensorclass
+            if not (self.temporal_embeddings_dir and isinstance(batch, list)):
+                batch = batch.to(
+                    self.device, non_blocking=True
+                )  # move tensors in a tensorclass
 
             try:
                 did_backward = self._run_step(batch, phase, loss_mts, extra_loss_mts, data_iter=data_iter, total_iters=iters_per_epoch)
@@ -1043,7 +1175,7 @@ class Trainer:
 
     def _run_step(
         self,
-        batch: BatchedVideoDatapoint,
+        batch: Union[BatchedVideoDatapoint, List[Dict[str, Any]]],
         phase: str,
         loss_mts: Dict[str, AverageMeter],
         extra_loss_mts: Dict[str, AverageMeter],
@@ -1055,23 +1187,30 @@ class Trainer:
         """
         Run the forward / backward
         """
-
         # it's important to set grads to None, especially with Adam since 0
         # grads will also update a model even if the step doesn't produce
         # gradients
         self.optim.zero_grad(set_to_none=True)
+        use_embedding_step = self.temporal_embeddings_dir and isinstance(batch, list)
+        if use_embedding_step and len(batch) == 0:
+            return False
         with torch.amp.autocast(
             str(self.device),
             enabled=self.optim_conf.amp.enabled,
             dtype=get_amp_type(self.optim_conf.amp.amp_dtype),
         ):
-            loss_dict, batch_size, extra_losses = self._step(
-                batch,
-                self.model,
-                phase,
-                data_iter=data_iter,
-                total_iters=total_iters,
-            )
+            if use_embedding_step:
+                loss_dict, batch_size, extra_losses = self._step_temporal_from_embeddings(
+                    batch, self.model, phase
+                )
+            else:
+                loss_dict, batch_size, extra_losses = self._step(
+                    batch,
+                    self.model,
+                    phase,
+                    data_iter=data_iter,
+                    total_iters=total_iters,
+                )
 
         assert len(loss_dict) == 1
         loss_key, loss = loss_dict.popitem()
