@@ -8,14 +8,14 @@ defaults:
 # List of dataset roots (separate from single-dataset "dataset" in base config). Omit caps to use all.
 multi_datasets:
   - data_dir: ../data/moma
-    max_per_epoch: 1000
-    max_per_epoch_val: 200
+    max_per_epoch: 2500
+    max_per_epoch_val: 500
   - data_dir: ../data/2D
     max_per_epoch: 1000
     max_per_epoch_val: 200
   - data_dir: ../data/DynamicNuclearNet
-    max_per_epoch: 1000
-    max_per_epoch_val: 200
+    max_per_epoch: 2500
+    max_per_epoch_val: 500
   - data_dir: ../data/MLCI
     max_per_epoch: 1000
     max_per_epoch_val: 200
