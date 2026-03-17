@@ -167,6 +167,31 @@ def _draw_line_on_image(img_np: np.ndarray, pt0_xy: tuple, pt1_xy: tuple, color:
     img_np[:] = np.array(pil_img)
 
 
+def _draw_dashed_line_on_image(
+    img_np: np.ndarray, pt0_xy: tuple, pt1_xy: tuple, color: tuple, width: int = 3, dash: int = 6
+) -> None:
+    """Draw a dashed/dotted black line on a numpy RGB image [H, W, 3] in place. pt0_xy, pt1_xy are (x, y)."""
+    pil_img = Image.fromarray(img_np)
+    draw = ImageDraw.Draw(pil_img)
+    x0, y0 = pt0_xy[0], pt0_xy[1]
+    x1, y1 = pt1_xy[0], pt1_xy[1]
+    dist = math.hypot(x1 - x0, y1 - y0)
+    if dist >= 1:
+        steps = max(1, int(dist / dash))
+        for i in range(0, steps, 2):
+            ta = i / steps
+            tb = min((i + 1) / steps, 1.0)
+            draw.line(
+                [
+                    (int(x0 + (x1 - x0) * ta), int(y0 + (y1 - y0) * ta)),
+                    (int(x0 + (x1 - x0) * tb), int(y0 + (y1 - y0) * tb)),
+                ],
+                fill=color,
+                width=width,
+            )
+    img_np[:] = np.array(pil_img)
+
+
 def create_debug_visualization(
     batch,
     outputs: List[Dict],
@@ -265,6 +290,8 @@ def create_debug_visualization(
         
         # Get predictions for this frame
         pred_obj_scores = None
+        pred_cell_ids = np.array([])  # so division line logic can always reference it
+        pred_div_obj_score_logits = None  # for division line: solid = predicted, dashed = not
         if output_idx < len(outputs):
             pred_masks_t = outputs[output_idx].get("pred_masks_high_res", None)
             
@@ -276,6 +303,10 @@ def create_debug_visualization(
                 else:
                     # Fallback: use gt_cell_ids if tracking_object_ids not available
                     pred_cell_ids = gt_cell_ids[:len(pred_masks_t)] if len(pred_masks_t) <= len(gt_cell_ids) else gt_cell_ids
+
+                pred_div_obj_score_logits = outputs[output_idx].get("pred_div_obj_score_logits", None)
+                if pred_div_obj_score_logits is not None:
+                    pred_div_obj_score_logits = pred_div_obj_score_logits.detach().cpu()
                 
                 # Get object score logits (post-division)
                 pred_obj_score_logits = outputs[output_idx].get("pred_object_score_logits", None)
@@ -320,10 +351,15 @@ def create_debug_visualization(
                 gt_img = overlay_mask_on_image(gt_img, mask.numpy(), color, alpha=0.6, cell_id=cell_id, obj_score=10.0, obj_score_thresh=0.0)
 
         # Draw a line between the two daughter cells on the frame where division happens
+        # Prediction row: solid = model predicted division, dashed = not predicted
+        # Ground truth row: always draw division lines (solid) between daughter pairs
         num_daughters = len(daughter_ids_to_add)
+        div_score_thresh = 0.5
         if num_daughters >= 2 and num_daughters % 2 == 0:
             start = num_gt_cells - num_daughters
             division_line_color = (0, 0, 0)  # black
+            # Query indices for GT dividing cells (one per division)
+            gt_division_query_indices = [i for i in range(len(cell_divides_t)) if cell_divides_t[i]]
             for k in range(num_daughters // 2):
                 idx0, idx1 = start + 2 * k, start + 2 * k + 1
                 mask0 = get_largest_blob(gt_masks_t[idx0].detach().cpu())
@@ -335,7 +371,20 @@ def create_debug_visualization(
                     y1, x1 = np.where(m1)
                     cx0, cy0 = int(np.mean(x0)), int(np.mean(y0))
                     cx1, cy1 = int(np.mean(x1)), int(np.mean(y1))
-                    _draw_line_on_image(pred_img, (cx0, cy0), (cx1, cy1), division_line_color, width=3)
+                    # Prediction row: solid if model predicted division, else dashed
+                    if pred_div_obj_score_logits is not None and k < len(gt_division_query_indices):
+                        qidx = gt_division_query_indices[k]
+                        if qidx < pred_div_obj_score_logits.shape[0]:
+                            division_predicted = pred_div_obj_score_logits[qidx].sigmoid().item() > div_score_thresh
+                        else:
+                            division_predicted = False
+                    else:
+                        division_predicted = False
+                    if division_predicted:
+                        _draw_line_on_image(pred_img, (cx0, cy0), (cx1, cy1), division_line_color, width=3)
+                    else:
+                        _draw_dashed_line_on_image(pred_img, (cx0, cy0), (cx1, cy1), division_line_color, width=3, dash=6)
+                    # Ground truth row: always draw division line between daughters
                     _draw_line_on_image(gt_img, (cx0, cy0), (cx1, cy1), division_line_color, width=3)
 
         pred_frames.append(pred_img)
