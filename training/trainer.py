@@ -25,7 +25,6 @@ from iopath.common.file_io import g_pathmgr
 from training.dataset.sam2_datasets import SingleDataLoader
 from training.dataset.temporal_embedding_dataset import TemporalEmbeddingDataset
 from training.debug_viz import create_debug_visualization, should_visualize
-from training.loss_fns import temporal_matching_loss
 from training.optimizer import construct_optimizer
 from training.utils.checkpoint_utils import (
     assert_skipped_parameters_are_frozen,
@@ -755,6 +754,10 @@ class Trainer:
         phase: str,
     ):
         """Forward and loss for temporal head only from cached embedding pairs."""
+        # Local import to avoid circular import:
+        # training/loss_fns.py imports CORE_LOSS_KEY from training/trainer.py.
+        from training.loss_fns import temporal_matching_loss
+
         model_module = unwrap_ddp_if_wrapped(model)
         head = model_module.temporal_matching_head
         loss_fn = self.loss.get("all") or next(iter(self.loss.values()))
