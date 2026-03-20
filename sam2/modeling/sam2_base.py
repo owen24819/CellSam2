@@ -1144,7 +1144,7 @@ class SAM2Base(torch.nn.Module):
 
         ys, xs = torch.nonzero(is_peak, as_tuple=True)
         if len(xs) == 0:
-            return torch.empty((0, 2), device=heatmap.device)
+            return torch.empty((0, 1, 2), device=heatmap.device, dtype=heatmap.dtype)
 
         scores = heatmap[ys, xs]
         sorted_idx = torch.argsort(scores, descending=True)

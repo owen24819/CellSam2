@@ -1658,7 +1658,7 @@ class SAM2AutomaticCellTracker:
                             & (input_points[:, 0, 0] < resized_w)
                             & (input_points[:, 0, 1] >= 0)
                             & (input_points[:, 0, 1] < resized_h)
-                        ).squeeze()
+                        ).reshape(-1)
                         input_points = input_points[valid]
                         input_points_copy = input_points_copy[valid]
                         point_labels = point_labels[valid]
