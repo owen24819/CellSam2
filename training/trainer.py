@@ -1412,10 +1412,13 @@ class Trainer:
         if self.meters_conf:
             self.meters = instantiate(self.meters_conf, _convert_="all")
 
-        self.scaler = torch.amp.GradScaler(
-            self.device,
-            enabled=self.optim_conf.amp.enabled if self.optim_conf else False,
+        # BF16 doesn't need dynamic loss scaling — disable GradScaler for bfloat16
+        _use_scaler = bool(
+            self.optim_conf
+            and self.optim_conf.amp.enabled
+            and getattr(self.optim_conf.amp, "amp_dtype", "float16") != "bfloat16"
         )
+        self.scaler = torch.amp.GradScaler(self.device, enabled=_use_scaler)
 
         self.gradient_clipper = (
             instantiate(self.optim_conf.gradient_clip) if self.optim_conf else None

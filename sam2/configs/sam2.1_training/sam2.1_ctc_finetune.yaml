@@ -115,13 +115,15 @@ trainer:
   mode: train
   max_epochs: ${scratch.num_epochs}
   accelerator: cuda
+  cuda:
+    allow_tf32: true
   seed_value: 123
   freeze_encoder: ${scratch.freeze_encoder}
   freeze_non_temporal: ${scratch.freeze_non_temporal}
   # When use_temporal_matching=true this is set to temporal_embeddings: extract embeddings once (CellSam2 runs on dataset), then train only temporal head (no CellSam2 during training). Set to null to train full model.
   temporal_embeddings_dir: null
   force_temporal_embeddings: false  # Set true to re-extract embeddings even if cache exists
-  debug_viz: true  # Set to true to enable debug visualization of predictions vs ground truth
+  debug_viz: false  # Set to true to enable debug visualization of predictions vs ground truth
   debug_viz_interval: 5.0  # Percentage interval (5.0 = every 5% of dataset)
 
   use_lora: ${scratch.use_lora}
@@ -254,8 +256,7 @@ trainer:
     multimask_min_pt_num: 0
     multimask_max_pt_num: 1
     use_mlp_for_obj_ptr_proj: true
-    # Compilation flag
-    # compile_image_encoder: False
+    compile_image_encoder: False
 
     pred_iou_thresh: 0.7
     obj_score_thresh: 0.5
@@ -353,10 +354,11 @@ trainer:
   optim:
     amp:
       enabled: True # True for GPU
-      amp_dtype: float16
+      amp_dtype: bfloat16
 
     optimizer:
       _target_: torch.optim.AdamW
+      fused: true
 
     gradient_clip:
       _target_: training.optimizer.PerGroupGradientClipper
