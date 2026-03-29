@@ -19,9 +19,6 @@ multi_datasets:
   - data_dir: ../data/MLCI
     max_per_epoch: 1000
     max_per_epoch_val: 200
-  - data_dir: ../data/yeast
-    max_per_epoch: 1000
-    max_per_epoch_val: 200
 
 trainer:
   data:
