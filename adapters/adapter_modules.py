@@ -1,4 +1,5 @@
 import torch.nn as nn
+from peft import LoraConfig
 from peft.tuners.lora import Linear as LoRALinear
 
 
@@ -45,9 +46,17 @@ class RoPELoRAAdapter(nn.Module):
         super().__init__()
         self.attn_module = attn_module
 
+        peft_config = LoraConfig(
+            r=lora_rank,
+            lora_alpha=alpha,
+            lora_dropout=dropout,
+            bias=bias,
+        )
+
         self.attn_module.q_proj = LoRALinear(
             base_layer=self.attn_module.q_proj,
             adapter_name=f"{adapter_name}_q_proj",
+            config=peft_config,
             r=lora_rank,
             lora_alpha=alpha,
             lora_dropout=dropout,
@@ -57,6 +66,7 @@ class RoPELoRAAdapter(nn.Module):
         self.attn_module.k_proj = LoRALinear(
             base_layer=self.attn_module.k_proj,
             adapter_name=f"{adapter_name}_k_proj",
+            config=peft_config,
             r=lora_rank,
             lora_alpha=alpha,
             lora_dropout=dropout,
@@ -67,6 +77,7 @@ class RoPELoRAAdapter(nn.Module):
             self.attn_module.v_proj = LoRALinear(
                 base_layer=self.attn_module.v_proj,
                 adapter_name=f"{adapter_name}_v_proj",
+                config=peft_config,
                 r=lora_rank,
                 lora_alpha=alpha,
                 lora_dropout=dropout,

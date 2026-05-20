@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+from peft import LoraConfig
 from peft.tuners.lora import Linear as LoRALinear
 
 from adapters.adapter_modules import ImageEncoderLoRAAdapter, RoPELoRAAdapter
@@ -34,6 +35,12 @@ class SAM2LoRAModel:
         self.trainable_iou_pred_heads = trainable_iou_pred_heads
         self.trainable_obj_score_heads = trainable_obj_score_heads
         self.mode = mode
+        self.peft_config = LoraConfig(
+            r=self.lora_rank,
+            lora_alpha=self.lora_alpha,
+            lora_dropout=self.lora_dropout,
+            bias=self.lora_bias
+        )
         self.inject()
 
     def create_adapter(self, blk, dim):
@@ -90,6 +97,7 @@ class SAM2LoRAModel:
                     layer.linear2 = LoRALinear(
                         base_layer=layer.linear2,
                         adapter_name=adapter_name,
+                        config=self.peft_config,
                         r=self.lora_rank,
                         lora_alpha=self.lora_alpha,
                         lora_dropout=self.lora_dropout
@@ -115,6 +123,7 @@ class SAM2LoRAModel:
                     layer.mlp.layers[1] = LoRALinear(
                         base_layer=layer.mlp.layers[1],
                         adapter_name=adapter_name,
+                        config=self.peft_config,
                         r=self.lora_rank,
                         lora_alpha=self.lora_alpha,
                         lora_dropout=self.lora_dropout
