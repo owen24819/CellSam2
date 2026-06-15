@@ -55,24 +55,23 @@ def load_sequence(gt_folder: Path, res_folder: Path):
 
 
 def compute_sequence_metrics(gt_folder: Path, res_folder: Path, alphas: list):
-    """Compute all metrics for a single sequence."""
     gt_data, res_data = load_sequence(gt_folder, res_folder)
-
     seq_results = {"CTC": {}, "CHOTA_by_alpha": {}}
 
-    # ── CTC TRA / SEG (uses CTCMatcher with fixed IoGT > 0.5) ────────────────
+    # ── CTC TRA / SEG ────────────────────────────────────────────────────────
     ctc_out = run_metrics(
         gt_data, res_data,
         matcher=CTCMatcher(),
         metrics=[CTCMetrics()],
     )
-    ctc = ctc_out[0].results
-    tra   = ctc.get("TRA", float("nan"))
-    seg   = ctc.get("SEG", float("nan"))
+    # run_metrics returns a Results object directly in newer traccuracy versions
+    ctc = ctc_out.results if hasattr(ctc_out, "results") else ctc_out[0].results
+    tra    = ctc.get("TRA", float("nan"))
+    seg    = ctc.get("SEG", float("nan"))
     op_ctb = math.sqrt(tra * seg) if not (math.isnan(tra) or math.isnan(seg)) else float("nan")
     seq_results["CTC"] = {"TRA": tra, "SEG": seg, "OP_CTB": op_ctb}
 
-    # ── CHOTAMetric across alpha values (alpha = IoU threshold for matching) ──
+    # ── CHOTAMetric across alpha values ──────────────────────────────────────
     for alpha in alphas:
         a = round(alpha, 2)
         hota_out = run_metrics(
@@ -80,9 +79,9 @@ def compute_sequence_metrics(gt_folder: Path, res_folder: Path, alphas: list):
             matcher=IOUMatcher(iou_threshold=a),
             metrics=[CHOTAMetric()],
         )
-        h = hota_out[0].results
+        h = hota_out.results if hasattr(hota_out, "results") else hota_out[0].results
         seq_results["CHOTA_by_alpha"][a] = {
-            "Cell-HOTA": h.get("CHOTA", float("nan")) * 100,  # scale to 0-100 like the figure
+            "Cell-HOTA": h.get("CHOTA", float("nan")) * 100,
         }
 
     return seq_results
