@@ -26,12 +26,15 @@ from traccuracy.metrics import CHOTAMetric, CTCMetrics
 
 
 def find_sequence_pairs(gt_path: Path, res_path: Path):
-    """Find matching XX_GT / XX_RES folder pairs."""
+    """
+    Match XX_GT folders in gt_path to XX folders in res_path.
+    track_cells.py saves results as res_path/XX/ (not XX_RES/).
+    """
     pairs = []
     for item in sorted(gt_path.iterdir()):
         if item.is_dir() and re.match(r"^\d{2}_GT$", item.name):
-            seq_id = item.name.replace("_GT", "")
-            res_seq = res_path / f"{seq_id}_RES"
+            seq_id = item.name.replace("_GT", "")  # e.g. "05"
+            res_seq = res_path / seq_id             # e.g. results/.../05
             if res_seq.exists():
                 pairs.append((item, res_seq))
             else:
@@ -40,7 +43,6 @@ def find_sequence_pairs(gt_path: Path, res_path: Path):
 
 
 def load_sequence(gt_folder: Path, res_folder: Path):
-    """Load a GT/RES sequence pair."""
     gt_data  = load_ctc_data(
         str(gt_folder / "TRA"),
         str(gt_folder / "TRA" / "man_track.txt"),
