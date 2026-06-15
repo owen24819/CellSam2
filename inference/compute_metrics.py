@@ -22,7 +22,7 @@ import pandas as pd
 from traccuracy import run_metrics
 from traccuracy.loaders import load_ctc_data
 from traccuracy.matchers import CTCMatcher, IOUMatcher
-from traccuracy.metrics import CHOTAMetric, CTCMetrics
+from traccuracy.metrics import CHOTAMetrics, CTCMetrics
 
 
 def find_sequence_pairs(gt_path: Path, res_path: Path):
@@ -59,13 +59,12 @@ def compute_sequence_metrics(gt_folder: Path, res_folder: Path, alphas: list):
     seq_results = {"CTC": {}, "CHOTA_by_alpha": {}}
 
     # ── CTC TRA / SEG ────────────────────────────────────────────────────────
-    ctc_out = run_metrics(
+    ctc_results, _ = run_metrics(
         gt_data, res_data,
         matcher=CTCMatcher(),
         metrics=[CTCMetrics()],
     )
-    # run_metrics returns a Results object directly in newer traccuracy versions
-    ctc = ctc_out.results if hasattr(ctc_out, "results") else ctc_out[0].results
+    ctc  = ctc_results[0]["results"]
     tra    = ctc.get("TRA", float("nan"))
     seg    = ctc.get("SEG", float("nan"))
     op_ctb = math.sqrt(tra * seg) if not (math.isnan(tra) or math.isnan(seg)) else float("nan")
@@ -74,12 +73,12 @@ def compute_sequence_metrics(gt_folder: Path, res_folder: Path, alphas: list):
     # ── CHOTAMetric across alpha values ──────────────────────────────────────
     for alpha in alphas:
         a = round(alpha, 2)
-        hota_out = run_metrics(
+        hota_results, _ = run_metrics(
             gt_data, res_data,
             matcher=IOUMatcher(iou_threshold=a),
-            metrics=[CHOTAMetric()],
+            metrics=[CHOTAMetrics()],
         )
-        h = hota_out.results if hasattr(hota_out, "results") else hota_out[0].results
+        h = hota_results[0]["results"]
         seq_results["CHOTA_by_alpha"][a] = {
             "Cell-HOTA": h.get("CHOTA", float("nan")) * 100,
         }
