@@ -511,104 +511,223 @@ class SAM2AutomaticCellTracker:
         
         return filtered_masks, prev_assignments
 
-    def _overlay_tracked_masks(self, tiled_states, crop_masks, prev_assignments=None):
+    def _overlay_tracked_masks(self, tiled_states, crop_masks, prev_assignments=None, frame_idx=None):
         """Overlay full crop predictions for tracked cells.
-        
+
         Unlike _merge_crop_masks which uses non-overlapping regions, this overlays
         the full prediction from each crop. Cells are already filtered to assigned ones.
-        
+
         When overlaying, if a cell from a later crop overlaps significantly with a cell
-        from an earlier crop, they are the same physical cell. We keep the ID from the
-        crop that was assigned to track it, and drop the other ID.
-        
+        from an earlier crop, they are the same physical cell. Priority:
+
+        1. Anchored cells (continuing assigned tracks, or daughters of an assigned parent)
+           beat brand-new cells with no parent.
+        2. Among anchored cells, a freshly divided daughter wins over an unrelated
+           continuing track (follow through on the crop that owns the mother).
+        3. Otherwise prefer the ID from the crop assigned to track it; if both/neither,
+           keep the later crop's ID.
+
         Args:
             tiled_states: List of inference states, one per crop
             crop_masks: List of filtered crop masks (only assigned cells)
             prev_assignments: List of sets, one per crop, containing assigned cell IDs
-            
+            frame_idx: Current frame index (for parent_ids lookup)
+
         Returns:
             Merged full_mask with full cell predictions overlaid
         """
         full_height = tiled_states[0]["full_video_height"]
         full_width = tiled_states[0]["full_video_width"]
         full_mask = np.zeros((full_height, full_width), dtype=np.uint16)
-        
+
         # Track which cells have been merged (old_id -> new_id mapping)
-        # When two cells overlap, we keep the ID from the assigned crop
         cell_id_mapping = {}
-        
+        # cell_id -> mother_id for daughters already painted on full_mask
+        known_daughters = {}
+
+        prev_id_map = {}
+        for state in tiled_states:
+            if frame_idx is not None and frame_idx > 0:
+                prev_id_map.update(state.get("cell_id_map", {}).get(frame_idx - 1, {}))
+
+        def _parent_map_for_crop(state):
+            parent_map = {}
+            if frame_idx is None:
+                return parent_map
+            if frame_idx in state.get("obj_ids", {}) and frame_idx in state.get("parent_ids", {}):
+                local_ids = state["obj_ids"][frame_idx].cpu().numpy()
+                local_parents = state["parent_ids"][frame_idx].cpu().numpy()
+                for obj_id, parent_id in zip(local_ids, local_parents, strict=False):
+                    parent_map[int(obj_id)] = int(parent_id)
+            return parent_map
+
+        def _local_assigned_ids(assigned_cells):
+            """Global assigned IDs plus their local IDs in this crop."""
+            local_ids = set(assigned_cells)
+            for gid in assigned_cells:
+                local_ids.add(prev_id_map.get(gid, gid))
+            return local_ids
+
+        def _anchorage(cell_id, assigned_cells, local_assigned, parent_map):
+            """Return (tier, mother_id).
+
+            tier 2 = anchored (existing assigned track or daughter of assigned parent)
+            tier 1 = brand-new cell with no parent
+            """
+            mother = parent_map.get(int(cell_id), 0) or known_daughters.get(int(cell_id), 0)
+            if mother != 0:
+                # Freshly divided: anchored if mother was assigned to this crop,
+                # or already recorded as a daughter on the global mask.
+                if (
+                    mother in assigned_cells
+                    or mother in local_assigned
+                    or int(cell_id) in known_daughters
+                ):
+                    return 2, mother
+                return 1, mother
+            if int(cell_id) in assigned_cells or int(cell_id) in local_assigned:
+                return 2, 0
+            # Existing cell assigned to some other crop still counts as anchored
+            if prev_assignments is not None:
+                for prev_assigned in prev_assignments:
+                    if int(cell_id) in prev_assigned:
+                        return 2, 0
+            if int(cell_id) in known_daughters:
+                return 2, known_daughters[int(cell_id)]
+            return 1, 0
+
+        def _keep_crop(existing_cell_id, crop_cell_id, existing_cell_mask, y0, y1, x0, x1, mother):
+            cell_id_mapping[existing_cell_id] = crop_cell_id
+            full_mask[y0:y1, x0:x1][existing_cell_mask] = crop_cell_id
+            known_daughters.pop(int(existing_cell_id), None)
+            if mother:
+                known_daughters[int(crop_cell_id)] = mother
+            else:
+                known_daughters.pop(int(crop_cell_id), None)
+
+        def _keep_existing(crop_cell_id, existing_cell_id, mother):
+            cell_id_mapping[crop_cell_id] = existing_cell_id
+            known_daughters.pop(int(crop_cell_id), None)
+            if mother:
+                known_daughters[int(existing_cell_id)] = mother
+
         # Overlay each crop's full prediction
         for crop_idx, (state, crop_mask) in enumerate(zip(tiled_states, crop_masks, strict=False)):
             x0, y0, x1, y1 = state["crop_box"]
             crop_region = full_mask[y0:y1, x0:x1]
             crop_mask_nonzero = crop_mask > 0
-            
-            # Get assigned cells for this crop (to prefer their IDs)
+
             assigned_cells_this_crop = set()
             if prev_assignments is not None and crop_idx < len(prev_assignments):
-                assigned_cells_this_crop = prev_assignments[crop_idx]
-            
-            # Check for overlaps with existing cells in this region
+                assigned_cells_this_crop = set(prev_assignments[crop_idx])
+            local_assigned = _local_assigned_ids(assigned_cells_this_crop)
+            parent_map = _parent_map_for_crop(state)
+
             existing_cells = np.unique(crop_region[crop_mask_nonzero])
             existing_cells = existing_cells[existing_cells != 0]
-            
-            # For each cell in current crop, check if it overlaps with existing cells
+
             crop_cell_ids = np.unique(crop_mask[crop_mask_nonzero])
             crop_cell_ids = crop_cell_ids[crop_cell_ids != 0]
-            
+
             for crop_cell_id in crop_cell_ids:
-                crop_cell_mask = (crop_mask == crop_cell_id)
-                crop_cell_in_region = crop_cell_mask
-                
-                # Check overlap with existing cells in this region
+                crop_cell_id = int(crop_cell_id)
+                crop_cell_in_region = crop_mask == crop_cell_id
+
                 for existing_cell_id in existing_cells:
-                    existing_cell_mask = (crop_region == existing_cell_id)
+                    existing_cell_id = int(existing_cell_id)
+                    existing_cell_mask = crop_region == existing_cell_id
                     overlap = np.logical_and(crop_cell_in_region, existing_cell_mask)
                     overlap_area = overlap.sum()
-                    
-                    if overlap_area > 0:
-                        # Check if significant overlap (same physical cell)
-                        crop_cell_area = crop_cell_in_region.sum()
-                        existing_cell_area = existing_cell_mask.sum()
-                        overlap_ratio = overlap_area / min(crop_cell_area, existing_cell_area)
-                        
-                        if overlap_ratio >= 0.3:  # Significant overlap - same cell
-                            # Determine which ID to keep based on assignments
-                            # Prefer the ID from the crop that was assigned to track it
-                            crop_cell_assigned = crop_cell_id in assigned_cells_this_crop
-                            # Check if existing_cell_id was assigned to a previous crop
-                            existing_cell_assigned = False
-                            if prev_assignments is not None:
-                                for prev_crop_idx, prev_assigned in enumerate(prev_assignments):
-                                    if existing_cell_id in prev_assigned:
-                                        existing_cell_assigned = True
-                                        break
-                            
-                            # Keep the ID from the assigned crop, or current crop if both/neither assigned
-                            if crop_cell_assigned and not existing_cell_assigned:
-                                # Current crop's cell is assigned, keep it
-                                cell_id_mapping[existing_cell_id] = crop_cell_id
-                                # Update existing pixels
-                                full_mask[y0:y1, x0:x1][existing_cell_mask] = crop_cell_id
-                            elif existing_cell_assigned and not crop_cell_assigned:
-                                # Existing cell is assigned, keep it (map current to existing)
-                                cell_id_mapping[crop_cell_id] = existing_cell_id
-                            else:
-                                # Both or neither assigned - keep the one from later crop (current)
-                                cell_id_mapping[existing_cell_id] = crop_cell_id
-                                full_mask[y0:y1, x0:x1][existing_cell_mask] = crop_cell_id
-            
+                    if overlap_area == 0:
+                        continue
+
+                    crop_cell_area = crop_cell_in_region.sum()
+                    existing_cell_area = existing_cell_mask.sum()
+                    overlap_ratio = overlap_area / min(crop_cell_area, existing_cell_area)
+                    if overlap_ratio < 0.3:
+                        continue
+
+                    crop_tier, crop_mother = _anchorage(
+                        crop_cell_id, assigned_cells_this_crop, local_assigned, parent_map
+                    )
+                    # Existing cell's parent_map is whatever crop painted it; use known_daughters
+                    exist_tier, exist_mother = _anchorage(
+                        existing_cell_id, set(), set(), {}
+                    )
+
+                    crop_is_daughter = crop_mother != 0
+                    exist_is_daughter = exist_mother != 0
+
+                    # Follow through on divisions: a daughter wins over an unrelated track
+                    if crop_is_daughter and existing_cell_id != crop_mother and (
+                        not exist_is_daughter or exist_mother != crop_mother
+                    ):
+                        _keep_crop(
+                            existing_cell_id, crop_cell_id, existing_cell_mask,
+                            y0, y1, x0, x1, crop_mother,
+                        )
+                        continue
+                    if exist_is_daughter and crop_cell_id != exist_mother and (
+                        not crop_is_daughter or crop_mother != exist_mother
+                    ):
+                        _keep_existing(crop_cell_id, existing_cell_id, exist_mother)
+                        continue
+
+                    # Anchored (existing / divided) beats brand-new no-parent cells
+                    if crop_tier > exist_tier:
+                        _keep_crop(
+                            existing_cell_id, crop_cell_id, existing_cell_mask,
+                            y0, y1, x0, x1, crop_mother,
+                        )
+                        continue
+                    if exist_tier > crop_tier:
+                        _keep_existing(crop_cell_id, existing_cell_id, exist_mother)
+                        continue
+
+                    # Same tier: prefer the crop assigned to track it
+                    crop_cell_assigned = (
+                        crop_cell_id in assigned_cells_this_crop
+                        or crop_cell_id in local_assigned
+                        or (crop_mother and (
+                            crop_mother in assigned_cells_this_crop
+                            or crop_mother in local_assigned
+                        ))
+                    )
+                    existing_cell_assigned = exist_tier == 2
+
+                    if crop_cell_assigned and not existing_cell_assigned:
+                        _keep_crop(
+                            existing_cell_id, crop_cell_id, existing_cell_mask,
+                            y0, y1, x0, x1, crop_mother,
+                        )
+                    elif existing_cell_assigned and not crop_cell_assigned:
+                        _keep_existing(crop_cell_id, existing_cell_id, exist_mother)
+                    else:
+                        # Both or neither: keep later crop
+                        _keep_crop(
+                            existing_cell_id, crop_cell_id, existing_cell_mask,
+                            y0, y1, x0, x1, crop_mother,
+                        )
+
             # Apply ID mappings to current crop mask before overlaying
             mapped_crop_mask = crop_mask.copy()
             for old_id, new_id in cell_id_mapping.items():
                 mapped_crop_mask[crop_mask == old_id] = new_id
-            
-            # Overlay the mapped crop mask
+
             crop_region = full_mask[y0:y1, x0:x1]
             mapped_crop_mask_nonzero = mapped_crop_mask > 0
             crop_region[mapped_crop_mask_nonzero] = mapped_crop_mask[mapped_crop_mask_nonzero]
             full_mask[y0:y1, x0:x1] = crop_region
-        
+
+            # Record daughters painted by this crop
+            for cid in np.unique(mapped_crop_mask[mapped_crop_mask_nonzero]):
+                cid = int(cid)
+                mother = parent_map.get(cid, 0)
+                if mother != 0 and (
+                    mother in assigned_cells_this_crop or mother in local_assigned
+                ):
+                    known_daughters[cid] = mother
+
         return full_mask
 
     def _merge_cells_at_boundaries(self, full_mask, tiled_states, crop_masks):
@@ -1076,7 +1195,9 @@ class SAM2AutomaticCellTracker:
                 filtered_masks, prev_assignments = self._filter_crop_masks_by_assignments(
                     tiled_states, crop_masks, frame_idx
                 )
-                full_mask = self._overlay_tracked_masks(tiled_states, filtered_masks, prev_assignments)
+                full_mask = self._overlay_tracked_masks(
+                    tiled_states, filtered_masks, prev_assignments, frame_idx=frame_idx
+                )
             else:
                 # Frame 1+: Tracking - use previous frame's assignments to filter current predictions
                 filtered_masks, prev_assignments = self._filter_crop_masks_by_assignments(
@@ -1084,7 +1205,9 @@ class SAM2AutomaticCellTracker:
                 )
                 # Merge tracked masks - overlay full predictions from each crop
                 # Pass prev_assignments to prefer IDs from assigned crops
-                tracked_mask = self._overlay_tracked_masks(tiled_states, filtered_masks, prev_assignments)
+                tracked_mask = self._overlay_tracked_masks(
+                    tiled_states, filtered_masks, prev_assignments, frame_idx=frame_idx
+                )
             
                 # Get cells that appear in tracked_mask
                 tracked_cell_ids = set(np.unique(tracked_mask))
