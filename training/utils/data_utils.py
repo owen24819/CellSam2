@@ -134,6 +134,7 @@ class VideoDatapoint:
     video_id: int
     size: Tuple[int, int]
     man_track: torch.IntTensor
+    clip_zoom_scale: float = 1.0
 
 def pad_and_stack(tensor_list, max_objects, pad_value=0):
     """

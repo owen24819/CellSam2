@@ -398,6 +398,143 @@ class RandomAffine:
         return datapoint
 
 
+class RandomAnisotropicScale:
+    """Stretch the image/masks along one axis (filament-like elongation).
+
+    With probability ``p``, scales one axis by a factor in ``scale_range`` and
+    leaves the other at 1.0, then center-crops/pads back to the original size.
+    """
+
+    def __init__(
+        self,
+        scale_range=(1.0, 2.5),
+        p=0.3,
+        consistent_transform=True,
+        image_mean=(123, 116, 103),
+        image_interpolation="bilinear",
+        axis=None,
+        scale=None,
+    ):
+        """
+        Args:
+            scale_range: (min, max) stretch factor along the chosen axis.
+            p: Probability of applying the transform.
+            consistent_transform: Same stretch for all frames in the video.
+            image_mean: Fill value for image padding (RGB).
+            image_interpolation: ``bilinear`` or ``bicubic`` for images.
+            axis: If set (0=y/height, 1=x/width), use this axis (for debugging).
+            scale: If set, use this stretch factor (for debugging).
+        """
+        self.scale_range = scale_range
+        self.p = p
+        self.consistent_transform = consistent_transform
+        self.fill_img = image_mean
+        self.axis = axis
+        self.scale = scale
+        if image_interpolation == "bicubic":
+            self.image_interpolation = InterpolationMode.BICUBIC
+        elif image_interpolation == "bilinear":
+            self.image_interpolation = InterpolationMode.BILINEAR
+        else:
+            raise NotImplementedError
+
+    def _sample_params(self):
+        if self.scale is not None:
+            scale = float(self.scale)
+        else:
+            scale = random.uniform(self.scale_range[0], self.scale_range[1])
+        if self.axis is not None:
+            axis = int(self.axis)
+        else:
+            axis = random.choice([0, 1])
+        return axis, scale
+
+    @staticmethod
+    def _stretch_and_crop(img, axis, scale, interpolation, fill):
+        """Stretch along ``axis`` by ``scale``, then center-crop/pad to original size."""
+        if isinstance(img, PILImage.Image):
+            w, h = img.size
+        else:
+            # tensor CHW
+            h, w = img.shape[-2:]
+
+        if axis == 1:  # stretch width (x)
+            new_w = max(1, int(round(w * scale)))
+            new_h = h
+        else:  # stretch height (y)
+            new_w = w
+            new_h = max(1, int(round(h * scale)))
+
+        img = F.resize(img, [new_h, new_w], interpolation=interpolation)
+
+        # Center crop if larger, pad if smaller
+        if isinstance(img, PILImage.Image):
+            cur_w, cur_h = img.size
+        else:
+            cur_h, cur_w = img.shape[-2:]
+
+        # Crop
+        top = max(0, (cur_h - h) // 2)
+        left = max(0, (cur_w - w) // 2)
+        img = F.crop(img, top, left, min(h, cur_h), min(w, cur_w))
+
+        if isinstance(img, PILImage.Image):
+            cur_w, cur_h = img.size
+        else:
+            cur_h, cur_w = img.shape[-2:]
+
+        pad_h = h - cur_h
+        pad_w = w - cur_w
+        if pad_h > 0 or pad_w > 0:
+            padding = [
+                pad_w // 2,
+                pad_h // 2,
+                pad_w - pad_w // 2,
+                pad_h - pad_h // 2,
+            ]
+            img = F.pad(img, padding, fill=fill)
+
+        return img
+
+    def __call__(self, datapoint: VideoDatapoint, **kwargs):
+        if self.scale is None and self.axis is None and random.random() >= self.p:
+            return datapoint
+
+        if self.consistent_transform:
+            axis, scale = self._sample_params()
+
+        for img in datapoint.frames:
+            if not self.consistent_transform:
+                axis, scale = self._sample_params()
+
+            for obj in img.objects:
+                if obj.segment is not None:
+                    seg = obj.segment
+                    if not isinstance(seg, torch.Tensor):
+                        continue
+                    # F.resize expects CHW for tensors
+                    if seg.dim() == 2:
+                        seg = seg.unsqueeze(0)
+                    seg = self._stretch_and_crop(
+                        seg.float(),
+                        axis,
+                        scale,
+                        InterpolationMode.NEAREST,
+                        fill=0.0,
+                    )
+                    obj.segment = seg.squeeze(0) > 0.5
+
+            img.data = self._stretch_and_crop(
+                img.data,
+                axis,
+                scale,
+                self.image_interpolation,
+                fill=self.fill_img,
+            )
+
+        return datapoint
+
+
 def random_mosaic_frame(
     datapoint,
     index,

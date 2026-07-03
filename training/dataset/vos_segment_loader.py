@@ -19,38 +19,103 @@ from PIL import Image as PILImage
 
 
 class CTCSegmentLoader:
-    def __init__(self, video_mask_path, first_mask_path, target_size, 
-                 resize_threshold, training):
-        
+    """Load CTC masks with optional spatial crop and clip-consistent geometry.
+
+    ``zoom_range`` is sampled once per clip when ``zoom_p`` triggers. When the source
+    image is larger than ``resize_threshold``, zoom-in uses a smaller crop window;
+    zoom-out uses a larger crop window when the source is big enough. When the crop
+    cannot reach the full window, the remaining factor is applied via warp zoom
+    (multiplicative: ``crop_zoom * warp_zoom == zoom_scale``).
+    """
+
+    def __init__(
+        self,
+        video_mask_path,
+        first_mask_path,
+        target_size,
+        resize_threshold,
+        training,
+        *,
+        crop_shift_frac: float = 0.08,
+        crop_shift_p: float = 0.5,
+        random_crop_p: float = 0.1,
+        zoom_range=(0.6, 1.2),
+        zoom_p: float = 0.5,
+        max_shear_deg: float = 45.0,
+        shear_p: float = 0.3,
+        wide_aspect_ratio_min: float = 3.0,
+        wide_aspect_shear_cap: float = 10.0,
+        aniso_scale_range=(1.0, 4.0),
+        aniso_p: float = 0.3,
+    ):
         self.mask_paths = sorted(list((video_mask_path).glob("*.tif")))
         self.training = training
         self.target_size = target_size
         self.resize_threshold = resize_threshold
+        self.crop_shift_frac = crop_shift_frac
+        self.crop_shift_p = crop_shift_p
+        self.random_crop_p = random_crop_p
+        self.zoom_range = tuple(zoom_range)
+        self.zoom_p = zoom_p
+        self.max_shear_deg = max_shear_deg
+        self.shear_p = shear_p
+        self.wide_aspect_ratio_min = wide_aspect_ratio_min
+        self.wide_aspect_shear_cap = wide_aspect_shear_cap
+        self.aniso_scale_range = tuple(aniso_scale_range)
+        self.aniso_p = aniso_p
         self._frame_crop_cache = {}
-        self.crop_region = self._determine_crop_region(first_mask_path)
 
-    def _determine_crop_region(self, first_mask_path: str) -> Optional[Tuple[int, int, int, int]]:
-        """Determine crop region: 10% random, 90% center on random cell for training; always center crop for validation."""
-        # Load first frame image to determine size
         first_mask = tifffile.imread(first_mask_path)
+        self.full_h, self.full_w = first_mask.shape
+        self.effective_max_shear_deg = self._resolve_effective_max_shear(
+            self.full_h, self.full_w
+        )
+
+        self._sample_geometry()
+        self.crop_region = self._determine_crop_region(first_mask)
+        self.warp_zoom_scale = self._resolve_warp_zoom_scale()
+
+    def _resolve_warp_zoom_scale(self) -> float:
+        """Warp zoom after any crop contribution (``crop_zoom * warp_zoom == zoom_scale``)."""
+        if self.zoom_scale == 1.0:
+            return 1.0
+        if self.crop_region is None:
+            return self.zoom_scale
+
+        top, left, bottom, right = self.crop_region
+        crop_h = bottom - top
+        crop_w = right - left
+        actual_crop = max(1, min(crop_h, crop_w))
+        crop_zoom = self.target_size / actual_crop
+        return self.zoom_scale / crop_zoom
+
+    @staticmethod
+    def _aspect_ratio(h: int, w: int) -> float:
+        return max(h, w) / max(1, min(h, w))
+
+    def _resolve_effective_max_shear(self, h: int, w: int) -> float:
+        """Cap shear on wide movies where large angles look unrealistic."""
+        if self._aspect_ratio(h, w) >= self.wide_aspect_ratio_min:
+            return min(self.max_shear_deg, self.wide_aspect_shear_cap)
+        return self.max_shear_deg
+
+    def _determine_crop_region(self, first_mask: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """Determine crop region: 10% random, 90% center on random cell for training; always center crop for validation."""
         h, w = first_mask.shape
-        self.full_h = h
-        self.full_w = w
         max_dim = max(h, w)
         
         # Only crop if image is much larger than target
         if max_dim <= self.resize_threshold:
             return None
-        
-        scale = 1.0 + random.uniform(-0.1, 0.1) if self.training else 1.0
-        crop_h = max(1, int(round(self.target_size * scale)))
-        crop_w = max(1, int(round(self.target_size * scale)))
+
+        crop_h = max(1, int(round(self.target_size / self.zoom_scale)))
+        crop_w = max(1, int(round(self.target_size / self.zoom_scale)))
         top = max(0, (h - crop_h) // 2)
         left = max(0, (w - crop_w) // 2)
         
         # Determine crop position
         # Training: 10% random crop, 90% center on random cell
-        if self.training and random.random() < 0.1:
+        if self.training and random.random() < self.random_crop_p:
             # Random crop
             top = random.randint(0, max(0, h - crop_h))
             left = random.randint(0, max(0, w - crop_w))
@@ -83,14 +148,14 @@ class CTCSegmentLoader:
             return None
         if frame_id in self._frame_crop_cache:
             return self._frame_crop_cache[frame_id]
-        if not self.training or random.random() >= 0.5:
+        if not self.training or random.random() >= self.crop_shift_p:
             self._frame_crop_cache[frame_id] = self.crop_region
             return self.crop_region
         top, left, bottom, right = self.crop_region
         crop_h = bottom - top
         crop_w = right - left
-        max_shift_y = int(round(0.08 * crop_h))
-        max_shift_x = int(round(0.08 * crop_w))
+        max_shift_y = int(round(self.crop_shift_frac * crop_h))
+        max_shift_x = int(round(self.crop_shift_frac * crop_w))
         shift_y = random.randint(-max_shift_y, max_shift_y)
         shift_x = random.randint(-max_shift_x, max_shift_x)
         new_top = min(max(0, top + shift_y), max(0, self.full_h - crop_h))
@@ -98,6 +163,147 @@ class CTCSegmentLoader:
         crop_region = (new_top, new_left, new_top + crop_h, new_left + crop_w)
         self._frame_crop_cache[frame_id] = crop_region
         return crop_region
+
+    def _sample_geometry(self):
+        """Sample zoom / shear / anisotropic stretch once per clip (training only)."""
+        if not self.training:
+            self.zoom_scale = 1.0
+            self.shear_deg = 0.0
+            self.aniso_axis = None
+            self.aniso_scale = 1.0
+            return
+
+        if self.zoom_p > 0 and random.random() < self.zoom_p:
+            lo, hi = self.zoom_range
+            self.zoom_scale = random.uniform(lo, hi)
+        else:
+            self.zoom_scale = 1.0
+
+        if self.effective_max_shear_deg > 0 and self.shear_p > 0 and random.random() < self.shear_p:
+            self.shear_deg = random.uniform(
+                -self.effective_max_shear_deg, self.effective_max_shear_deg
+            )
+        else:
+            self.shear_deg = 0.0
+
+        if self.aniso_p > 0 and random.random() < self.aniso_p:
+            self.aniso_axis = random.choice([0, 1])  # 0=y (height), 1=x (width)
+            lo, hi = self.aniso_scale_range
+            self.aniso_scale = random.uniform(lo, hi)
+        else:
+            self.aniso_axis = None
+            self.aniso_scale = 1.0
+
+    def _geometry_is_identity(self) -> bool:
+        return (
+            self.warp_zoom_scale == 1.0
+            and self.shear_deg == 0.0
+            and (self.aniso_axis is None or self.aniso_scale == 1.0)
+        )
+
+    @staticmethod
+    def _resize_center_crop(
+        arr: np.ndarray, new_h: int, new_w: int, out_h: int, out_w: int, interp, fill
+    ) -> np.ndarray:
+        """Resize to (new_h, new_w), then center-crop/pad back to (out_h, out_w)."""
+        arr = cv2.resize(arr, (new_w, new_h), interpolation=interp)
+        cur_h, cur_w = arr.shape[:2]
+        top = max(0, (cur_h - out_h) // 2)
+        left = max(0, (cur_w - out_w) // 2)
+        arr = arr[top : top + min(out_h, cur_h), left : left + min(out_w, cur_w)]
+
+        cur_h, cur_w = arr.shape[:2]
+        pad_h = out_h - cur_h
+        pad_w = out_w - cur_w
+        if pad_h > 0 or pad_w > 0:
+            pad_top = pad_h // 2
+            pad_left = pad_w // 2
+            arr = cv2.copyMakeBorder(
+                arr,
+                pad_top,
+                pad_h - pad_top,
+                pad_left,
+                pad_w - pad_left,
+                cv2.BORDER_CONSTANT,
+                value=fill,
+            )
+        return arr
+
+    @staticmethod
+    def apply_isotropic_zoom(arr: np.ndarray, zoom_scale: float, is_mask: bool) -> np.ndarray:
+        """Resize by ``zoom_scale``, then center-crop/pad back to the original size."""
+        if zoom_scale == 1.0:
+            return arr
+        h, w = arr.shape[:2]
+        interp = cv2.INTER_NEAREST if is_mask else cv2.INTER_LINEAR
+        new_h = max(1, int(round(h * zoom_scale)))
+        new_w = max(1, int(round(w * zoom_scale)))
+        return CTCSegmentLoader._resize_center_crop(
+            arr, new_h, new_w, h, w, interp, fill=0
+        )
+
+    def _warp_array(self, arr: np.ndarray, is_mask: bool) -> np.ndarray:
+        """Apply clip-consistent zoom, shear, then anisotropic stretch. Keeps HxW size."""
+        if self._geometry_is_identity():
+            return arr
+
+        h, w = arr.shape[:2]
+        interp = cv2.INTER_NEAREST if is_mask else cv2.INTER_LINEAR
+        fill = 0
+
+        # Remaining zoom after crop window (multiplicative split).
+        if self.warp_zoom_scale != 1.0:
+            arr = self.apply_isotropic_zoom(arr, self.warp_zoom_scale, is_mask)
+
+        if self.shear_deg != 0.0:
+            shear = np.tan(np.radians(self.shear_deg))
+            # Horizontal shear about image center (matches torchvision shear-x).
+            cy = h / 2.0
+            M = np.array([[1.0, shear, -shear * cy], [0.0, 1.0, 0.0]], dtype=np.float32)
+            arr = cv2.warpAffine(
+                arr,
+                M,
+                (w, h),
+                flags=interp,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=fill,
+            )
+
+        if self.aniso_axis is not None and self.aniso_scale != 1.0:
+            scale = self.aniso_scale
+            if self.aniso_axis == 1:  # stretch width (x)
+                new_w = max(1, int(round(w * scale)))
+                new_h = h
+            else:  # stretch height (y)
+                new_w = w
+                new_h = max(1, int(round(h * scale)))
+            arr = self._resize_center_crop(arr, new_h, new_w, h, w, interp, fill)
+
+        return arr
+
+    def apply_geometry_mask(self, segment: torch.Tensor) -> torch.Tensor:
+        """Warp a binary mask with the clip-consistent geometry."""
+        if self._geometry_is_identity():
+            return segment
+        arr = segment.detach().cpu().numpy().astype(np.uint8)
+        arr = self._warp_array(arr, is_mask=True)
+        return torch.from_numpy(arr.astype(bool))
+
+    def apply_geometry_image(self, image: PILImage.Image) -> PILImage.Image:
+        """Warp a PIL image with the clip-consistent geometry."""
+        if self._geometry_is_identity():
+            return image
+        arr = np.array(image)
+        arr = self._warp_array(arr, is_mask=False)
+        return PILImage.fromarray(arr)
+
+    def prepare_image(self, image: PILImage.Image, frame_id) -> PILImage.Image:
+        """Crop (if any) then apply clip-consistent geometry."""
+        crop_region = self._get_frame_crop_region(frame_id)
+        if crop_region is not None:
+            top, left, bottom, right = crop_region
+            image = image.crop((left, top, right, bottom))
+        return self.apply_geometry_image(image)
 
     def load(self, frame_id):
         """
@@ -113,13 +319,15 @@ class CTCSegmentLoader:
         crop_region = self._get_frame_crop_region(frame_id)
         for inst_id in instance_ids:
             segment = torch.from_numpy(mask == inst_id)
-            
+
             # Apply crop if needed
             if crop_region is not None:
                 top, left, bottom, right = crop_region
                 segment = segment[top:bottom, left:right]
 
-            # Assume 
+            segment = self.apply_geometry_mask(segment)
+
+            # Assume
             if segment.sum() > 10:
                 segments[int(inst_id)] = segment
 
@@ -127,12 +335,14 @@ class CTCSegmentLoader:
         kernel = np.ones((3,3), np.uint8)
         bkgd_mask_dilated = cv2.erode((mask == 0).astype(np.uint8), kernel, iterations=2) # Erode background = dilate objects
         bkgd_mask = torch.from_numpy(bkgd_mask_dilated.astype(bool))
-        
+
         # Apply crop to background mask if needed
         if crop_region is not None:
             top, left, bottom, right = crop_region
             bkgd_mask = bkgd_mask[top:bottom, left:right]
-        
+
+        bkgd_mask = self.apply_geometry_mask(bkgd_mask)
+
         segments['bkgd_mask'] = bkgd_mask
 
         return segments

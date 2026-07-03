@@ -18,6 +18,20 @@ scratch:
   use_temporal_matching: False  # If true: create embeddings (CellSam2 runs once) then train only temporal head; no CellSam2 during training
   dataset_name: "moma"
 
+# Clip-consistent geometry in CTCSegmentLoader (before tracking/division labels).
+ctc_geometry:
+  crop_shift_frac: 0.08        # max per-frame FOV shift, fraction of crop size
+  crop_shift_p: 0.5            # prob. of shifting crop per frame (vs clip anchor)
+  random_crop_p: 0.1           # prob. of uniform random crop vs cell-centered (first frame only)
+  zoom_range: [0.6, 1.2]       # zoom in/out when zoom_p triggers; crop on large images, warp otherwise
+  zoom_p: 0.5                  # prob. of applying zoom (else true-domain scale)
+  max_shear_deg: 45
+  shear_p: 0.3                  # prob. of applying shear
+  wide_aspect_ratio_min: 3.0    # max(h,w)/min(h,w) >= this → cap shear below
+  wide_aspect_shear_cap: 10
+  aniso_scale_range: [1.0, 4.0]
+  aniso_p: 0.3                  # prob. of applying anisotropic stretch
+
 dataset:
   # PATHS to Dataset
   data_dir: ../data/${scratch.dataset_name}
@@ -40,7 +54,8 @@ vos:
           consistent_transform: True
         - _target_: training.dataset.transforms.RandomAffine
           degrees: 25
-          shear: 20
+          # shear / anisotropic stretch run earlier in CTCSegmentLoader
+          shear: null
           image_interpolation: bilinear
           consistent_transform: True
         - _target_: training.dataset.transforms.ColorJitter
@@ -307,6 +322,17 @@ trainer:
             training: true
             target_size: ${scratch.resolution}
             resize_threshold: ${scratch.resize_threshold}
+            crop_shift_frac: ${ctc_geometry.crop_shift_frac}
+            crop_shift_p: ${ctc_geometry.crop_shift_p}
+            random_crop_p: ${ctc_geometry.random_crop_p}
+            zoom_range: ${ctc_geometry.zoom_range}
+            zoom_p: ${ctc_geometry.zoom_p}
+            max_shear_deg: ${ctc_geometry.max_shear_deg}
+            shear_p: ${ctc_geometry.shear_p}
+            wide_aspect_ratio_min: ${ctc_geometry.wide_aspect_ratio_min}
+            wide_aspect_shear_cap: ${ctc_geometry.wide_aspect_shear_cap}
+            aniso_scale_range: ${ctc_geometry.aniso_scale_range}
+            aniso_p: ${ctc_geometry.aniso_p}
           sampler:
             _target_: training.dataset.vos_sampler.FrameIndexSampler
             max_num_objects: ${scratch.max_num_objects}
@@ -336,6 +362,14 @@ trainer:
             training: false
             target_size: ${scratch.resolution}
             resize_threshold: ${scratch.resize_threshold}
+            crop_shift_frac: 0
+            crop_shift_p: 0
+            random_crop_p: 0
+            zoom_range: [1.0, 1.0]
+            zoom_p: 0
+            max_shear_deg: 0
+            shear_p: 0
+            aniso_p: 0
           sampler:
             _target_: training.dataset.vos_sampler.FrameIndexSampler
             max_num_objects: ${scratch.max_num_objects}

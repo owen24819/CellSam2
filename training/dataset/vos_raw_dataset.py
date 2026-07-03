@@ -63,6 +63,17 @@ class CTCRawDataset(VOSRawDataset):
                  target_size=512,
                  resize_threshold=600,
                  training=True,
+                 crop_shift_frac=0.08,
+                 crop_shift_p=0.5,
+                 random_crop_p=0.1,
+                 zoom_range=(0.6, 1.2),
+                 zoom_p=0.5,
+                 max_shear_deg=45.0,
+                 shear_p=0.3,
+                 wide_aspect_ratio_min=3.0,
+                 wide_aspect_shear_cap=10.0,
+                 aniso_scale_range=(1.0, 4.0),
+                 aniso_p=0.3,
                  max_samples_per_epoch_per_dir=None,
                  train_sources=None,
                  split="train"):
@@ -80,6 +91,17 @@ class CTCRawDataset(VOSRawDataset):
         self.target_size = target_size
         self.resize_threshold = resize_threshold
         self.training = training
+        self.crop_shift_frac = crop_shift_frac
+        self.crop_shift_p = crop_shift_p
+        self.random_crop_p = random_crop_p
+        self.zoom_range = zoom_range
+        self.zoom_p = zoom_p
+        self.max_shear_deg = max_shear_deg
+        self.shear_p = shear_p
+        self.wide_aspect_ratio_min = wide_aspect_ratio_min
+        self.wide_aspect_shear_cap = wide_aspect_shear_cap
+        self.aniso_scale_range = aniso_scale_range
+        self.aniso_p = aniso_p
 
         # Read the subset defined in file_list_txt
         if file_list_txt is not None:
@@ -279,12 +301,23 @@ class CTCRawDataset(VOSRawDataset):
         first_frame_num = re.findall(r'\d+', selected_frames[0].stem)[0]
         first_mask_path = video_mask_root / (mask_prefix + first_frame_num + ".tif")
         segment_loader = CTCSegmentLoader(
-            video_mask_root, 
-            first_mask_path, 
-            target_size=self.target_size, 
-            resize_threshold=self.resize_threshold, 
-            training=self.training
-            )
+            video_mask_root,
+            first_mask_path,
+            target_size=self.target_size,
+            resize_threshold=self.resize_threshold,
+            training=self.training,
+            crop_shift_frac=self.crop_shift_frac,
+            crop_shift_p=self.crop_shift_p,
+            random_crop_p=self.random_crop_p,
+            zoom_range=self.zoom_range,
+            zoom_p=self.zoom_p,
+            max_shear_deg=self.max_shear_deg,
+            shear_p=self.shear_p,
+            wide_aspect_ratio_min=self.wide_aspect_ratio_min,
+            wide_aspect_shear_cap=self.wide_aspect_shear_cap,
+            aniso_scale_range=self.aniso_scale_range,
+            aniso_p=self.aniso_p,
+        )
 
         return video, segment_loader
 
