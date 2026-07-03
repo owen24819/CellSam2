@@ -2830,6 +2830,18 @@ class SAM2AutomaticCellTracker:
             if res_track[parent_row, 1] > division_frame - 1:
                 continue
 
+            # Skip when the mother is already gone at the new cell's start frame.
+            # Otherwise we invent a continued-daughter row with end < start (ghost track)
+            # and a one-daughter parent link that breaks Cell-HOTA.
+            old_end = int(res_track[parent_row, 2])
+            parent_at_division_frame = (
+                (tracking_results[division_frame] == global_parent).sum()
+                if division_frame < len(tracking_results)
+                else 0
+            )
+            if division_frame > old_end or parent_at_division_frame == 0:
+                continue
+
             # 1. Set parent for the new daughter
             res_track[matched_row_idx, 3] = global_parent
             del new_cells[matched_new_cell]
@@ -2839,7 +2851,6 @@ class SAM2AutomaticCellTracker:
             next_id += 1
 
             # 3. Truncate parent and add continued-daughter row
-            old_end = int(res_track[parent_row, 2])
             res_track[parent_row, 2] = division_frame - 1
             new_row = np.array([[new_daughter_id, division_frame, old_end, global_parent]])
             res_track = np.concatenate([res_track, new_row], axis=0)
