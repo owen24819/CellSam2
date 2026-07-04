@@ -2980,14 +2980,22 @@ class SAM2AutomaticCellTracker:
 
     def save_tracking_results(self, inference_state, tracking_results, alpha=0.3, crop_idx=None):
         res_path = inference_state["res_path"]
+        use_tracking_viz = not self.segment
 
-        if self.segment and self.aux_matching != "segment_then_aux_track":
-            num_colors = 10000
+        if use_tracking_viz:
+            max_cell_id = int(
+                max(
+                    (int(tm.max()) for tm in tracking_results if tm.size and tm.max() > 0),
+                    default=0,
+                )
+            )
+            max_cell_id = max(max_cell_id, int(inference_state.get("max_obj_id", 0)))
+            colors = np.random.randint(0, 255, (max_cell_id + 1, 3))
         else:
-            num_colors = (
-                inference_state["max_obj_id"] + 1
-            )  # Add 1 to account for 0-based indexing
-        colors = np.random.randint(0, 255, (num_colors, 3))
+            fill_color = np.array([0, 200, 255], dtype=np.uint8)
+            outline_color = (255, 255, 255)
+            outline_thickness = 1
+
         color_stack = np.zeros(
             (
                 len(tracking_results),
@@ -3004,114 +3012,103 @@ class SAM2AutomaticCellTracker:
         for frame_idx, track_mask in enumerate(tracking_results):
             frame_path = inference_state["frame_paths"][frame_idx]
             img = read_image(str(frame_path), return_np=True)
-            
-            # Crop image if crop_box is specified (for crop movies)
+
             if "crop_box" in inference_state:
                 x0, y0, x1, y1 = inference_state["crop_box"]
                 img = img[y0:y1, x0:x1]
 
-            # Create a colored overlay image
-            overlay = np.zeros_like(img)
-
             cell_ids = np.unique(track_mask)
-            cell_ids = cell_ids[cell_ids != 0]  # Exclude background (0)
+            cell_ids = cell_ids[cell_ids != 0]
 
-            # Add colored masks for each cell
-            for cell_id in cell_ids:
-                mask = track_mask == cell_id
-                overlay[mask] = colors[cell_id]
+            if use_tracking_viz:
+                overlay = np.zeros_like(img)
+                for cell_id in cell_ids:
+                    overlay[track_mask == cell_id] = colors[int(cell_id)]
+                blended = cv2.addWeighted(img, 1 - alpha, overlay, alpha, 0)
 
-            # Blend original image with colored overlay
-            color_stack[frame_idx] = cv2.addWeighted(img, 1 - alpha, overlay, alpha, 0)
+                for cell_id in cell_ids:
+                    mask = track_mask == cell_id
+                    y_coords, x_coords = np.where(mask)
+                    if len(y_coords) == 0:
+                        continue
+                    centroid_y = int(np.mean(y_coords))
+                    centroid_x = int(np.mean(x_coords))
+                    label = str(int(cell_id))
+                    (text_w, text_h), _ = cv2.getTextSize(
+                        label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+                    )
+                    cv2.putText(
+                        blended,
+                        label,
+                        (int(centroid_x - text_w / 2), int(centroid_y + text_h / 2)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (255, 255, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
 
-            for cell_id in cell_ids:
-                mask = track_mask == cell_id
-                y_coords, x_coords = np.where(mask)
-                if len(y_coords) == 0:
-                    continue
-
-                centroid_y = int(np.mean(y_coords))
-                centroid_x = int(np.mean(x_coords))
-
-                label = str(cell_id)
-                (text_w, text_h), _ = cv2.getTextSize(
-                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
-                )
-                origin_x = int(centroid_x - text_w / 2)
-                origin_y = int(centroid_y + text_h / 2)
-                cv2.putText(
-                    color_stack[frame_idx],
-                    label,
-                    (origin_x, origin_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,  # Font scale
-                    (255, 255, 255),  # black color
-                    1,  # Line thickness
-                    cv2.LINE_AA,
-                )
-
-            if not self.segment or self.aux_matching == "segment_then_aux_track":
-                # Use res_track to find divisions (more reliable than inference_state)
                 res_track = inference_state.get("res_track")
                 if res_track is not None and len(res_track) > 0:
-                    # Find all cells that exist in this frame
-                    cells_in_frame = []
-                    cell_info = {}  # {cell_id: (start_frame, end_frame, parent_id)}
+                    cell_info = {}
+                    parent_to_daughters = {}
                     for row in res_track:
                         cell_id, start_frame, end_frame, parent_id = row.astype(int)
                         if start_frame <= frame_idx <= end_frame:
-                            cells_in_frame.append((cell_id, parent_id))
                             cell_info[cell_id] = (start_frame, end_frame, parent_id)
-                    
-                    # Group by parent_id
-                    parent_to_daughters = {}
-                    for cell_id, parent_id in cells_in_frame:
-                        if parent_id != 0:
-                            if parent_id not in parent_to_daughters:
-                                parent_to_daughters[parent_id] = []
-                            parent_to_daughters[parent_id].append(cell_id)
-                    
-                    # Draw line between daughter cells only on the division frame
-                    # (when both daughters start at this frame)
+                            if parent_id != 0:
+                                parent_to_daughters.setdefault(parent_id, []).append(cell_id)
+
                     for parent_id, dau_cell_ids in parent_to_daughters.items():
-                        if len(dau_cell_ids) == 2:
-                            # Check if this is the division frame (both daughters start here)
-                            dau1_start = cell_info[dau_cell_ids[0]][0]
-                            dau2_start = cell_info[dau_cell_ids[1]][0]
-                            if dau1_start == frame_idx and dau2_start == frame_idx:
-                                # Get centroids of both daughter cells
-                                mask1 = track_mask == dau_cell_ids[0]
-                                y1, x1 = np.where(mask1)
-                                if len(y1) > 0:
-                                    centroid1_y = int(np.mean(y1))
-                                    centroid1_x = int(np.mean(x1))
+                        if len(dau_cell_ids) != 2:
+                            continue
+                        dau1_start = cell_info[dau_cell_ids[0]][0]
+                        dau2_start = cell_info[dau_cell_ids[1]][0]
+                        if dau1_start != frame_idx or dau2_start != frame_idx:
+                            continue
+                        mask1 = track_mask == dau_cell_ids[0]
+                        y1, x1 = np.where(mask1)
+                        mask2 = track_mask == dau_cell_ids[1]
+                        y2, x2 = np.where(mask2)
+                        if len(y1) > 0 and len(y2) > 0:
+                            cv2.line(
+                                blended,
+                                (int(np.mean(x1)), int(np.mean(y1))),
+                                (int(np.mean(x2)), int(np.mean(y2))),
+                                (0, 0, 0),
+                                1,
+                            )
+            else:
+                overlay = np.zeros_like(img)
+                for cell_id in cell_ids:
+                    overlay[track_mask == cell_id] = fill_color
+                blended = cv2.addWeighted(img, 1 - alpha, overlay, alpha, 0)
+                for cell_id in cell_ids:
+                    mask_u8 = (track_mask == cell_id).astype(np.uint8)
+                    contours, _ = cv2.findContours(
+                        mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                    )
+                    if contours:
+                        cv2.drawContours(
+                            blended,
+                            contours,
+                            -1,
+                            outline_color,
+                            outline_thickness,
+                            lineType=cv2.LINE_AA,
+                        )
 
-                                    mask2 = track_mask == dau_cell_ids[1]
-                                    y2, x2 = np.where(mask2)
-                                    if len(y2) > 0:
-                                        centroid2_y = int(np.mean(y2))
-                                        centroid2_x = int(np.mean(x2))
-
-                                        # Draw line connecting centroids
-                                        cv2.line(
-                                            color_stack[frame_idx],
-                                            (centroid1_x, centroid1_y),
-                                            (centroid2_x, centroid2_y),
-                                            (0, 0, 0),  # Black color
-                                            1,
-                                        )  # Line thickness
-
-            # Add frame number to top of frame
             cv2.putText(
-                color_stack[frame_idx],
+                blended,
                 f"{frame_idx:03}",
-                (0, 15),  # Position in top-left
+                (0, 15),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,  # Font scale
-                (255, 255, 255),  # White color
-                1,  # Line thickness
+                0.5,
+                (255, 255, 255),
+                1,
                 cv2.LINE_AA,
             )
+            color_stack[frame_idx] = blended
 
         # Save as video
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
