@@ -461,8 +461,8 @@ trainer:
       supervise_all_iou: true
       iou_use_l1_loss: true
       pred_obj_scores: true
-      focal_gamma_obj_score: 0.0
-      focal_alpha_obj_score: -1.0
+      focal_gamma_obj_score: 2.0
+      focal_alpha_obj_score: 0.25
       temporal_match_temperature: 2.0
       temporal_match_bce_weight: 0.5  # BCE on one-hot (push non-preds to 0); 0 = CE only
       temporal_match_aux_loss_weight: 0.3  # deep-supervision weight for intermediate block match logits
