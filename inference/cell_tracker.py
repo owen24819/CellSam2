@@ -1,4 +1,5 @@
 import math
+import os
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -125,6 +126,36 @@ class SAM2AutomaticCellTracker:
             max_hole_area=max_hole_area,
             max_sprinkle_area=max_sprinkle_area,
         )
+
+    def _div_debug_enabled(self):
+        return os.environ.get("CELLSAM2_DEBUG_DIV", "").lower() in ("1", "true", "yes")
+
+    def _div_debug_frame(self, frame_idx):
+        if not self._div_debug_enabled():
+            return False
+        spec = os.environ.get("CELLSAM2_DEBUG_DIV_FRAMES", "185-195")
+        if not spec.strip():
+            return True
+        if "-" in spec:
+            lo, hi = map(int, spec.split("-", 1))
+            return lo <= frame_idx <= hi
+        return frame_idx == int(spec)
+
+    def _div_debug_cells(self):
+        raw = os.environ.get("CELLSAM2_DEBUG_DIV_CELLS", "280,287,288")
+        if not raw.strip():
+            return None
+        return {int(x.strip()) for x in raw.split(",") if x.strip()}
+
+    def _div_debug(self, frame_idx, tag, msg, cell_ids=None):
+        if not self._div_debug_frame(frame_idx):
+            return
+        watch = self._div_debug_cells()
+        if watch is not None and cell_ids is not None:
+            ids = {int(c) for c in cell_ids}
+            if not ids & watch:
+                return
+        print(f"[DIV_DEBUG f={frame_idx:03d}] {tag}: {msg}", flush=True)
 
     def _list_frame_paths(self, video_path):
         video_path = Path(video_path)
@@ -1340,10 +1371,26 @@ class SAM2AutomaticCellTracker:
                         # Add to aux_parent_map for later use in building parent_map
                         aux_parent_map[new_daughter_id] = global_matched_id
                         aux_parent_map[seg_cell_id] = global_matched_id
+                        if self._div_debug_frame(frame_idx):
+                            self._div_debug(
+                                frame_idx,
+                                "aux/division",
+                                f"parent={global_matched_id} daughters={sorted(aux_frame_divisions[global_matched_id])} "
+                                f"(new_daughter_id={new_daughter_id}, seg_cell_id={seg_cell_id})",
+                                cell_ids=[global_matched_id, new_daughter_id, seg_cell_id],
+                            )
                         
                     # If multiple new cells match same parent, it's also a division
                     elif new_matches > 1:
                         aux_frame_divisions.setdefault(global_matched_id, set()).add(seg_cell_id)
+                        if self._div_debug_frame(frame_idx):
+                            self._div_debug(
+                                frame_idx,
+                                "aux/division",
+                                f"parent={global_matched_id} daughters={sorted(aux_frame_divisions[global_matched_id])} "
+                                f"(multi-match seg_cell_id={seg_cell_id})",
+                                cell_ids=[global_matched_id, seg_cell_id],
+                            )
                     else:
                         # Regular tracking (not a division) - relink to parent ID and apply to full_mask
                         relink_map[seg_cell_id] = global_matched_id
@@ -1452,7 +1499,36 @@ class SAM2AutomaticCellTracker:
                 # (cells can't be both child and parent)
                 for obj_id, parent_id in parent_map.items():
                     if parent_id in parent_map.keys():
+                        if self._div_debug_frame(frame_idx):
+                            self._div_debug(
+                                frame_idx,
+                                "global/parent_map_clear",
+                                f"cell {obj_id} had parent {parent_id} but is also a parent; clearing",
+                                cell_ids=[obj_id, parent_id],
+                            )
                         parent_map[obj_id] = 0
+
+                if self._div_debug_frame(frame_idx):
+                    watch = self._div_debug_cells()
+                    relevant_parent_map = {
+                        int(k): int(v)
+                        for k, v in parent_map.items()
+                        if watch is None or int(k) in watch or int(v) in watch
+                    }
+                    relevant_divisions = {
+                        int(k): sorted(int(d) for d in v)
+                        for k, v in frame_divisions.items()
+                        if watch is None or int(k) in watch or any(int(d) in watch for d in v)
+                    }
+                    mask_labels = sorted(int(c) for c in np.unique(full_mask) if c != 0)
+                    self._div_debug(
+                        frame_idx,
+                        "global/merge",
+                        f"mask_labels={mask_labels} parent_map={relevant_parent_map} "
+                        f"frame_divisions={relevant_divisions} aux_divisions="
+                        f"{{{', '.join(f'{int(k)}:{sorted(int(d) for d in v)}' for k, v in aux_frame_divisions.items())}}}",
+                        cell_ids=mask_labels,
+                    )
             else:
                 frame_divisions = None
 
@@ -2319,6 +2395,42 @@ class SAM2AutomaticCellTracker:
             inference_state["obj_ids"][frame_idx] = obj_ids
             inference_state["parent_ids"][frame_idx] = parent_ids
 
+            if self._div_debug_frame(frame_idx):
+                crop_tag = Path(inference_state.get("res_path", "crop")).name
+                obj_list = obj_ids.detach().cpu().numpy().tolist()
+                par_list = parent_ids.detach().cpu().numpy().tolist()
+                div_pairs = list(zip(obj_list, par_list, strict=False))
+                mothers = (
+                    mother_ids.detach().cpu().numpy().tolist()
+                    if torch.is_tensor(mother_ids)
+                    else list(mother_ids)
+                )
+                div_flags = (
+                    is_dividing.detach().cpu().numpy().tolist()
+                    if torch.is_tensor(is_dividing)
+                    else []
+                )
+                div_scores = {}
+                if torch.is_tensor(div_score_logits) and len(obj_list) > 0:
+                    for oid, score in zip(
+                        obj_ids.detach().cpu().numpy(),
+                        div_score_logits[:, 0].sigmoid().detach().cpu().numpy(),
+                        strict=False,
+                    ):
+                        div_scores[int(oid)] = float(score)
+                watched_scores = {
+                    oid: div_scores[oid]
+                    for oid in div_scores
+                    if self._div_debug_cells() is None or oid in self._div_debug_cells()
+                }
+                self._div_debug(
+                    frame_idx,
+                    f"model/{crop_tag}",
+                    f"is_dividing={div_flags} mothers={mothers} obj->parent={div_pairs} "
+                    f"div_scores={watched_scores}",
+                    cell_ids=obj_list,
+                )
+
         current_out["pred_masks_high_res"] = data["masks"]
         current_out["pred_object_score_logits"] = data["obj_scores"]
         current_out["obj_ptr"] = data["obj_ptr"]
@@ -2709,6 +2821,8 @@ class SAM2AutomaticCellTracker:
                 new_cells[int(cell_id)] = (row_idx, int(start_frame))
         
         if not new_cells:
+            if self._div_debug_enabled():
+                print("[DIV_DEBUG] postprocess: no new_cells to match", flush=True)
             return
         
         # Find all divisions across all crops using local_to_global mapping
@@ -2781,7 +2895,20 @@ class SAM2AutomaticCellTracker:
                                     divisions[(div_frame, global_parent)].add(mapped_global)
         
         if not divisions:
+            if self._div_debug_enabled():
+                print("[DIV_DEBUG] postprocess: no divisions detected across crops", flush=True)
             return
+        
+        if self._div_debug_enabled():
+            for (div_frame, global_parent), daughter_ids in divisions.items():
+                if self._div_debug_frame(div_frame):
+                    self._div_debug(
+                        div_frame,
+                        "postprocess/candidate",
+                        f"parent={global_parent} daughters={sorted(int(d) for d in daughter_ids)} "
+                        f"new_cells={sorted(new_cells.keys())}",
+                        cell_ids=[global_parent, *daughter_ids],
+                    )
         
         found_divisions = False
         processed_parents = set()
@@ -2803,6 +2930,14 @@ class SAM2AutomaticCellTracker:
                         break
             
             if matched_new_cell is None:
+                if self._div_debug_frame(div_frame):
+                    self._div_debug(
+                        div_frame,
+                        "postprocess/skip",
+                        f"parent={global_parent}: no daughter matched a new_cell "
+                        f"(daughters={sorted(int(d) for d in daughter_ids)})",
+                        cell_ids=[global_parent, *daughter_ids],
+                    )
                 continue
             
             # Verify parent existed at div_frame - 1
@@ -2811,11 +2946,25 @@ class SAM2AutomaticCellTracker:
                 continue
             parent_prev_count = (tracking_results[prev_frame] == global_parent).sum()
             if parent_prev_count == 0:
+                if self._div_debug_frame(div_frame):
+                    self._div_debug(
+                        div_frame,
+                        "postprocess/skip",
+                        f"parent={global_parent}: parent absent in prev_frame={prev_frame}",
+                        cell_ids=[global_parent],
+                    )
                 continue
             
             # Verify parent still exists at div_frame (continued as one daughter)
             parent_div_count = (tracking_results[div_frame] == global_parent).sum()
             if parent_div_count == 0:
+                if self._div_debug_frame(div_frame):
+                    self._div_debug(
+                        div_frame,
+                        "postprocess/skip",
+                        f"parent={global_parent}: parent absent at div_frame={div_frame}",
+                        cell_ids=[global_parent],
+                    )
                 continue
             
             division_frame = new_cells[matched_new_cell][1]
@@ -2823,11 +2972,26 @@ class SAM2AutomaticCellTracker:
             # Skip if global_parent is not in res_track
             parent_rows = np.where(res_track[:, 0] == global_parent)[0]
             if len(parent_rows) == 0:
+                if self._div_debug_frame(div_frame):
+                    self._div_debug(
+                        div_frame,
+                        "postprocess/skip",
+                        f"parent={global_parent}: not found in res_track",
+                        cell_ids=[global_parent],
+                    )
                 continue
             parent_row = parent_rows[0]
 
             # Skip if parent didn't exist before division (start_frame > division_frame - 1)
             if res_track[parent_row, 1] > division_frame - 1:
+                if self._div_debug_frame(div_frame):
+                    self._div_debug(
+                        div_frame,
+                        "postprocess/skip",
+                        f"parent={global_parent}: parent start {int(res_track[parent_row, 1])} "
+                        f"> division_frame-1={division_frame - 1}",
+                        cell_ids=[global_parent],
+                    )
                 continue
 
             # Skip when the mother is already gone at the new cell's start frame.
@@ -2840,7 +3004,25 @@ class SAM2AutomaticCellTracker:
                 else 0
             )
             if division_frame > old_end or parent_at_division_frame == 0:
+                if self._div_debug_frame(div_frame):
+                    self._div_debug(
+                        div_frame,
+                        "postprocess/skip",
+                        f"parent={global_parent}: mother gone at division_frame={division_frame} "
+                        f"(old_end={old_end}, parent_pixels={int(parent_at_division_frame)}, "
+                        f"matched_new_cell={matched_new_cell})",
+                        cell_ids=[global_parent, matched_new_cell],
+                    )
                 continue
+
+            if self._div_debug_frame(div_frame):
+                self._div_debug(
+                    div_frame,
+                    "postprocess/apply",
+                    f"parent={global_parent} matched_new_cell={matched_new_cell} "
+                    f"division_frame={division_frame} daughters={sorted(int(d) for d in daughter_ids)}",
+                    cell_ids=[global_parent, matched_new_cell, *daughter_ids],
+                )
 
             # 1. Set parent for the new daughter
             res_track[matched_row_idx, 3] = global_parent
@@ -2961,6 +3143,13 @@ class SAM2AutomaticCellTracker:
 
             for cell_id, parent_id in zip(cell_ids, parent_ids, strict=False):
                 if cell_id not in res_track[:, 0]:
+                    if self._div_debug_frame(frame_idx):
+                        self._div_debug(
+                            frame_idx,
+                            "res_track/new",
+                            f"cell {int(cell_id)} born with parent {int(parent_id)}",
+                            cell_ids=[cell_id, parent_id],
+                        )
                     res_track = np.concatenate(
                         [
                             res_track,
