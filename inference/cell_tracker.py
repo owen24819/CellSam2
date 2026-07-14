@@ -157,6 +157,58 @@ class SAM2AutomaticCellTracker:
                 return
         print(f"[DIV_DEBUG f={frame_idx:03d}] {tag}: {msg}", flush=True)
 
+    def _sanitize_incomplete_divisions(self, full_mask, parent_map, frame_idx):
+        """Fix incomplete / false divisions before writing CTC output.
+
+        A valid CTC mitosis is: mother absent, exactly two daughters sharing that
+        parent. Common failure mode: mother splits locally,
+        merge keeps only one daughter, and we write a one-daughter parent link that
+        both breaks Cell-HOTA and invents a new track for the same physical cell.
+
+        - Mother gone + 1 daughter on mask → remask daughter back to mother ID
+        - Any other incomplete parent group → clear those parent links
+        """
+        if not parent_map:
+            return full_mask, parent_map
+
+        mask_ids = {int(c) for c in np.unique(full_mask) if c != 0}
+        parent_to_kids = {}
+        for kid, par in list(parent_map.items()):
+            kid, par = int(kid), int(par)
+            if par == 0 or kid not in mask_ids:
+                continue
+            parent_to_kids.setdefault(par, []).append(kid)
+
+        for par, kids in parent_to_kids.items():
+            kids = sorted(set(kids))
+            parent_on_mask = par in mask_ids
+            if len(kids) == 2 and not parent_on_mask:
+                continue  # valid mitosis
+            if len(kids) == 1 and not parent_on_mask:
+                dau = kids[0]
+                full_mask[full_mask == dau] = par
+                parent_map.pop(dau, None)
+                parent_map.pop(par, None)
+                self._div_debug(
+                    frame_idx,
+                    "sanitize/collapse",
+                    f"incomplete division parent={par}: remasked daughter {dau} -> {par}",
+                    cell_ids=[par, dau],
+                )
+            else:
+                for dau in kids:
+                    if parent_map.get(dau, 0) == par:
+                        parent_map[dau] = 0
+                self._div_debug(
+                    frame_idx,
+                    "sanitize/clear",
+                    f"incomplete parent={par} kids={kids} parent_on_mask={parent_on_mask}: "
+                    f"cleared parent links",
+                    cell_ids=[par, *kids],
+                )
+
+        return full_mask, parent_map
+
     def _list_frame_paths(self, video_path):
         video_path = Path(video_path)
         frame_paths = [
@@ -1531,6 +1583,25 @@ class SAM2AutomaticCellTracker:
                     )
             else:
                 frame_divisions = None
+                parent_map = {}
+
+            if not self.segment or self.aux_matching == "segment_then_aux_track":
+                full_mask, parent_map = self._sanitize_incomplete_divisions(
+                    full_mask, parent_map, frame_idx
+                )
+                # Rebuild frame_divisions from sanitized parent_map so assignments
+                # only see complete 2-daughter mitoses on the global mask.
+                sanitized_divisions = {}
+                mask_ids = {int(c) for c in np.unique(full_mask) if c != 0}
+                for kid, par in parent_map.items():
+                    kid, par = int(kid), int(par)
+                    if par != 0 and kid in mask_ids:
+                        sanitized_divisions.setdefault(par, set()).add(kid)
+                frame_divisions = {
+                    par: kids
+                    for par, kids in sanitized_divisions.items()
+                    if len(kids) == 2 and par not in mask_ids
+                }
 
             if frame_idx < num_frames:
                 # Compute new assignments for current frame (to use in next frame)
@@ -2202,6 +2273,33 @@ class SAM2AutomaticCellTracker:
             is_dividing,
         ) = sam_outputs
 
+        # Suppress division on cells that were just born as daughters. Consecutive-frame
+        # mitosis is almost always a false positive
+        cooldown = int(os.environ.get("CELLSAM2_DIV_COOLDOWN", "2"))
+        if (
+            cooldown > 0
+            and obj_ids is not None
+            and torch.is_tensor(is_dividing)
+            and is_dividing.any()
+        ):
+            is_dividing = is_dividing.clone()
+            birth = inference_state.get("daughter_birth_frame", {})
+            suppressed = []
+            for i, oid in enumerate(obj_ids):
+                oid_int = int(oid.item())
+                if bool(is_dividing[i]) and oid_int in birth:
+                    if frame_idx - birth[oid_int] < cooldown:
+                        is_dividing[i] = False
+                        suppressed.append(oid_int)
+            if suppressed and self._div_debug_frame(frame_idx):
+                self._div_debug(
+                    frame_idx,
+                    "model/cooldown",
+                    f"suppressed division for recently-born cells={suppressed} "
+                    f"(cooldown={cooldown})",
+                    cell_ids=suppressed,
+                )
+
         #
         save_masks = torch.zeros_like(high_res_masks)
 
@@ -2378,6 +2476,9 @@ class SAM2AutomaticCellTracker:
                     mask1 = obj_ids == pair_daughter_ids[1]
                     parent_ids[mask0] = mother_id
                     parent_ids[mask1] = mother_id
+                    birth = inference_state.setdefault("daughter_birth_frame", {})
+                    birth[int(pair_daughter_ids[0].item())] = frame_idx
+                    birth[int(pair_daughter_ids[1].item())] = frame_idx
                 else:
                     # if one of the daughter cells is not in the final_obj_ids due to nms, then the other daughter cell must be the mother cell
                     dau_id = (
