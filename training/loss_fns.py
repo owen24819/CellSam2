@@ -348,12 +348,14 @@ class MultiStepMultiMasksAndIous(nn.Module):
                 gamma=self.focal_gamma_obj_score,
             )
 
+        # Plain BCE for division score (not focal). Focal on the rare positive
+        # mitosis class over-emphasizes hard/false divisions.
         loss_div = sigmoid_focal_loss(
             div_score_logits,
             target_obj_divides,
             num_objects,
-            alpha=self.focal_alpha_obj_score,
-            gamma=self.focal_gamma_obj_score,
+            alpha=-1,
+            gamma=0.0,
         )
 
         loss_iou = iou_loss(
