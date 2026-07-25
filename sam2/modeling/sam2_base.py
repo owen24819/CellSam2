@@ -318,6 +318,7 @@ class SAM2Base(torch.nn.Module):
         high_res_features=None,
         is_dividing=None,
         gt_masks=None,
+        force_not_dividing=None,
     ):
         """
         Forward SAM prompt encoders and mask heads.
@@ -336,6 +337,7 @@ class SAM2Base(torch.nn.Module):
           which will be used as high-resolution feature maps for SAM decoder.
         - is_dividing: Optional tensor indicating which cells are dividing
         - gt_masks: Optional ground truth masks for training
+        - force_not_dividing: Optional [B] bool; suppress mitosis before post_div expand
 
         Outputs:
         - ious: [B, 1] shape, the estimated IoU of each output mask.
@@ -407,6 +409,7 @@ class SAM2Base(torch.nn.Module):
             high_res_features=high_res_features,
             is_dividing=is_dividing,
             gt_masks=gt_masks,
+            force_not_dividing=force_not_dividing,
         )
 
         num_non_dividing_cells = (~is_dividing).sum()
@@ -775,6 +778,7 @@ class SAM2Base(torch.nn.Module):
         memory_dict,
         is_dividing=None,
         gt_masks=None,
+        force_not_dividing=None,
     ):
         current_out = {"point_inputs": point_inputs, "mask_inputs": mask_inputs}
         # High-resolution feature maps for the SAM head, reshape (HW)BC => BCHW
@@ -819,6 +823,7 @@ class SAM2Base(torch.nn.Module):
                 high_res_features=high_res_features,
                 is_dividing=is_dividing,
                 gt_masks=gt_masks,
+                force_not_dividing=force_not_dividing,
             )
 
         return current_out, sam_outputs, high_res_features, pix_feat

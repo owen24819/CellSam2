@@ -157,6 +157,42 @@ class SAM2AutomaticCellTracker:
                 return
         print(f"[DIV_DEBUG f={frame_idx:03d}] {tag}: {msg}", flush=True)
 
+    def _division_cooldown_mask(self, inference_state, frame_idx, tracking_object_ids):
+        """Bool mask over pre-div cells that must not divide (recently born daughters).
+
+        Applied in the mask decoder *before* post_div expansion so obj_ids and
+        post_div tensors stay the same length. Blocks consecutive-frame false
+        mitosis (e.g. moma/11: 280 born at f189, falsely divided at f190).
+        """
+        if tracking_object_ids is None or len(tracking_object_ids) == 0:
+            return None
+        cooldown = int(os.environ.get("CELLSAM2_DIV_COOLDOWN", "2"))
+        if cooldown <= 0:
+            return None
+        birth = inference_state.get("daughter_birth_frame", {})
+        if not birth:
+            return None
+        force_not_dividing = torch.zeros(
+            len(tracking_object_ids),
+            dtype=torch.bool,
+            device=tracking_object_ids.device,
+        )
+        suppressed = []
+        for i, oid in enumerate(tracking_object_ids):
+            oid_int = int(oid.item())
+            if oid_int in birth and frame_idx - birth[oid_int] < cooldown:
+                force_not_dividing[i] = True
+                suppressed.append(oid_int)
+        if suppressed and self._div_debug_frame(frame_idx):
+            self._div_debug(
+                frame_idx,
+                "model/cooldown",
+                f"suppressed division for recently-born cells={suppressed} "
+                f"(cooldown={cooldown})",
+                cell_ids=suppressed,
+            )
+        return force_not_dividing if force_not_dividing.any() else None
+
     def _list_frame_paths(self, video_path):
         video_path = Path(video_path)
         frame_paths = [
@@ -1824,6 +1860,9 @@ class SAM2AutomaticCellTracker:
                         prev_sam_mask_logits=None,
                         tracking_object_ids=tracking_object_ids,
                         memory_dict=inference_state["memory_dict"],
+                        force_not_dividing=self._division_cooldown_mask(
+                            inference_state, frame_idx, tracking_object_ids
+                        ),
                     )
                 )
 
@@ -2378,6 +2417,9 @@ class SAM2AutomaticCellTracker:
                     mask1 = obj_ids == pair_daughter_ids[1]
                     parent_ids[mask0] = mother_id
                     parent_ids[mask1] = mother_id
+                    birth = inference_state.setdefault("daughter_birth_frame", {})
+                    birth[int(pair_daughter_ids[0].item())] = frame_idx
+                    birth[int(pair_daughter_ids[1].item())] = frame_idx
                 else:
                     # if one of the daughter cells is not in the final_obj_ids due to nms, then the other daughter cell must be the mother cell
                     dau_id = (

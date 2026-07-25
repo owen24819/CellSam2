@@ -137,6 +137,7 @@ class MaskDecoder(nn.Module):
         high_res_features: Optional[List[torch.Tensor]] = None,
         is_dividing: Optional[torch.Tensor] = None,
         gt_masks: Optional[torch.Tensor] = None,
+        force_not_dividing: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Predict masks given image and prompt embeddings.
@@ -150,6 +151,8 @@ class MaskDecoder(nn.Module):
           high_res_features (Optional[List[torch.Tensor]]): optional high resolution features
           is_dividing (Optional[torch.Tensor]): optional tensor indicating dividing cells for training
           gt_masks (Optional[torch.Tensor]): ground truth masks for training
+          force_not_dividing (Optional[torch.Tensor]): optional [B] bool mask; True means
+            suppress mitosis for that cell before post_div expansion (e.g. birth cooldown)
 
         Returns:
           torch.Tensor: batched predicted masks
@@ -175,7 +178,13 @@ class MaskDecoder(nn.Module):
         
         # Ensure is_dividing is a flat boolean tensor
         is_dividing = is_dividing.view(-1)
-        
+        # Apply overrides before expanding daughter slots so post_div stays aligned
+        # with downstream obj_ids expansion.
+        if force_not_dividing is not None:
+            is_dividing = is_dividing & ~force_not_dividing.to(
+                device=is_dividing.device, dtype=torch.bool
+            ).view(-1)
+
         # Create masks for dividing and non-dividing cells
         div_mask = is_dividing  # [B] bool
         no_div_mask = ~div_mask
