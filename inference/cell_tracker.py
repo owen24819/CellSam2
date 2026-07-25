@@ -157,6 +157,84 @@ class SAM2AutomaticCellTracker:
                 return
         print(f"[DIV_DEBUG f={frame_idx:03d}] {tag}: {msg}", flush=True)
 
+    def _finalize_lineage(self, full_mask, parent_map, frame_idx):
+        """Enforce CTC mitosis invariant against the pixels that actually survived merge.
+
+        A valid CTC mitosis is: mother absent from the mask, exactly two daughters
+        present, both pointing at that mother. Crop tracking can report a clean
+        2-daughter split while merge later drops one daughter (or invents a
+        parent-0 cell). Writing that to res_track produces a one-daughter division
+        that breaks Cell-HOTA.
+
+        This reconciles parent_map with full_mask *before* res_track / assignments:
+        - drop parent links for cells not on the mask
+        - mother gone + 2 daughters on mask → keep (valid)
+        - mother gone + 1 daughter on mask → remask daughter back to mother ID
+          (incomplete split; continue the mother track rather than invent lineage)
+        - any other incomplete parent group → clear those parent links
+        """
+        if not parent_map:
+            return full_mask, parent_map, {}
+
+        mask_ids = {int(c) for c in np.unique(full_mask) if c != 0}
+
+        # Drop parent entries for cells that never made it onto the global mask
+        # (e.g. l2g fallback previously left orphans like 286 in parent_map).
+        for kid in list(parent_map.keys()):
+            if int(kid) not in mask_ids:
+                parent_map.pop(kid, None)
+
+        parent_to_kids = {}
+        for kid, par in list(parent_map.items()):
+            kid, par = int(kid), int(par)
+            if par == 0:
+                continue
+            parent_to_kids.setdefault(par, []).append(kid)
+
+        for par, kids in parent_to_kids.items():
+            kids = sorted(set(kids))
+            parent_on_mask = par in mask_ids
+            if len(kids) == 2 and not parent_on_mask:
+                continue  # valid mitosis
+            if len(kids) == 1 and not parent_on_mask:
+                dau = kids[0]
+                full_mask[full_mask == dau] = par
+                parent_map.pop(dau, None)
+                parent_map.pop(par, None)
+                mask_ids.discard(dau)
+                mask_ids.add(par)
+                self._div_debug(
+                    frame_idx,
+                    "lineage/collapse",
+                    f"incomplete division parent={par}: remasked daughter {dau} -> {par}",
+                    cell_ids=[par, dau],
+                )
+            else:
+                for dau in kids:
+                    if parent_map.get(dau, 0) == par:
+                        parent_map[dau] = 0
+                self._div_debug(
+                    frame_idx,
+                    "lineage/clear",
+                    f"incomplete parent={par} kids={kids} parent_on_mask={parent_on_mask}: "
+                    f"cleared parent links",
+                    cell_ids=[par, *kids],
+                )
+
+        # Rebuild complete 2-daughter divisions from the reconciled map
+        sanitized_divisions = {}
+        mask_ids = {int(c) for c in np.unique(full_mask) if c != 0}
+        for kid, par in parent_map.items():
+            kid, par = int(kid), int(par)
+            if par != 0 and kid in mask_ids:
+                sanitized_divisions.setdefault(par, set()).add(kid)
+        frame_divisions = {
+            par: kids
+            for par, kids in sanitized_divisions.items()
+            if len(kids) == 2 and par not in mask_ids
+        }
+        return full_mask, parent_map, frame_divisions
+
     def _division_cooldown_mask(self, inference_state, frame_idx, tracking_object_ids):
         """Bool mask over pre-div cells that must not divide (recently born daughters).
 
@@ -1500,8 +1578,15 @@ class SAM2AutomaticCellTracker:
                     for obj_id, parent_id in zip(local_ids, local_parents, strict=False):
                         local_obj_int = int(obj_id)
                         local_parent_int = int(parent_id)
-                        global_obj = l2g.get(local_obj_int, local_obj_int)
-                        
+
+                        # Parent links must refer to cells that actually landed on
+                        # the global mask. The old l2g.get(local, local) fallback
+                        # left orphans in parent_map (e.g. 286 parented but absent
+                        # from mask_labels) which then wrote one-daughter res_track.
+                        if local_obj_int not in l2g:
+                            continue
+                        global_obj = l2g[local_obj_int]
+
                         # Build parent_map
                         if local_parent_int == 0:
                             parent_map.setdefault(global_obj, 0)
@@ -1510,24 +1595,20 @@ class SAM2AutomaticCellTracker:
                             global_par = l2g.get(local_parent_int)
                             if global_par is None:
                                 global_par = prev_l2g.get(local_parent_int)
-                            
+
                             # Only process if parent exists and is valid
                             if global_par is not None and global_par != global_obj:
                                 # Only assign parent if it was assigned to this crop in previous frame (predicted division)
                                 if frame_idx > 0 and global_par in prev_assignments:
                                     # Parent was assigned to this crop, so it predicted a division
                                     parent_map[global_obj] = global_par
-                                    
-                                    # Build frame_divisions: only add if parent was assigned to this crop
-                                    # Use global_obj if it was mapped (not fallback), otherwise skip
-                                    if local_obj_int in l2g:
-                                        frame_divisions.setdefault(global_par, set()).add(global_obj)
+                                    frame_divisions.setdefault(global_par, set()).add(global_obj)
                                 # Otherwise, let postprocess_divisions handle it
-                
+
                 # Discard divisions that don't have exactly two daughter cells
                 frame_divisions = {
-                    parent: daughters 
-                    for parent, daughters in frame_divisions.items() 
+                    parent: daughters
+                    for parent, daughters in frame_divisions.items()
                     if len(daughters) == 2
                 }
 
@@ -1543,6 +1624,12 @@ class SAM2AutomaticCellTracker:
                                 cell_ids=[obj_id, parent_id],
                             )
                         parent_map[obj_id] = 0
+
+                # Reconcile parent_map with pixels that survived merge so res_track
+                # never records a one-daughter / incomplete mitosis.
+                full_mask, parent_map, frame_divisions = self._finalize_lineage(
+                    full_mask, parent_map, frame_idx
+                )
 
                 if self._div_debug_frame(frame_idx):
                     watch = self._div_debug_cells()
