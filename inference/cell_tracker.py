@@ -1,4 +1,5 @@
 import math
+import time
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -15,6 +16,11 @@ from sam2.utils.amg import (
 )
 from sam2.utils.misc import read_image
 from sam2.utils.transforms import SAM2Transforms
+from frame_timer import (
+    FrameMetricsRecorder,
+    find_gt_mask_for_frame,
+    record_frame_inference_metrics,
+)
 
 
 class SAM2AutomaticCellTracker:
@@ -36,14 +42,15 @@ class SAM2AutomaticCellTracker:
         resize_threshold: Optional[int] = None,
         crop_overlap: int = 64,
         heatmap_debug: bool = False,
-        heatmap_min_dist: int = 2,
-        heatmap_threshold: float = 0.1,
+        heatmap_min_dist: int = 2, #was 4, then 6
+        heatmap_threshold: float = 0.8, #was 0.1, then 0.6, then 0.9 (1.0 gave zero detections)
         heatmap_topk: int = 0,
         segmentation_merge_iou_thresh: float = 0.5,
         crop_reassign_iou_thresh: float = 0.7,
         save_crop_movies: bool = False,
         postprocess_divisions: bool = False,
         aux_matching: Literal["off", "new_cells_only", "segment_then_aux_track"] = "off",
+        save_prediction_videos: bool = False,
     ) -> None:
         """Initialize SAM2AutomaticCellTracker.
         
@@ -118,6 +125,8 @@ class SAM2AutomaticCellTracker:
 
         if self.aux_matching == "segment_then_aux_track":
             self.segment = True
+
+        self.save_prediction_videos = save_prediction_videos
 
         self._transforms = SAM2Transforms(
             resolution=self.model.image_size,
@@ -997,6 +1006,8 @@ class SAM2AutomaticCellTracker:
         offload_video_to_cpu=True,
         offload_state_to_cpu=False,
         max_frame_num_to_track=None,
+        frame_metrics_csv: Path | None = None,
+        gt_seg_dir: Path | None = None,
     ):
         """Predict and track cells throughout an image sequence directory.
 
@@ -1016,9 +1027,24 @@ class SAM2AutomaticCellTracker:
             offload_state_to_cpu=offload_state_to_cpu,
             max_frame_num_to_track=max_frame_num_to_track,
         )
-        return self._predict_from_states(tiled_states, crop_centers, res_path, video_path)
+        return self._predict_from_states(
+            tiled_states,
+            crop_centers,
+            res_path,
+            video_path,
+            frame_metrics_csv=frame_metrics_csv,
+            gt_seg_dir=gt_seg_dir,
+        )
 
-    def _predict_from_states(self, tiled_states, crop_centers, res_path, video_path):
+    def _predict_from_states(
+        self,
+        tiled_states,
+        crop_centers,
+        res_path,
+        video_path,
+        frame_metrics_csv: Path | None = None,
+        gt_seg_dir: Path | None = None,
+    ):
 
         generators = []
         for state in tiled_states:
@@ -1051,7 +1077,13 @@ class SAM2AutomaticCellTracker:
         # Store crop tracking results if saving crop movies
         crop_tracking_results = [[] for _ in tiled_states] if self.save_crop_movies else None
         
+        metrics_recorder = (
+            FrameMetricsRecorder(frame_metrics_csv) if frame_metrics_csv is not None else None
+        )
+
         for frame_idx in tqdm(range(num_frames), desc="propagate in video"):
+            torch.cuda.synchronize()
+            frame_start = time.perf_counter()
             aux_parent_map = {}
             aux_frame_divisions = {}
             relink_map = {}
@@ -1362,6 +1394,20 @@ class SAM2AutomaticCellTracker:
                 parent_ids, device=self.device, dtype=torch.int32
             )
 
+            if metrics_recorder is not None:
+                frame_name = f"{frame_idx:03d}"
+                frame_paths = global_state.get("frame_paths")
+                if frame_paths is not None and frame_idx < len(frame_paths):
+                    frame_name = Path(frame_paths[frame_idx]).stem
+                gt_mask_path = find_gt_mask_for_frame(gt_seg_dir, frame_name)
+                record_frame_inference_metrics(
+                    metrics_recorder,
+                    frame_name,
+                    frame_start,
+                    gt_mask=gt_mask_path,
+                    pred_mask=full_mask,
+                )
+
             self.save_ctc(full_mask, frame_idx, global_state)
 
         # Post-process divisions across crops
@@ -1378,6 +1424,8 @@ class SAM2AutomaticCellTracker:
         global_state["max_obj_id"] = max_obj_id
 
         self.save_tracking_results(global_state, tracking_results)
+        if metrics_recorder is not None:
+            metrics_recorder.close()
         
         # Save individual crop movies if requested
         if self.save_crop_movies and crop_tracking_results:
@@ -2979,20 +3027,21 @@ class SAM2AutomaticCellTracker:
                 cv2.LINE_AA,
             )
 
-        # Save as video
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        mode = "segment" if self.segment else "track"
-        video_filename = f"pred_{mode}_video.mp4"
-        if crop_idx is not None:
-            video_filename = f"pred_{mode}_video_crop_{crop_idx}.mp4"
-        out = cv2.VideoWriter(
-            str(res_path / video_filename),
-            fourcc,
-            10.0,  # 10 fps
-            (inference_state["video_width"], inference_state["video_height"]),
-        )
+        if self.save_prediction_videos:
+            # Save as video
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            mode = "segment" if self.segment else "track"
+            video_filename = f"pred_{mode}_video.mp4"
+            if crop_idx is not None:
+                video_filename = f"pred_{mode}_video_crop_{crop_idx}.mp4"
+            out = cv2.VideoWriter(
+                str(res_path / video_filename),
+                fourcc,
+                10.0,  # 10 fps
+                (inference_state["video_width"], inference_state["video_height"]),
+            )
 
-        for frame in color_stack:
-            out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            for frame in color_stack:
+                out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
 
-        out.release()
+            out.release()
