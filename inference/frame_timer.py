@@ -64,7 +64,7 @@ class FrameMetricsRecorder:
         self._file = open(self.output_csv, "w", newline="")
         self._writer = csv.writer(self._file)
         self._writer.writerow(
-            ["frame", "seconds", "fps", "gt_cells", "detected_cells"]
+            ["frame", "seconds", "fps", "gt_cells", "detected_cells", "t_start", "t_end"]
         )
 
     def record_frame(
@@ -74,6 +74,7 @@ class FrameMetricsRecorder:
         *,
         gt_mask: Any | None = None,
         pred_mask: Any | None = None,
+        start_time: float | None = None,
     ) -> None:
         gt_cells = -1 if gt_mask is None else count_instance_cells(gt_mask)
         detected_cells = (
@@ -90,6 +91,8 @@ class FrameMetricsRecorder:
                 f"{fps:.6f}",
                 gt_cells,
                 detected_cells,
+                "" if start_time is None else f"{start_time:.6f}",
+                "" if start_time is None else f"{start_time + elapsed_seconds:.6f}",
             ]
         )
         self._file.flush()
@@ -113,10 +116,13 @@ def record_frame_inference_metrics(
     gt_mask: Any | None = None,
     pred_mask: Any | None = None,
 ) -> None:
-    torch.cuda.synchronize()
+    # Current stream only: a device-wide sync would also wait on other threads' streams
+    # when several trackers share one model (benchmarks/shared_model_benchmark.py).
+    torch.cuda.current_stream().synchronize()
     recorder.record_frame(
         frame_name=frame_name,
         elapsed_seconds=time.perf_counter() - start_time,
         gt_mask=gt_mask,
         pred_mask=pred_mask,
+        start_time=start_time,
     )
