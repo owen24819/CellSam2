@@ -42,8 +42,8 @@ class SAM2AutomaticCellTracker:
         resize_threshold: Optional[int] = None,
         crop_overlap: int = 64,
         heatmap_debug: bool = False,
-        heatmap_min_dist: int = 2, #was 4, then 6
-        heatmap_threshold: float = 0.8, #was 0.1, then 0.6, then 0.9 (1.0 gave zero detections)
+        heatmap_min_dist: int = 2, #was 2, then 4, then 6
+        heatmap_threshold: float = 0.8, #was 0.1, then 0.6, then 0.8, then 0.9 (1.0 gave zero detections)
         heatmap_topk: int = 0,
         segmentation_merge_iou_thresh: float = 0.5,
         crop_reassign_iou_thresh: float = 0.7,
@@ -1082,7 +1082,7 @@ class SAM2AutomaticCellTracker:
         )
 
         for frame_idx in tqdm(range(num_frames), desc="propagate in video"):
-            torch.cuda.synchronize()
+            torch.cuda.current_stream().synchronize()
             frame_start = time.perf_counter()
             aux_parent_map = {}
             aux_frame_divisions = {}
